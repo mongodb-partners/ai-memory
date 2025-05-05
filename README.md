@@ -107,7 +107,7 @@ flowchart TD
     Start([New Content]) --> Embed[Generate Embeddings]
     Embed --> CheckSim{Similar Memory Exists?}
     
-    CheckSim -->|>0.85 Similar| Reinforce[Reinforce Existing Memory]
+    CheckSim -->|Is >0.85 Similar| Reinforce[Reinforce Existing Memory]
     CheckSim -->|Not Similar| Assess[Assess Importance with LLM]
     
     Assess --> CreateSumm[Generate Summary]
