@@ -1,0 +1,7 @@
+fastapi==0.115.8
+uvicorn==0.34.0
+python-dotenv==1.0.1
+pymongo==4.11.1
+boto3==1.36.26
+httpx==0.27.2
+numpy==1.26.4
