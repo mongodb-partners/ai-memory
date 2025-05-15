@@ -13,13 +13,17 @@ async def find_similar_memories(
     user_id: str, embedding: List[float], top_n: int = 3
 ) -> List[Dict]:
     """
-    Find most similar memory nodes from the memory tree using vector search
-
+    Find most similar memory nodes from the memory tree using vector search. Returns memories ranked by 
+    a combination of vector similarity and effective importance (which balances inherent information value 
+    with usage patterns). While raw importance represents the AI-assessed significance of information on 
+    a 0.1-1.0 scale, effective importance (importance * (1 + ln(access_count + 1))) amplifies this based 
+    on access frequency, creating a memory retrieval system that adapts to both content quality and user 
+    interaction patterns.
+    
     Args:
         user_id: User ID to filter by
         embedding: Query embedding vector
         top_n: Number of similar memories to return
-
     Returns:
         List of similar memory nodes with similarity scores
     """
