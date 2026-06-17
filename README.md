@@ -1,5 +1,7 @@
 # AI-Memory-Service
 
+> Check out [**memory-mcp**](https://github.com/mongodb-partners/memory-mcp) — the new and improved, advanced MCP (Model Context Protocol) implementation of the AI Memory Service. It supersedes this project with native MCP support and enhanced capabilities.
+
 ## Table of Contents
 1. [Overview](#1-overview)
 2. [System Architecture](#2-system-architecture)
