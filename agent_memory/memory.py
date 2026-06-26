@@ -94,13 +94,33 @@ class AsyncMemory:
         # 6. Workers (conditional on the SP1 seam)
         await self._maybe_start_workers()
 
-        # 7. Stage-2 Atlas Search indexes (background, non-fatal)
-        self._search_index_task = asyncio.create_task(
-            _ensure_search_indexes_bg(db, config.embedding_dimension)
-        )
+        # 7. Stage-2 Atlas Search indexes (awaited or backgrounded per config)
+        await self._provision_search_indexes(db, config)
 
         logger.info("AsyncMemory started (workers_in_process=%s)", config.workers_in_process)
         return self
+
+    async def _provision_search_indexes(self, db, config, ensure=None) -> None:
+        """Create Atlas Search indexes — awaited or backgrounded per config.
+
+        ``await_search_indexes=True`` blocks until indexes are queryable (right
+        for short-lived library/script callers, which would otherwise exit
+        before background creation finishes and see empty search/recall).
+        ``False`` (default) schedules a non-blocking background task for
+        long-running servers. ``ensure`` is injectable for testing.
+        """
+        from agent_memory.core.migrations import ensure_search_indexes
+
+        ensure = ensure or ensure_search_indexes
+        self._search_index_task = None
+        if config.await_search_indexes:
+            await ensure(db, embedding_dimension=config.embedding_dimension)
+        else:
+            self._search_index_task = asyncio.create_task(
+                _ensure_search_indexes_bg(
+                    db, config.embedding_dimension, ensure=ensure
+                )
+            )
 
     async def _seed_defaults(self) -> None:
         if self.governance_service is not None:
@@ -351,12 +371,13 @@ class AsyncMemory:
         return await self._run(user_id, "wipe_user_data", "admin", _do)
 
 
-async def _ensure_search_indexes_bg(db, embedding_dimension: int = 1536) -> None:
+async def _ensure_search_indexes_bg(db, embedding_dimension: int = 1536, ensure=None) -> None:
     """Background Atlas Search index creation — failures are non-fatal."""
     from agent_memory.core.migrations import ensure_search_indexes
 
+    ensure = ensure or ensure_search_indexes
     try:
-        await ensure_search_indexes(db, embedding_dimension=embedding_dimension)
+        await ensure(db, embedding_dimension=embedding_dimension)
         logger.info("Atlas Search indexes ready.")
     except asyncio.CancelledError:
         logger.debug("Atlas Search index creation cancelled (shutting down).")

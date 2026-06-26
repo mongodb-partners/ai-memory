@@ -34,6 +34,13 @@ class MemoryConfig(MCPConfig):
     # owns reactive work; in SP3 this is purely a disable switch.
     workers_in_process: bool = True
 
+    # When True, create() blocks until Atlas Search indexes are queryable before
+    # returning. Right for short-lived library/script callers (otherwise the
+    # process can exit before background index creation finishes, making
+    # search/recall silently return nothing). Default False keeps the
+    # non-blocking background behaviour suited to long-running servers.
+    await_search_indexes: bool = False
+
     @classmethod
     def from_env(cls, **overrides) -> "MemoryConfig":
         """Build a config from environment variables (deployed-shell path).

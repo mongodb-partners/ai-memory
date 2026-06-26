@@ -9,6 +9,24 @@ Anthropic) ship as opt-in SDK extras; if the SDK is missing, the provider raises
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import EmbeddingProvider, LLMProvider
 
+# Native output dimensions for known Voyage models, used to keep
+# ``embedding_dimension`` (and thus the Atlas vector index numDimensions) in
+# sync with the selected model. Both the public Voyage API and the MongoDB
+# Atlas embeddings gateway serve these same models.
+_VOYAGE_MODEL_DIMS = {
+    "voyage-3": 1024,
+    "voyage-3-large": 1024,
+    "voyage-3-lite": 512,
+    "voyage-3.5": 1024,
+    "voyage-3.5-lite": 1024,
+    "voyage-code-3": 1024,
+    "voyage-2": 1024,
+}
+
+# Default embedding_dimension inherited from MCPConfig — lets us detect whether
+# the operator explicitly pinned a dimension (never overridden) vs left default.
+_DEFAULT_EMBEDDING_DIMENSION = 1536
+
 
 class ProviderManager:
     """Initialized once at startup. No lazy initialization."""
@@ -27,6 +45,11 @@ class ProviderManager:
                 # Sync the canonical embedding_model from the Voyage-specific
                 # config so documents record the correct model name.
                 config.embedding_model = config.voyage_model
+                # Align embedding_dimension to the model's native dimension,
+                # unless the operator explicitly pinned a non-default value.
+                known_dim = _VOYAGE_MODEL_DIMS.get(config.voyage_model)
+                if known_dim is not None and config.embedding_dimension == _DEFAULT_EMBEDDING_DIMENSION:
+                    config.embedding_dimension = known_dim
                 return VoyageEmbeddingProvider(config)
             case "openai":
                 from agent_memory.providers.openai import OpenAIEmbeddingProvider

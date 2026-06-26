@@ -38,6 +38,9 @@ class MCPConfig(BaseSettings):
     aws_secret_access_key: str | None = None
 
     # Voyage AI
+    # voyage_base_url selects the endpoint: the public Voyage API (default) or
+    # the MongoDB Atlas embeddings gateway (https://ai.mongodb.com/v1/embeddings),
+    # both via the VOYAGE_BASE_URL env var. The payload format is identical.
     voyage_api_key: str | None = None
     voyage_base_url: str = "https://api.voyageai.com/v1/embeddings"
     voyage_model: str = "voyage-3"
