@@ -1,0 +1,45 @@
+"""Programmatic configuration for agent-memory.
+
+``MemoryConfig`` is the public, code-constructible config object. It extends the
+substrate's ``MCPConfig`` (a Pydantic ``BaseSettings``) so it stays
+backward-compatible with memory-mcp's environment-variable names, while adding
+the SP3 fields: OpenAI/Anthropic provider settings and the ``workers_in_process``
+lifecycle seam.
+
+- Library callers build it directly: ``MemoryConfig(mongo_uri=..., ...)``.
+- Deployed shells build it from the environment: ``MemoryConfig.from_env()``.
+"""
+
+from __future__ import annotations
+
+from agent_memory.core.config import MCPConfig
+
+
+class MemoryConfig(MCPConfig):
+    """Programmatic config object. Superset of memory-mcp's ``MCPConfig``."""
+
+    # OpenAI provider (LLM + embeddings; base_url enables the Grove gateway)
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openai_model: str = "gpt-4o"
+    openai_embedding_model: str = "text-embedding-3-small"
+
+    # Anthropic provider (LLM only; no embeddings API)
+    anthropic_api_key: str | None = None
+    anthropic_base_url: str | None = None
+    anthropic_model: str = "claude-sonnet-4-6"
+
+    # Worker lifecycle seam (SP1). True → run enrichment/consolidation/audit-flush
+    # in-process. False → an external runtime (Atlas Triggers / worker process)
+    # owns reactive work; in SP3 this is purely a disable switch.
+    workers_in_process: bool = True
+
+    @classmethod
+    def from_env(cls, **overrides) -> "MemoryConfig":
+        """Build a config from environment variables (deployed-shell path).
+
+        Pydantic ``BaseSettings`` already reads the environment; this classmethod
+        is the explicit, named entry point the shells call. ``llm_provider`` and
+        ``embedding_provider`` default to ``bedrock`` (inherited from ``MCPConfig``).
+        """
+        return cls(**overrides)
