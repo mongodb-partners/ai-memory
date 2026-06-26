@@ -320,6 +320,89 @@ class MemoryService:
         )
         return {"deleted_count": result.modified_count}
 
+    async def hybrid_search(
+        self,
+        user_id: str,
+        query: str,
+        tier: list[str] | None = None,
+        limit: int = 10,
+        memory_type: str | None = None,
+        tags: list[str] | None = None,
+    ) -> list[dict]:
+        """Hybrid vector + full-text search via MongoDB ``$rankFusion`` (RRF).
+
+        Returns raw fused-relevance matches (with scores), no curation — the
+        ``search`` primitive. Extracted from the former ``hybrid_search`` MCP
+        tool so the facade stays a thin orchestration layer.
+        """
+        limit = min(limit, self.config.max_results_per_query)
+        tiers = tier or ["stm", "ltm"]
+        query_embedding = await self.providers.embedding.generate_embedding(query)
+
+        vs_filter: dict = {"user_id": user_id, "deleted_at": None, "tier": {"$in": tiers}}
+        if memory_type:
+            vs_filter["memory_type"] = memory_type
+        if tags:
+            vs_filter["tags"] = {"$all": tags}
+
+        fts_filter_clauses = [
+            {"equals": {"path": "user_id", "value": user_id}},
+            {"equals": {"path": "is_deleted", "value": False}},
+        ]
+        if tiers:
+            fts_filter_clauses.append({"in": {"path": "tier", "value": tiers}})
+
+        pipeline = [
+            {
+                "$rankFusion": {
+                    "input": {
+                        "pipelines": {
+                            "vectorPipeline": [
+                                {
+                                    "$vectorSearch": {
+                                        "index": "memories_vector_index",
+                                        "path": "embedding",
+                                        "queryVector": query_embedding,
+                                        "numCandidates": 100,
+                                        "limit": 20,
+                                        "filter": vs_filter,
+                                    }
+                                },
+                            ],
+                            "fullTextPipeline": [
+                                {
+                                    "$search": {
+                                        "index": "memories_fts_index",
+                                        "compound": {
+                                            "must": [
+                                                {"text": {"query": query, "path": ["content", "summary"]}}
+                                            ],
+                                            "filter": fts_filter_clauses,
+                                        },
+                                    }
+                                },
+                                {"$limit": 20},
+                            ],
+                        }
+                    },
+                    "combination": {
+                        "weights": {
+                            "vectorPipeline": self.config.rrf_vector_weight,
+                            "fullTextPipeline": self.config.rrf_text_weight,
+                        },
+                    },
+                }
+            },
+            {"$limit": limit},
+            {"$project": {"embedding": 0}},
+        ]
+
+        cursor = await self.memories.aggregate(pipeline)
+        results = await cursor.to_list(None)
+        for r in results:
+            _sanitize_doc(r)
+        return results
+
     async def evolve_memory(
         self, user_id: str, content: str, embedding: list[float]
     ) -> str:
