@@ -53,7 +53,7 @@ event-driven), **not** as the primary general-purpose runtime.
 
 **Facade-as-core, three shells, one Atlas backend.**
 
-```
+```text
         from agent_memory import Memory, AsyncMemory, MemoryConfig
                             │
    ┌────────────────────────┼────────────────────────┐
@@ -78,12 +78,12 @@ event-driven), **not** as the primary general-purpose runtime.
 
 ### Package layout
 
-```
+```text
 agent_memory/
   __init__.py          # exports Memory, AsyncMemory, MemoryConfig, exceptions
   memory.py            # AsyncMemory facade + Memory sync wrapper
   config.py            # MemoryConfig (programmatic) + .from_env()
-  exceptions.py        # AccessError, NotFoundError, ConfigError, ...
+  exceptions.py        # AccessError, RateLimitError(AccessError), NotFoundError, ConfigError, ...
   core/                # database, migrations, collections (registry deleted)
   providers/
     base.py            # EmbeddingProvider, LLMProvider ABCs (unchanged)
@@ -123,6 +123,9 @@ class AsyncMemory:
         # 1. DatabaseManager.initialize(config)   → Atlas connection
         # 2. ensure_indexes(db)                   → Stage-1 indexes (blocking)
         # 3. ProviderManager(config)              → embedding + LLM providers
+        #    + validate embedding_dimension matches the live embedder
+        #      (known per-model dim, else probe one embedding's length);
+        #      mismatch → ConfigError before any vector write
         # 4. instantiate services (memory, cache, decision, governance,
         #    rate_limiter, audit)
         # 5. seed defaults (governance, prompts, decisions) — best-effort
@@ -144,9 +147,11 @@ and made callable by anyone. Also supports
 
 ```python
 async def _run(self, user_id, operation, category, coro_factory, **audit_fields):
-    err = await self._check_access(user_id, operation)   # governance + rate limit
-    if err:
-        raise AccessError(err)        # facade raises; shells translate
+    # _check_access runs governance THEN rate limit, raising the matching typed
+    # error so shells can distinguish 403 (denied) from 429 (throttled):
+    #   - governance denial → AccessError
+    #   - rate-limit exceeded → RateLimitError (subclass of AccessError)
+    await self._check_access(user_id, operation)
     start = time.time()
     try:
         result = await coro_factory()
@@ -174,16 +179,38 @@ async def _run(self, user_id, operation, category, coro_factory, **audit_fields)
 | `health()` | admin | `memory_health` |
 | `wipe_user_data(user_id)` | admin | `wipe_user_data` |
 
+**`recall` vs `search` — the contract.** They share inputs but differ in intent
+and output, and both are kept because their internals differ:
+
+- **`recall`** is the curated memory read: it returns evolution-aware,
+  importance-ranked memories (post-enrichment: reinforced/merged records,
+  importance score honored), shaped for an agent asking "what do I know about
+  X?" This is the default for agent loops.
+- **`search`** is the raw retrieval primitive: hybrid vector + full-text
+  `$rankFusion` (RRF) over the store, returning fused-relevance matches with
+  scores and no curation. This is for callers that want ranked hits, debugging,
+  or to build their own re-ranking on top.
+
+In short: `recall` answers a question; `search` returns ranked documents. The
+shells document both with this one-line distinction.
+
 ### Design decisions
 
-- **Facade raises typed exceptions** (`AccessError`, `NotFoundError`, …). Each
-  shell translates to its own error shape. Error policy stays out of the core.
+- **Facade raises typed exceptions** (`AccessError`, `RateLimitError`,
+  `NotFoundError`, `ConfigError`, …). `RateLimitError` subclasses `AccessError`
+  so callers can catch the base while shells distinguish throttling (429) from
+  denial (403). Each shell translates to its own error shape; error policy stays
+  out of the core.
 - **No global singleton.** `ServiceRegistry` is deleted; the facade is the
   container. Clean because this is a fresh rewrite (no migration shim needed).
 - **Pluggable worker lifecycle.** `config.workers_in_process=True` (default) runs
   enrichment/consolidation/audit-flush in-process. `False` means an external
   runtime (Atlas Triggers/Functions, separate worker process) owns reactive
-  work. This is the SP1 seam, designed now.
+  work. This is the SP1 seam, designed now. **In SP3, `False` is purely a disable
+  switch** — no external consumer ships until SP1, so setting it leaves the
+  enrichment/consolidation queues undrained (memories persist but are never
+  enriched, promoted, or forgotten). `create()` logs a warning when
+  `workers_in_process=False` so this is never silent.
 
 ### Sync `Memory` wrapper
 
@@ -192,9 +219,11 @@ class Memory:
     def __init__(self, config: MemoryConfig):
         # dedicated event loop on a daemon thread (safe in notebooks/Jupyter)
         ...
-    def add(self, *a, **k):    return self._run(self._async.add(*a, **k))
-    def recall(self, *a, **k): return self._run(self._async.recall(*a, **k))
+    def add(self, *a, **k):    return self._submit(self._async.add(*a, **k))
+    def recall(self, *a, **k): return self._submit(self._async.recall(*a, **k))
     # every async method gets a blocking twin
+    # (_submit schedules the coro on the background loop and blocks for the
+    #  result — distinct from AsyncMemory._run, which is the orchestration wrapper)
 ```
 
 `AsyncMemory` is the real implementation (used directly by the MCP/REST shells,
@@ -237,9 +266,15 @@ OpenAI- and Anthropic-compatible endpoints.
 
 ### Provider matrix
 
-- **LLM:** `bedrock` | `openai` | `anthropic`
-- **Embeddings:** `bedrock` | `voyage` | `openai`
+- **LLM:** `bedrock` (default) | `openai` | `anthropic`
+- **Embeddings:** `bedrock` (default) | `voyage` | `openai`
 - Each gateway-routable via `*_base_url`.
+
+**Defaults.** `from_env()` defaults both `llm_provider` and `embedding_provider`
+to `bedrock`. Bedrock (`boto3`) therefore stays in base `dependencies`; the
+`openai` and `anthropic` SDKs are opt-in extras (§9). Choosing a non-default
+provider without installing its extra raises `ConfigError` with the install hint
+(e.g. `pip install agent-memory[openai]`).
 
 ### Embedding dimension coupling
 
@@ -248,6 +283,13 @@ Embedding dimension is provider-coupled (Titan 1536, OpenAI `-3-small` 1536 /
 must match the active embedder. `MemoryConfig.embedding_dimension` is
 authoritative; the migration layer reads it. **Switching embedders requires
 re-provisioning the vector index.** This is documented explicitly.
+
+**Startup guard.** `create()` (step 3) validates that `embedding_dimension`
+matches what the configured embedder actually emits — using a known per-model
+dimension table where available, otherwise probing the length of a single test
+embedding. A mismatch raises `ConfigError` at startup, turning a silent
+vector-index corruption (writes that never match the index `numDimensions`)
+into a fast, legible failure before any data is written.
 
 ---
 
@@ -272,7 +314,14 @@ async def recall_memory(user_id: str, query: str, tier: str | None = None,
 
 The `app` (`AsyncMemory`) is created in FastMCP `lifespan` and closed on
 shutdown. Auto-capture middleware still wraps tools but calls `app.add(...)`
-instead of reaching into a service. Health route unchanged.
+instead of reaching into a service. Health route unchanged. (MCP's
+`{"error": ...}` convention carries rate-limit rejections too; the message text
+distinguishes throttling from denial.)
+
+**Auto-capture is MCP-only.** The middleware intercepts tool calls to
+opportunistically persist conversation turns. REST has no equivalent
+interception layer — REST callers persist explicitly via `POST /memories`
+(`app.add`). This is intentional: REST is the explicit-control surface.
 
 ### REST shell (`shells/rest/`)
 
@@ -283,11 +332,17 @@ New, thin FastAPI:
 async def add_memory(body: AddRequest):
     try:
         return await app.add(body.user_id, body.conversation_id, body.messages)
+    except RateLimitError as e:        # checked before AccessError — it's a subclass
+        raise HTTPException(429, str(e))
     except AccessError as e:
         raise HTTPException(403, str(e))
     except NotFoundError as e:
         raise HTTPException(404, str(e))
 ```
+
+`RateLimitError` is caught before `AccessError` (it subclasses it) so throttling
+maps to **429 Too Many Requests** — the status clients and load balancers use to
+trigger backoff — while governance denials stay **403 Forbidden**.
 
 Endpoints mirror the facade: `POST /memories`, `GET /memories/search`,
 `GET /memories/recall`, `DELETE /memories`, `POST`/`GET /decisions`,
@@ -310,7 +365,7 @@ deployable unit.
 
 ## 6. Data flow — `add` end to end
 
-```
+```text
 caller (import | MCP tool | POST /memories)
    → AsyncMemory.add(user_id, conv_id, messages)
        → _run(): check_access (governance + rate limit)
@@ -366,11 +421,21 @@ New fields beyond memory-mcp's config: `openai_api_key`, `openai_base_url`,
   audit emitted on both success and error paths; `create()`/`close()` start/stop
   workers. Highest-value new coverage.
 - **New shell tests** — MCP tools translate `AccessError` → `{"error": ...}`;
-  REST routes translate exceptions → correct HTTP status codes.
+  REST routes translate exceptions → correct HTTP status codes, including
+  `RateLimitError → 429` distinct from `AccessError → 403` and
+  `NotFoundError → 404`.
 - **Sync wrapper test** — `Memory.add/recall` work from plain sync context and
   inside a running event loop (notebook scenario).
 - **New provider tests** — OpenAI/Anthropic providers honor `base_url` (Grove);
-  OpenAI embedding dimension handling. SDK clients mocked; no live API calls.
+  OpenAI embedding dimension handling; `embedding_dimension` mismatch raises
+  `ConfigError` at `create()`; missing-extra for a non-default provider raises
+  `ConfigError` with install hint. SDK clients mocked; no live API calls.
+- **Integration tier (optional, Atlas-gated)** — unit tests mock Atlas, so
+  `$rankFusion`/RRF hybrid retrieval and the vector + FTS indexes can't be
+  exercised in-process. A small integration suite, guarded by an env flag and a
+  live Atlas connection (skipped in CI without credentials), runs `add` →
+  `search`/`recall` end to end to confirm hybrid retrieval actually fuses and
+  ranks. Keeps the one MongoDB-specific behavior from being entirely unverified.
 - **TDD:** each facade method gets a failing test first, then implementation.
 
 ---
