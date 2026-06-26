@@ -1,4 +1,10 @@
-"""Provider initialization — created once at startup, not lazily."""
+"""Provider initialization — created once at startup, not lazily.
+
+Adding a provider is a new ``match`` arm. Non-default providers (OpenAI,
+Anthropic) ship as opt-in SDK extras; if the SDK is missing, the provider raises
+``ConfigError`` with the install hint instead of a deep ``ImportError``/
+``TypeError``.
+"""
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import EmbeddingProvider, LLMProvider
@@ -22,6 +28,10 @@ class ProviderManager:
                 # config so documents record the correct model name.
                 config.embedding_model = config.voyage_model
                 return VoyageEmbeddingProvider(config)
+            case "openai":
+                from agent_memory.providers.openai import OpenAIEmbeddingProvider
+                config.embedding_model = config.openai_embedding_model
+                return OpenAIEmbeddingProvider(config)
             case _:
                 raise ValueError(f"Unknown embedding provider: {config.embedding_provider}")
 
@@ -30,5 +40,11 @@ class ProviderManager:
             case "bedrock":
                 from agent_memory.providers.bedrock import BedrockLLMProvider
                 return BedrockLLMProvider(config)
+            case "openai":
+                from agent_memory.providers.openai import OpenAILLMProvider
+                return OpenAILLMProvider(config)
+            case "anthropic":
+                from agent_memory.providers.anthropic import AnthropicLLMProvider
+                return AnthropicLLMProvider(config)
             case _:
                 raise ValueError(f"Unknown LLM provider: {config.llm_provider}")
