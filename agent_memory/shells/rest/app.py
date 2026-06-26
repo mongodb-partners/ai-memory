@@ -14,13 +14,44 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from agent_memory.config import MemoryConfig
 from agent_memory.exceptions import AccessError, NotFoundError, RateLimitError
 from agent_memory.memory import AsyncMemory
+
+
+def _build_auth_dependency(config: MemoryConfig | None):
+    """Return a FastAPI dependency enforcing Bearer auth, reusing auth/.
+
+    When auth is disabled (or no config), the dependency is a no-op so the
+    routes stay open — same posture as the MCP shell.
+    """
+    if config is None or not config.auth_enabled or not config.auth_secret:
+        async def _noop():
+            return None
+
+        return _noop
+
+    from agent_memory.auth.api_keys import APIKeyManager
+    from agent_memory.auth.token_verifier import MemoryMCPTokenVerifier
+
+    verifier = MemoryMCPTokenVerifier(
+        secret=config.auth_secret, api_key_manager=APIKeyManager()
+    )
+
+    async def _require_token(authorization: str | None = Header(default=None)):
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Missing bearer token")
+        token = authorization.split(" ", 1)[1]
+        access = await verifier.verify_token(token)
+        if access is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return access
+
+    return _require_token
 
 
 class AddRequest(BaseModel):
@@ -36,9 +67,15 @@ class DecisionRequest(BaseModel):
     ttl_days: int | None = None
 
 
-def create_app(app) -> FastAPI:
-    """Build a FastAPI app bound to facade ``app``."""
+def create_app(app, config: MemoryConfig | None = None) -> FastAPI:
+    """Build a FastAPI app bound to facade ``app``.
+
+    When ``config`` enables auth, every route except ``/health`` requires a valid
+    Bearer token, verified by the existing ``auth/`` verifier (REQ-E-072).
+    """
     api = FastAPI(title="agent-memory", version="4.0.0")
+    auth = Depends(_build_auth_dependency(config))
+    protected = [auth]
 
     # ── Exception handlers (most specific first) ──────────────────────────
     @api.exception_handler(RateLimitError)
@@ -54,28 +91,28 @@ def create_app(app) -> FastAPI:
         return JSONResponse(status_code=404, content={"error": str(exc)})
 
     # ── Routes ────────────────────────────────────────────────────────────
-    @api.post("/memories")
+    @api.post("/memories", dependencies=protected)
     async def add_memory(body: AddRequest):
         return await app.add(body.user_id, body.conversation_id, body.messages)
 
-    @api.get("/memories/recall")
+    @api.get("/memories/recall", dependencies=protected)
     async def recall(user_id: str, query: str, limit: int = 10):
         return await app.recall(user_id, query, limit=limit)
 
-    @api.get("/memories/search")
+    @api.get("/memories/search", dependencies=protected)
     async def search(user_id: str, query: str, limit: int = 10):
         return await app.search(user_id, query, limit=limit)
 
-    @api.delete("/memories")
+    @api.delete("/memories", dependencies=protected)
     async def delete(user_id: str, memory_id: str | None = None, confirm: bool = False,
                      dry_run: bool = False):
         return await app.delete(user_id, memory_id=memory_id, confirm=confirm, dry_run=dry_run)
 
-    @api.post("/decisions")
+    @api.post("/decisions", dependencies=protected)
     async def remember_decision(body: DecisionRequest):
         return await app.remember_decision(body.user_id, body.key, body.value, ttl_days=body.ttl_days)
 
-    @api.get("/decisions")
+    @api.get("/decisions", dependencies=protected)
     async def recall_decision(user_id: str, key: str):
         return await app.recall_decision(user_id, key)
 
@@ -110,6 +147,6 @@ def create_managed_app(config: MemoryConfig, app: AsyncMemory | None = None) -> 
         def __getattr__(self, name):
             return getattr(holder["app"], name)
 
-    api = create_app(_Proxy())
+    api = create_app(_Proxy(), config=config)
     api.router.lifespan_context = lifespan
     return api

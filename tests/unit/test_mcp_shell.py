@@ -45,6 +45,52 @@ class TestDelegation:
         await tools["recall_memory"]("u1", "q")
         app.recall.assert_awaited_once()
 
+    async def test_all_remaining_tools_delegate(self):
+        app = _app()
+        app.search = AsyncMock(return_value={"results": [], "count": 0})
+        app.delete = AsyncMock(return_value={"deleted_count": 0})
+        app.check_cache = AsyncMock(return_value={"cache_hit": True})
+        app.store_cache = AsyncMock(return_value="cid")
+        app.invalidate_cache = AsyncMock(return_value={"deleted_count": 1})
+        app.remember_decision = AsyncMock(return_value={"key": "k", "status": "stored"})
+        app.recall_decision = AsyncMock(return_value={"key": "k", "value": "v"})
+        app.search_web = AsyncMock(return_value={"results": []})
+        app.wipe_user_data = AsyncMock(return_value={"memories_deleted": 0})
+        mcp = MagicMock()
+        tools = _capture_tool(mcp)
+        register_all_tools(mcp, app)
+
+        await tools["hybrid_search"]("u1", "q")
+        await tools["delete_memory"]("u1", memory_id="m1")
+        assert (await tools["check_cache"]("u1", "q"))["cache_hit"] is True
+        assert (await tools["store_cache"]("u1", "q", "r"))["cache_id"] == "cid"
+        await tools["cache_invalidate"]("u1", invalidate_all=True)
+        await tools["store_decision"]("u1", "k", "v")
+        assert (await tools["recall_decision"]("u1", "k"))["value"] == "v"
+        await tools["search_web"]("u1", "q")
+        assert (await tools["memory_health"]("u1"))["total_memories"] == 0
+        await tools["wipe_user_data"]("u1", confirm=True)
+
+        app.search.assert_awaited_once()
+        app.delete.assert_awaited_once()
+        app.wipe_user_data.assert_awaited_once()
+
+    async def test_check_cache_miss_returns_false(self):
+        app = _app()
+        app.check_cache = AsyncMock(return_value=None)
+        mcp = MagicMock()
+        tools = _capture_tool(mcp)
+        register_all_tools(mcp, app)
+        assert (await tools["check_cache"]("u1", "q"))["cache_hit"] is False
+
+    async def test_recall_decision_miss_returns_null_value(self):
+        app = _app()
+        app.recall_decision = AsyncMock(return_value=None)
+        mcp = MagicMock()
+        tools = _capture_tool(mcp)
+        register_all_tools(mcp, app)
+        assert (await tools["recall_decision"]("u1", "k"))["value"] is None
+
 
 class TestErrorTranslation:
     """TC-MCP-002: AccessError / RateLimitError → {"error": ...}."""

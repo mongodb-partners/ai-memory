@@ -82,3 +82,20 @@ class TestSyncWrapper:
         m.close()
         assert core.closed is True
         assert not m._thread.is_alive()
+
+    def test_context_manager(self):
+        m, core = _memory_with_fake()
+        with m:
+            pass
+        assert core.closed is True
+
+    def test_all_blocking_twins_present(self):
+        # every async facade method has a sync twin
+        m, core = _memory_with_fake()
+        try:
+            for name in ("add", "recall", "search", "delete", "check_cache",
+                         "store_cache", "invalidate_cache", "remember_decision",
+                         "recall_decision", "search_web", "health", "wipe_user_data"):
+                assert callable(getattr(m, name))
+        finally:
+            m.close()

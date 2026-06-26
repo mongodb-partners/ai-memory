@@ -106,40 +106,40 @@ design (superseded by shells in Task 5 / packaging in Task 6).
 
 | Req ID | Test Case IDs | Status |
 |---|---|---|
-| REQ-E-001 | TC-EXC-001 | Not Started |
-| REQ-E-002 | TC-EXC-001 | Not Started |
-| REQ-E-010 | TC-CFG-001 | Not Started |
-| REQ-E-011 | TC-CFG-002 | Not Started |
-| REQ-E-012 | TC-CFG-003 | Not Started |
-| REQ-E-020 | TC-FAC-LIFE-001 | Not Started |
-| REQ-E-021 | TC-FAC-LIFE-001 | Not Started |
-| REQ-E-022 | TC-FAC-LIFE-002 | Not Started |
-| REQ-E-023 | TC-FAC-LIFE-001 | Not Started |
-| REQ-E-024 | TC-FAC-LIFE-003 | Not Started |
-| REQ-E-025 | TC-FAC-AUDIT-001 | Not Started |
-| REQ-E-026 | TC-FAC-ACC-001 | Not Started |
-| REQ-E-027 | TC-FAC-ACC-002 | Not Started |
-| REQ-E-028 | TC-FAC-AUDIT-001, TC-FAC-AUDIT-002 | Not Started |
-| REQ-E-029 | TC-FAC-001..012 | Not Started |
-| REQ-E-030 | TC-FAC-RECALL-001, TC-FAC-SEARCH-001 | Not Started |
-| REQ-E-031 | TC-FAC-DIM-001, TC-PROV-006 | Not Started |
-| REQ-E-040 | TC-SYNC-001 | Not Started |
-| REQ-E-041 | TC-SYNC-002 | Not Started |
-| REQ-E-042 | TC-SYNC-003 | Not Started |
-| REQ-E-050 | TC-PROV-001 | Not Started |
-| REQ-E-051 | TC-PROV-002 | Not Started |
-| REQ-E-052 | TC-PROV-003 | Not Started |
-| REQ-E-053 | TC-PROV-004 | Not Started |
-| REQ-E-054 | TC-PROV-005 | Not Started |
-| REQ-E-060 | TC-MCP-001 | Not Started |
-| REQ-E-061 | TC-MCP-002 | Not Started |
-| REQ-E-062 | TC-MCP-LIFE-001 | Not Started |
-| REQ-E-063 | TC-MCP-003 | Not Started |
-| REQ-E-070 | TC-REST-001..004 | Not Started |
-| REQ-E-071 | TC-REST-005 | Not Started |
-| REQ-E-072 | TC-REST-AUTH-001 | Not Started |
-| REQ-E-080 | TC-TRANS-001 | Not Started |
-| REQ-E-081 | TC-PKG-001 | Not Started |
-| REQ-E-082 | TC-EXP-001 | Not Started |
-| REQ-NF-COV | coverage report (Task 7) | Not Started |
+| REQ-E-001 | TC-EXC-001 | Passing |
+| REQ-E-002 | TC-EXC-001 | Passing |
+| REQ-E-010 | TC-CFG-001 | Passing |
+| REQ-E-011 | TC-CFG-002 | Passing |
+| REQ-E-012 | TC-CFG-003 | Passing |
+| REQ-E-020 | TC-FAC-LIFE-001 | Passing |
+| REQ-E-021 | TC-FAC-LIFE-001 | Passing |
+| REQ-E-022 | TC-FAC-LIFE-002 | Passing |
+| REQ-E-023 | TC-FAC-LIFE-001 | Passing |
+| REQ-E-024 | TC-FAC-LIFE-003 | Passing |
+| REQ-E-025 | TC-FAC-AUDIT-001 | Passing |
+| REQ-E-026 | TC-FAC-ACC-001 | Passing |
+| REQ-E-027 | TC-FAC-ACC-002 | Passing |
+| REQ-E-028 | TC-FAC-AUDIT-001, TC-FAC-AUDIT-002 | Passing |
+| REQ-E-029 | TC-FAC-001..012 | Passing |
+| REQ-E-030 | TC-FAC-RECALL-001, TC-FAC-SEARCH-001 | Passing |
+| REQ-E-031 | TC-FAC-DIM-001, TC-PROV-006 | Passing |
+| REQ-E-040 | TC-SYNC-001 | Passing |
+| REQ-E-041 | TC-SYNC-002 | Passing |
+| REQ-E-042 | TC-SYNC-003 | Passing |
+| REQ-E-050 | TC-PROV-001 | Passing |
+| REQ-E-051 | TC-PROV-002 | Passing |
+| REQ-E-052 | TC-PROV-003 | Passing |
+| REQ-E-053 | TC-PROV-004 | Passing |
+| REQ-E-054 | TC-PROV-005 | Passing |
+| REQ-E-060 | TC-MCP-001 | Passing |
+| REQ-E-061 | TC-MCP-002 | Passing |
+| REQ-E-062 | TC-MCP-LIFE-001 | Passing |
+| REQ-E-063 | TC-MCP-003 | Passing |
+| REQ-E-070 | TC-REST-001..004 | Passing |
+| REQ-E-071 | TC-REST-005 | Passing |
+| REQ-E-072 | TC-REST-AUTH-001 | Passing |
+| REQ-E-080 | TC-TRANS-001 | Passing |
+| REQ-E-081 | TC-PKG-001 | Passing |
+| REQ-E-082 | TC-EXP-001 | Passing |
+| REQ-NF-COV | coverage report (Task 7) | Passing |
 | INV-001..008 | 344 ported tests (baseline green) | Passing (baseline) |

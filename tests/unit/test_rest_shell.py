@@ -83,3 +83,80 @@ class TestErrorMapping:
         facade.recall = AsyncMock(side_effect=NotFoundError("missing"))
         r = _client(facade).get("/memories/recall", params={"user_id": "u1", "query": "q"})
         assert r.status_code == 404
+
+
+class TestRemainingRoutes:
+    """Cover delete + decisions routes."""
+
+    def test_delete(self):
+        facade = _app()
+        r = _client(facade).request(
+            "DELETE", "/memories", params={"user_id": "u1", "memory_id": "m1"}
+        )
+        assert r.status_code == 200
+        facade.delete.assert_awaited_once()
+
+    def test_post_decision(self):
+        facade = _app()
+        r = _client(facade).post("/decisions", json={"user_id": "u1", "key": "k", "value": "v"})
+        assert r.status_code == 200
+        facade.remember_decision.assert_awaited_once()
+
+    def test_get_decision(self):
+        facade = _app()
+        r = _client(facade).get("/decisions", params={"user_id": "u1", "key": "k"})
+        assert r.status_code == 200
+        facade.recall_decision.assert_awaited_once()
+
+
+class TestAuth:
+    """TC-REST-AUTH-001: protected routes use the existing auth/ verifier."""
+
+    def _client_with_auth(self, facade):
+        from agent_memory.config import MemoryConfig
+        from agent_memory.shells.rest.app import create_app
+
+        cfg = MemoryConfig(
+            mongodb_connection_string="mongodb://localhost:27017",
+            auth_enabled=True, auth_secret="x" * 32, _env_file=None,
+        )
+        return TestClient(create_app(facade, config=cfg)), cfg
+
+    def test_missing_token_rejected(self):
+        client, _ = self._client_with_auth(_app())
+        r = client.get("/memories/recall", params={"user_id": "u1", "query": "q"})
+        assert r.status_code == 401
+
+    def test_valid_jwt_accepted(self):
+        from agent_memory.auth.api_keys import APIKeyManager
+        from agent_memory.auth.token_verifier import MemoryMCPTokenVerifier
+
+        client, cfg = self._client_with_auth(_app())
+        verifier = MemoryMCPTokenVerifier(secret=cfg.auth_secret, api_key_manager=APIKeyManager())
+        token = verifier.create_token(user_id="u1")
+        r = client.get("/memories/recall", params={"user_id": "u1", "query": "q"},
+                       headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+
+    def test_health_open_without_token(self):
+        client, _ = self._client_with_auth(_app())
+        assert client.get("/health").status_code == 200
+
+
+class TestManagedApp:
+    """create_managed_app builds + tears down its own facade via lifespan."""
+
+    def test_lifespan_creates_and_closes(self, monkeypatch):
+        import agent_memory.shells.rest.app as rest
+        from agent_memory.config import MemoryConfig
+
+        instance = MagicMock()
+        instance.health = AsyncMock(return_value={})
+        instance.close = AsyncMock()
+        monkeypatch.setattr(rest.AsyncMemory, "create", AsyncMock(return_value=instance))
+
+        cfg = MemoryConfig(mongodb_connection_string="mongodb://localhost:27017", _env_file=None)
+        api = rest.create_managed_app(cfg)
+        with TestClient(api) as client:  # triggers lifespan
+            assert client.get("/health").status_code == 200
+        instance.close.assert_awaited_once()

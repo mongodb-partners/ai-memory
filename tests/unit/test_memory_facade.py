@@ -131,6 +131,38 @@ class TestMethodSurface:
         assert (await m.health("u1"))["total_memories"] == 5
         assert (await m.wipe_user_data("u1", confirm=True))["memories_deleted"] == 5
 
+    async def test_wipe_requires_confirm(self):
+        m = _facade()
+        m.admin_service.wipe_user_data = AsyncMock()
+        out = await m.wipe_user_data("u1")  # confirm defaults False
+        assert "error" in out
+        m.admin_service.wipe_user_data.assert_not_called()
+
+    async def test_recall_decision_none_passthrough(self):
+        m = _facade()
+        m.decision_service.recall = AsyncMock(return_value=None)
+        assert await m.recall_decision("u1", "missing") is None
+
+    async def test_search_web_without_key_returns_error(self):
+        m = _facade(_config(tavily_api_key=None))
+        out = await m.search_web("u1", "q")
+        assert "error" in out
+
+    async def test_search_web_with_key_calls_tavily(self, monkeypatch):
+        m = _facade(_config(tavily_api_key="tvly-x"))
+
+        class FakeClient:
+            def __init__(self, api_key):
+                pass
+
+            def search(self, query):
+                return {"results": [{"title": "r"}]}
+
+        import tavily
+        monkeypatch.setattr(tavily, "TavilyClient", FakeClient)
+        out = await m.search_web("u1", "q")
+        assert out["results"] == [{"title": "r"}]
+
 
 class TestLifecycle:
     """TC-FAC-LIFE / TC-FAC-DIM: create()/close() and the startup dim guard."""
@@ -168,6 +200,70 @@ class TestLifecycle:
         providers.embedding.generate_embedding = AsyncMock(return_value=[0.0] * 1536)
         # should not raise
         await AsyncMemory._validate_embedding_dimension(providers, expected=1536)
+
+
+class TestCreateAndClose:
+    """Exercise the create() wiring and close() teardown with everything mocked."""
+
+    async def test_create_wires_services_and_starts_workers(self, monkeypatch):
+        import agent_memory.memory as mem
+
+        # Stub DatabaseManager
+        db = {f"c{i}": MagicMock() for i in range(10)}
+
+        class FakeDB:
+            def __getitem__(self, k):
+                return MagicMock()
+
+        db_manager = MagicMock()
+        db_manager.db = FakeDB()
+        db_manager.close = AsyncMock()
+        monkeypatch.setattr(mem, "_ensure_search_indexes_bg", AsyncMock())
+
+        import agent_memory.core.database as dbmod
+        monkeypatch.setattr(dbmod.DatabaseManager, "initialize", AsyncMock(return_value=db_manager))
+
+        import agent_memory.core.migrations as mig
+        monkeypatch.setattr(mig, "ensure_indexes", AsyncMock())
+
+        # Stub ProviderManager with a dimension-matching embedder
+        import agent_memory.providers.manager as pm
+
+        def _fake_provider_manager(config):
+            p = MagicMock()
+            p.embedding = AsyncMock()
+            p.embedding.generate_embedding = AsyncMock(return_value=[0.0] * config.embedding_dimension)
+            return p
+
+        monkeypatch.setattr(pm, "ProviderManager", _fake_provider_manager)
+
+        # Stub all services to no-op constructors with async seed_defaults
+        for name in ("memory", "cache", "audit", "decision", "prompt_library",
+                     "governance", "rate_limiter"):
+            pass
+
+        cfg = _config(governance_enabled=False, rate_limit_enabled=False, workers_in_process=True)
+        m = await AsyncMemory.create(cfg)
+        try:
+            assert len(m._workers) == 3
+            assert m.memory_service is not None
+            assert m.admin_service is not None
+        finally:
+            await m.close()
+        db_manager.close.assert_awaited_once()
+
+    async def test_close_cancels_workers_and_flushes(self):
+        m = AsyncMemory.__new__(AsyncMemory)
+        task = MagicMock()
+        m._workers = [task]
+        m._search_index_task = MagicMock()
+        m._search_index_task.done.return_value = False
+        m.audit_service = AsyncMock()
+        m._db_manager = AsyncMock()
+        await m.close()
+        task.cancel.assert_called_once()
+        m.audit_service.flush.assert_awaited_once()
+        m._db_manager.close.assert_awaited_once()
 
 
 def _build_for_lifecycle(**cfg_overrides):

@@ -51,3 +51,49 @@ class TestBuildShells:
         runner, facade, create = _patched
         shells = await runner.build_shells(_config("rest"))
         assert set(shells) == {"rest"}
+
+    async def test_legacy_transport_maps_to_mcp(self, _patched):
+        runner, facade, create = _patched
+        shells = await runner.build_shells(_config("streamable-http"))
+        assert set(shells) == {"mcp"}
+
+    async def test_unknown_transport_raises(self, _patched):
+        runner, facade, create = _patched
+        with pytest.raises(ValueError):
+            await runner.build_shells(_config("carrier-pigeon"))
+
+
+class TestRun:
+    """run() dispatch — uvicorn/mcp are mocked, no sockets bound."""
+
+    def test_run_mcp(self, monkeypatch):
+        import agent_memory.shells.runner as runner
+
+        built = MagicMock()
+        monkeypatch.setattr(runner, "create_mcp", lambda config: built)
+        runner.run(_config("mcp"))
+        built.run.assert_called_once()
+
+    def test_run_rest(self, monkeypatch):
+        import agent_memory.shells.runner as runner
+        import agent_memory.shells.rest.app as rest
+
+        monkeypatch.setattr(rest, "create_managed_app", lambda config: "rest-app")
+        uvicorn_run = MagicMock()
+        monkeypatch.setattr("uvicorn.run", uvicorn_run)
+        runner.run(_config("rest"))
+        uvicorn_run.assert_called_once()
+
+    def test_run_both_mounts_mcp(self, monkeypatch):
+        import agent_memory.shells.runner as runner
+        import agent_memory.shells.rest.app as rest
+
+        api = MagicMock()
+        monkeypatch.setattr(rest, "create_managed_app", lambda config: api)
+        mcp = MagicMock()
+        monkeypatch.setattr(runner, "create_mcp", lambda config: mcp)
+        uvicorn_run = MagicMock()
+        monkeypatch.setattr("uvicorn.run", uvicorn_run)
+        runner.run(_config("both"))
+        api.mount.assert_called_once()
+        uvicorn_run.assert_called_once()
