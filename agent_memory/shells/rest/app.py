@@ -12,11 +12,15 @@ handler so it wins over its ``AccessError`` base), ``AccessError`` → 403,
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from agent_memory.config import MemoryConfig
 from agent_memory.exceptions import AccessError, NotFoundError, RateLimitError
+from agent_memory.memory import AsyncMemory
 
 
 class AddRequest(BaseModel):
@@ -79,4 +83,33 @@ def create_app(app) -> FastAPI:
     async def health():
         return {"status": "ok"}
 
+    return api
+
+
+def create_managed_app(config: MemoryConfig, app: AsyncMemory | None = None) -> FastAPI:
+    """REST app that creates and closes its own ``AsyncMemory`` via lifespan.
+
+    If ``app`` is provided it is reused and its lifecycle is owned by the caller
+    (dual-transport). The mounted routes are bound lazily to the live facade.
+    """
+    holder: dict = {"app": app}
+
+    @asynccontextmanager
+    async def lifespan(_api: FastAPI):
+        owns = app is None
+        instance = app or await AsyncMemory.create(config)
+        holder["app"] = instance
+        try:
+            yield
+        finally:
+            if owns:
+                await instance.close()
+
+    # Build the routed app against a proxy that resolves to the live facade.
+    class _Proxy:
+        def __getattr__(self, name):
+            return getattr(holder["app"], name)
+
+    api = create_app(_Proxy())
+    api.router.lifespan_context = lifespan
     return api

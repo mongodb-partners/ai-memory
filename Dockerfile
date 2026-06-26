@@ -1,28 +1,21 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set up working directory
-WORKDIR /code
+WORKDIR /app
 
-# Copy requirements first to leverage Docker cache
-COPY ./requirements.txt /code/requirements.txt
-RUN pip install -r requirements.txt
+# Install uv for fast, reproducible installs
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy all application code
-COPY ./main.py /code/
-COPY ./config.py /code/
-COPY ./database/ /code/database/
-COPY ./models/ /code/models/
-COPY ./services/ /code/services/
-COPY ./utils/ /code/utils/
+# Dependency layer (cached): manifest + lockfile
+COPY pyproject.toml ./
+COPY uv.lock ./
+RUN uv sync --frozen --no-install-project --extra all || uv sync --extra all
 
-# Alternative: Copy the entire project directory
-# COPY . /code/
+# Application code
+COPY agent_memory/ ./agent_memory/
 
-# Make sure directory permissions are correct
-RUN chmod -R 755 /code
+RUN uv pip install --system -e ".[all]"
 
-# Expose the API port
-EXPOSE 8182
+EXPOSE 8000
 
-# Run the FastAPI application
-ENTRYPOINT ["python3", "main.py"]
+# TRANSPORT=mcp|rest|both selects which shell(s) to serve.
+CMD ["uv", "run", "agent-memory"]

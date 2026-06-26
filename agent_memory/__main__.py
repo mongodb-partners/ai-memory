@@ -1,16 +1,15 @@
-"""Entry point: python -m agent_memory."""
+"""Entry point: ``python -m agent_memory`` / the ``agent-memory`` script.
 
-from agent_memory.core.config import MCPConfig
-from agent_memory.server import mcp
+Dispatches to the transport runner, which serves MCP, REST, or both off one
+shared ``AsyncMemory`` instance based on ``TRANSPORT``.
+"""
+
+from agent_memory.config import MemoryConfig
+from agent_memory.shells.runner import run
 
 
 def main():
-    """CLI entry point for ``memory-mcp`` script."""
-    config = MCPConfig()
-    if config.transport == "stdio":
-        mcp.run(transport="stdio")
-    else:
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=config.port)
+    run(MemoryConfig.from_env())
 
 
 if __name__ == "__main__":
