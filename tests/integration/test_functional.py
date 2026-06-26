@@ -143,7 +143,7 @@ def test_list_tools():
     tool_names = {t["name"] for t in tools}
     expected = {
         "store_memory", "recall_memory", "delete_memory",
-        "check_cache", "store_cache", "hybrid_search", "search_web",
+        "check_cache", "store_cache", "hybrid_search",
         "memory_health", "wipe_user_data", "cache_invalidate",
         "store_decision", "recall_decision",
     }
@@ -508,30 +508,6 @@ def test_delete_operations(all_ids: dict):
     return True
 
 
-# ─── Phase 8: Web search ─────────────────────────────────────────
-
-
-def test_web_search():
-    """Test web search (may gracefully fail without Tavily key)."""
-    _banner("PHASE 8: Web Search")
-
-    result = _call_tool("search_web", {
-        "user_id": USER_ID,
-        "query": "latest Python release",
-    })
-
-    if "error" in result or (isinstance(result.get("error"), str) and "Tavily" in result["error"]):
-        print("  Web search unavailable: Tavily API key not configured (expected)")
-        return True
-
-    if isinstance(result, dict) and "results" in result:
-        print(f"  Web search returned {len(result['results'])} results")
-        for i, r in enumerate(result["results"][:3]):
-            title = r.get("title", "N/A")[:60]
-            print(f"    [{i+1}] {title}")
-    return True
-
-
 # ─── Phase 9: Memory evolution verification ──────────────────────
 
 
@@ -708,7 +684,7 @@ def run_all():
     """Run the comprehensive functional test suite."""
     passed = 0
     failed = 0
-    total_steps = 12
+    total_steps = 11
 
     _banner(f"COMPREHENSIVE FUNCTIONAL TEST SUITE")
     print(f"  Target : http://{MCP_HOST}:{MCP_PORT}{MCP_ENDPOINT}")
@@ -810,19 +786,8 @@ def run_all():
         failed += 1
         print(f"  >> FAIL: {e}")
 
-    # --- Step 9: Web search ---
+    # --- Step 9: Memory evolution ---
     step = 9
-    print(f"\n[{step}/{total_steps}] Web search")
-    try:
-        test_web_search()
-        passed += 1
-        print("\n  >> PASS")
-    except Exception as e:
-        failed += 1
-        print(f"  >> FAIL: {e}")
-
-    # --- Step 10: Memory evolution ---
-    step = 10
     print(f"\n[{step}/{total_steps}] Memory evolution verification")
     try:
         test_memory_evolution()
@@ -832,8 +797,8 @@ def run_all():
         failed += 1
         print(f"  >> FAIL: {e}")
 
-    # --- Step 11: Admin tools ---
-    step = 11
+    # --- Step 10: Admin tools ---
+    step = 10
     print(f"\n[{step}/{total_steps}] Admin tools (memory_health, cache_invalidate, wipe_user_data)")
     try:
         test_admin_tools()
@@ -843,8 +808,8 @@ def run_all():
         failed += 1
         print(f"  >> FAIL: {e}")
 
-    # --- Step 12: Decision stickiness ---
-    step = 12
+    # --- Step 11: Decision stickiness ---
+    step = 11
     print(f"\n[{step}/{total_steps}] Decision stickiness (store_decision, recall_decision)")
     try:
         test_decision_tools()

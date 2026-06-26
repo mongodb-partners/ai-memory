@@ -72,9 +72,6 @@ class Memory:
     def recall_decision(self, *a, **k):
         return self._submit(self._async.recall_decision(*a, **k))
 
-    def search_web(self, *a, **k):
-        return self._submit(self._async.search_web(*a, **k))
-
     def health(self, *a, **k):
         return self._submit(self._async.health(*a, **k))
 

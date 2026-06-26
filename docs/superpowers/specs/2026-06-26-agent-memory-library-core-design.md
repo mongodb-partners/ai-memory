@@ -175,7 +175,6 @@ async def _run(self, user_id, operation, category, coro_factory, **audit_fields)
 | `invalidate_cache(user_id, *, pattern, invalidate_all)` | `cache_service.invalidate` | `cache_invalidate` |
 | `remember_decision(user_id, key, value, *, ttl_days)` | `decision_service.store` | `store_decision` |
 | `recall_decision(user_id, key)` | `decision_service.recall` | `recall_decision` |
-| `search_web(user_id, query)` | Tavily | `search_web` |
 | `health()` | admin | `memory_health` |
 | `wipe_user_data(user_id)` | admin | `wipe_user_data` |
 

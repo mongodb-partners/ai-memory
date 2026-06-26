@@ -143,26 +143,6 @@ class TestMethodSurface:
         m.decision_service.recall = AsyncMock(return_value=None)
         assert await m.recall_decision("u1", "missing") is None
 
-    async def test_search_web_without_key_returns_error(self):
-        m = _facade(_config(tavily_api_key=None))
-        out = await m.search_web("u1", "q")
-        assert "error" in out
-
-    async def test_search_web_with_key_calls_tavily(self, monkeypatch):
-        m = _facade(_config(tavily_api_key="tvly-x"))
-
-        class FakeClient:
-            def __init__(self, api_key):
-                pass
-
-            def search(self, query):
-                return {"results": [{"title": "r"}]}
-
-        import tavily
-        monkeypatch.setattr(tavily, "TavilyClient", FakeClient)
-        out = await m.search_web("u1", "q")
-        assert out["results"] == [{"title": "r"}]
-
 
 class TestLifecycle:
     """TC-FAC-LIFE / TC-FAC-DIM: create()/close() and the startup dim guard."""

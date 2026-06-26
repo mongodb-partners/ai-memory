@@ -12,7 +12,7 @@ def _clean_env(monkeypatch):
         upper = key.upper()
         if upper.startswith("MONGODB_") or upper.startswith("AWS_") or upper in (
             "PORT", "DEBUG", "EMBEDDING_DIMENSION", "ENRICHMENT_CONCURRENCY",
-            "ENRICHMENT_BATCH_SIZE", "TAVILY_API_KEY", "LLM_MODEL_ID",
+            "ENRICHMENT_BATCH_SIZE", "LLM_MODEL_ID",
             "EMBEDDING_MODEL_ID", "LOGGER_SERVICE_URL", "AI_MEMORY_SERVICE_URL",
             "SEMANTIC_CACHE_SERVICE_URL", "VECTOR_DIMENSION",
         ):
@@ -160,11 +160,6 @@ class TestMCPConfigValidation:
         assert config.aws_access_key_id is None
         assert config.aws_secret_access_key is None
 
-    def test_tavily_key_optional(self):
-        config = _make_config()
-        assert config.tavily_api_key is None
-
-
 class TestMCPConfigAutoCapture:
     """TC-E: Auto-capture config defaults and overrides."""
 
@@ -173,7 +168,6 @@ class TestMCPConfigAutoCapture:
         assert config.auto_capture_enabled is True
         assert "recall_memory" in config.auto_capture_tools
         assert "hybrid_search" in config.auto_capture_tools
-        assert "search_web" in config.auto_capture_tools
         assert "store_decision" in config.auto_capture_tools
         assert "recall_decision" in config.auto_capture_tools
         assert config.auto_capture_min_length == 30

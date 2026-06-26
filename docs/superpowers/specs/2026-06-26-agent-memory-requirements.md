@@ -79,8 +79,9 @@ Closest analog: tools/memory_tools.py orchestration → absorbed by AsyncMemory.
   audit entry with status `error` and re-raise.
 - **REQ-E-029:** THE SYSTEM SHALL expose facade methods `add`, `recall`,
   `search`, `delete`, `check_cache`, `store_cache`, `invalidate_cache`,
-  `remember_decision`, `recall_decision`, `search_web`, `health`,
-  `wipe_user_data`.
+  `remember_decision`, `recall_decision`, `health`, `wipe_user_data`.
+  (`search_web`/Tavily web search was removed post-SP3 as out of scope for a
+  memory library.)
 - **REQ-E-030:** `recall` THE SYSTEM SHALL return curated, importance-ranked
   memories (delegating to `MemoryService.recall`); `search` THE SYSTEM SHALL
   return raw hybrid `$rankFusion` (RRF) matches with scores (delegating to

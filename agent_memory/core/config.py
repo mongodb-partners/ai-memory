@@ -45,9 +45,6 @@ class MCPConfig(BaseSettings):
     voyage_base_url: str = "https://api.voyageai.com/v1/embeddings"
     voyage_model: str = "voyage-3"
 
-    # Tavily
-    tavily_api_key: str | None = None
-
     # Memory Lifecycle
     stm_ttl_hours: int = 24
     ltm_retention_critical_days: int = 365
@@ -124,7 +121,7 @@ class MCPConfig(BaseSettings):
     # Auto-Capture (Phase 2)
     auto_capture_enabled: bool = True
     auto_capture_tools: list[str] = [
-        "recall_memory", "hybrid_search", "search_web",
+        "recall_memory", "hybrid_search",
         "store_decision", "recall_decision",
     ]
     auto_capture_min_length: int = 30

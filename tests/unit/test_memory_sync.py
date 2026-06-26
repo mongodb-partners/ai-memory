@@ -95,7 +95,7 @@ class TestSyncWrapper:
         try:
             for name in ("add", "recall", "search", "delete", "check_cache",
                          "store_cache", "invalidate_cache", "remember_decision",
-                         "recall_decision", "search_web", "health", "wipe_user_data"):
+                         "recall_decision", "health", "wipe_user_data"):
                 assert callable(getattr(m, name))
         finally:
             m.close()

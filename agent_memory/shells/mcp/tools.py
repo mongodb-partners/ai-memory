@@ -94,13 +94,6 @@ def register_all_tools(mcp, app) -> None:
         except AccessError as e:
             return _err(e)
 
-    @mcp.tool(name="search_web", description="Web search via Tavily.")
-    async def search_web(user_id: str, query: str) -> dict:
-        try:
-            return await app.search_web(user_id, query)
-        except AccessError as e:
-            return _err(e)
-
     @mcp.tool(name="memory_health", description="Health statistics for a user's memory store.")
     async def memory_health(user_id: str) -> dict:
         try:

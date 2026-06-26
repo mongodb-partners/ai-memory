@@ -25,7 +25,7 @@ _DEFAULT_PROFILES = {
         "max_searches_per_day": 5000,
         "allowed_operations": [
             "store_memory", "recall_memory", "delete_memory",
-            "hybrid_search", "check_cache", "store_cache", "search_web",
+            "hybrid_search", "check_cache", "store_cache",
             "memory_health",
         ],
     },

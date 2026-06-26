@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Operations classified as "search" for governance limit mapping (INV-005).
 _SEARCH_OPERATIONS = frozenset(
-    {"recall_memory", "hybrid_search", "search_web", "check_cache"}
+    {"recall_memory", "hybrid_search", "check_cache"}
 )
 
 
@@ -339,18 +339,6 @@ class AsyncMemory:
             return await self.decision_service.recall(user_id, key)
 
         return await self._run(user_id, "recall_decision", "decision:read", _do, key=key)
-
-    async def search_web(self, user_id: str, query: str) -> dict:
-        async def _do():
-            if not self.config.tavily_api_key:
-                return {"error": "Web search service unavailable: Tavily API key not configured"}
-            from tavily import TavilyClient
-
-            client = TavilyClient(api_key=self.config.tavily_api_key)
-            response = await asyncio.to_thread(client.search, query)
-            return {"results": response.get("results", []), "query": query}
-
-        return await self._run(user_id, "search_web", "search", _do, query=query)
 
     async def health(self, user_id: str) -> dict:
         async def _do():

@@ -54,7 +54,6 @@ class TestDelegation:
         app.invalidate_cache = AsyncMock(return_value={"deleted_count": 1})
         app.remember_decision = AsyncMock(return_value={"key": "k", "status": "stored"})
         app.recall_decision = AsyncMock(return_value={"key": "k", "value": "v"})
-        app.search_web = AsyncMock(return_value={"results": []})
         app.wipe_user_data = AsyncMock(return_value={"memories_deleted": 0})
         mcp = MagicMock()
         tools = _capture_tool(mcp)
@@ -67,7 +66,6 @@ class TestDelegation:
         await tools["cache_invalidate"]("u1", invalidate_all=True)
         await tools["store_decision"]("u1", "k", "v")
         assert (await tools["recall_decision"]("u1", "k"))["value"] == "v"
-        await tools["search_web"]("u1", "q")
         assert (await tools["memory_health"]("u1"))["total_memories"] == 0
         await tools["wipe_user_data"]("u1", confirm=True)
 
