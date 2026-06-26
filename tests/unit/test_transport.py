@@ -63,6 +63,45 @@ class TestBuildShells:
             await runner.build_shells(_config("carrier-pigeon"))
 
 
+class TestCombinedApp:
+    """TRANSPORT=both must serve mcp+rest off ONE shared facade (one Atlas pool).
+
+    Regression guard for the live-test finding: the old run() built two separate
+    facades and mounted MCP without lifespan chaining.
+    """
+
+    def test_combined_app_creates_single_facade(self, monkeypatch):
+        import agent_memory.shells.runner as runner
+
+        created = []
+        facade = MagicMock()
+        facade.close = AsyncMock()
+
+        async def _create(config):
+            created.append(config)
+            return facade
+
+        monkeypatch.setattr(runner.AsyncMemory, "create", _create)
+        # avoid real FastMCP/tool wiring
+        mcp_obj = MagicMock()
+        mcp_obj.http_app = MagicMock(return_value=MagicMock())
+        monkeypatch.setattr(runner, "create_mcp", lambda config, app: mcp_obj)
+        monkeypatch.setattr(runner, "create_app", lambda app, config=None: MagicMock(mount=MagicMock()))
+
+        cfg = _config("both")
+        api = runner.build_combined_app(cfg)
+        # lifespan not yet run → no facade created until the app starts
+        import asyncio
+
+        async def _drive():
+            async with api.router.lifespan_context(api):
+                pass
+
+        asyncio.run(_drive())
+        assert len(created) == 1, f"expected exactly ONE shared facade, got {len(created)}"
+        facade.close.assert_awaited_once()
+
+
 class TestRun:
     """run() dispatch — uvicorn/mcp are mocked, no sockets bound."""
 
@@ -84,16 +123,14 @@ class TestRun:
         runner.run(_config("rest"))
         uvicorn_run.assert_called_once()
 
-    def test_run_both_mounts_mcp(self, monkeypatch):
+    def test_run_both_serves_combined_app(self, monkeypatch):
         import agent_memory.shells.runner as runner
-        import agent_memory.shells.rest.app as rest
 
-        api = MagicMock()
-        monkeypatch.setattr(rest, "create_managed_app", lambda config: api)
-        mcp = MagicMock()
-        monkeypatch.setattr(runner, "create_mcp", lambda config: mcp)
+        combined = MagicMock()
+        monkeypatch.setattr(runner, "build_combined_app", lambda config: combined)
         uvicorn_run = MagicMock()
         monkeypatch.setattr("uvicorn.run", uvicorn_run)
         runner.run(_config("both"))
-        api.mount.assert_called_once()
         uvicorn_run.assert_called_once()
+        # the combined single-facade app is what gets served
+        assert uvicorn_run.call_args.args[0] is combined
