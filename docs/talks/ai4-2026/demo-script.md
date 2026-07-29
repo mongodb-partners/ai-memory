@@ -187,4 +187,8 @@ booth talk.
 
 **Closing line, verbatim:**
 > "The full stack-collapse story is my main session, Thursday, August 6th. Come to that
-> one. And this is all `pip install agent-memory` — go build it."
+> one. And this is all open source — the repo's on screen, install it straight from there.
+> Go build it."
+
+Not "pip install agent-memory." The package is not on PyPI, and the install line on slide 12
+is a `git+https` from `github.com/mongodb-partners/ai-memory`.

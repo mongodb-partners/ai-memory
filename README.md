@@ -3,12 +3,15 @@
 **Four kinds of agent memory in one MongoDB Atlas cluster.** No agent framework
 required — and none imported.
 
-[![PyPI](https://img.shields.io/pypi/v/agent-memory.svg)](https://pypi.org/project/agent-memory/)
-[![Python](https://img.shields.io/pypi/pyversions/agent-memory.svg)](https://pypi.org/project/agent-memory/)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+Install from the repository — this is not on PyPI:
+
 ```bash
-pip install agent-memory
+uv add git+https://github.com/mongodb-partners/ai-memory.git
+# or
+pip install git+https://github.com/mongodb-partners/ai-memory.git
 ```
 
 ---

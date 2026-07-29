@@ -64,6 +64,20 @@ and `scoped_user()`, isolated per asyncio Task and per thread.
   hardcoded literal — the literal had drifted to `3.2.0` while the package said
   `4.0.0`, and that value is served by `/health` and stamped on audit records.
 - `app_name` default is now `agent-memory` (was `memory-mcp`).
+- The container no longer runs as root. A `USER appuser` (uid 10001) owns `/app`,
+  which is enough because nothing here needs privilege: port 8000 is
+  unprivileged and every write goes to Atlas, not the filesystem.
+- Every GitHub Actions `uses:` and the `ghcr.io/astral-sh/uv` build stage are
+  pinned to immutable digests instead of `@v4` / `:latest`. A mutable tag can be
+  repointed by its publisher — the mechanism behind the `trivy-action` and
+  `kics-github-action` compromises.
+- The Dockerfile copies `README.md` and `LICENSE` into the build context. Adding
+  `readme` and `license-files` to `pyproject.toml` made them build-time
+  requirements, and hatchling fails outright without them — the image build was
+  broken and nothing caught it.
+- `release.yml` will not publish on a tag push. Both publish jobs now require an
+  explicit `workflow_dispatch`, because the package is installed from git and is
+  not on PyPI.
 - Governance profiles: `power_user` gains full episodic read/write;
   `end_user` may log and replay its own threads but not query by correlation id
   (trace ids come from operators, not from a user's own session).

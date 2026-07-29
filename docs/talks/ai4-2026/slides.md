@@ -45,13 +45,13 @@ slide 9 (it is built to be dropped) and you land on time with slide 10 intact.
   it is worse than no number.
 - Nothing claims a component persists to Atlas unless it demonstrably does.
 
-**Naming — one open item, must close before the deck is final.** Slide 12 promises
-`pip install agent-memory` and `github.com/mongodb-partners/agent-memory`. The PyPI name is
-already `agent-memory` in `pyproject.toml`, but **the GitHub repo is still
-`mongodb-partners/ai-memory`** — the rename is a GitHub org action, and slide 12 is a broken
-link until it happens. Either rename the repo before Tue Aug 4, or change slide 12 to the
-`ai-memory` URL. Do not walk on stage with an unresolved URL. (Earlier drafts also mentioned
-`memory-mcp`; that name is retired and appears nowhere in this deck.)
+**Naming — closed.** The package is **not published to PyPI**, so slide 12's CTA is a
+`git+https` install from `github.com/mongodb-partners/ai-memory` — the repo's real name, no
+rename required and no broken link. Say "install it from the repo," never "pip install
+agent-memory." The distribution is still named `agent-memory` in `pyproject.toml`, which is
+what `import agent_memory` follows from; that is internal and does not appear on a slide.
+(Earlier drafts also mentioned `memory-mcp`; that name is retired and appears nowhere in
+this deck.)
 
 ---
 
@@ -383,12 +383,12 @@ you want them repeating at the next booth.
 ### 1 · Install it
 
 ```
-pip install agent-memory
+uv add git+https://github.com/mongodb-partners/ai-memory.git
 ```
 
 ### 2 · Read it
 
-`github.com/mongodb-partners/agent-memory`
+`github.com/mongodb-partners/ai-memory`
 Framework-neutral Python library. Use it directly, over MCP, or over REST.
 Sample UI — the memory panel from slide 6 — included.
 
@@ -404,9 +404,12 @@ Blog: *Build AI Memory Systems with MongoDB Atlas, AWS & Claude*
 **Notes (0:15).** Four things, in this order, in one breath — the order is the ask, from
 cheapest commitment to biggest:
 
-"**Install it** — one pip command, it's open source. **Repo's on screen**, sample UI is in
-it. **Blog** if you want the long version. And **the whole stack-collapse story is my main
-session Thursday** — come to that one."
+"**Install it straight from the repo** — one command, it's open source. **Repo's on
+screen**, sample UI is in it. **Blog** if you want the long version. And **the whole
+stack-collapse story is my main session Thursday** — come to that one."
+
+Do not say "pip install agent-memory" — it is not on PyPI, and somebody in the front row
+will try it while you are still talking.
 
 QR to the repo on the booth backdrop, not on the slide — the slide is up for 15 seconds and
 nobody scans a moving target.

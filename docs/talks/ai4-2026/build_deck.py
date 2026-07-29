@@ -273,8 +273,10 @@ SLIDES: list[tuple[int, str, list[str], str]] = [
         # Ordered cheapest commitment first: install, repo, blog, Thursday. The order
         # is the ask.
         [
-            "1 — Install it:  pip install agent-memory",
-            "2 — Read it:  github.com/mongodb-partners/agent-memory — framework-neutral "
+            # Not on PyPI. A `pip install agent-memory` on screen resolves to somebody
+            # else's package or nothing at all, and someone in the front row will try it.
+            "1 — Install it:  uv add git+https://github.com/mongodb-partners/ai-memory.git",
+            "2 — Read it:  github.com/mongodb-partners/ai-memory — framework-neutral "
             "Python library, callable directly, over MCP, or over REST. Sample UI with "
             "the memory panel and the Compass pipelines included.",
             "3 — Go deeper:  the blog, 'Build AI Memory Systems with MongoDB Atlas, "
@@ -283,8 +285,9 @@ SLIDES: list[tuple[int, str, list[str], str]] = [
             "Agents: Deployment at Scale'.",
         ],
         "0:15. Four things, in this order, in one breath — the order is the ask, from "
-        "cheapest commitment to biggest. 'INSTALL IT — one pip command, it is open "
-        "source. REPO is on screen, sample UI is in it. BLOG if you want the long "
+        "cheapest commitment to biggest. 'INSTALL IT STRAIGHT FROM THE REPO — one "
+        "command, it is open source. REPO is on screen, sample UI is in it. BLOG if you "
+        "want the long "
         "version. And THE WHOLE STACK-COLLAPSE STORY is my main session Thursday — come "
         "to that one.' QR to the repo goes on the booth backdrop, not the slide: the "
         "slide is up for fifteen seconds and nobody scans a moving target. Then stop "
