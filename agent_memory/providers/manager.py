@@ -14,6 +14,9 @@ from agent_memory.providers.base import EmbeddingProvider, LLMProvider
 # sync with the selected model. Both the public Voyage API and the MongoDB
 # Atlas embeddings gateway serve these same models.
 _VOYAGE_MODEL_DIMS = {
+    "voyage-4": 1024,
+    "voyage-4-large": 1024,
+    "voyage-4-lite": 1024,
     "voyage-3": 1024,
     "voyage-3-large": 1024,
     "voyage-3-lite": 512,

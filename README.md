@@ -51,7 +51,7 @@ async def main():
     memory = await AsyncMemory.create(MemoryConfig(
         mongodb_connection_string="mongodb+srv://...",
         embedding_provider="voyage",          # or "bedrock" (default), "openai"
-        voyage_api_key="...",
+        voyage_api_key="...",                 # see "Two Voyage endpoints" below
     ))
 
     # Write a conversation. Short-term is immediate; promotion to long-term is
@@ -265,6 +265,32 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `episodic_embed_final_steps_only` | `True` | A mid-turn step has no answer worth embedding |
 | `workers_in_process` | `True` | `False` → an external runtime owns background work |
 | `await_search_indexes` | `False` | Set `True` in short-lived scripts, or the process can exit before indexes are queryable |
+
+### Two Voyage endpoints, and the key decides which
+
+Voyage embeddings are reachable two ways, and a key that works with one is
+rejected by the other with a `403`:
+
+| Key from | `voyage_base_url` | Models |
+|---|---|---|
+| Voyage AI | `https://api.voyageai.com/v1/embeddings` (default) | the full Voyage catalogue |
+| MongoDB Atlas | `https://ai.mongodb.com/v1/embeddings` | a subset — `voyage-4*`, `voyage-3*`, `voyage-code-*`, `voyage-law-2`, `voyage-finance-2` |
+
+An Atlas key (`al-…`) against the default URL fails with *"Voyage AI API keys
+work with Voyage AI endpoints, and MongoDB Atlas API keys work with MongoDB
+endpoints."* Point `voyage_base_url` at the gateway and set a model it serves:
+
+```bash
+VOYAGE_BASE_URL=https://ai.mongodb.com/v1/embeddings
+VOYAGE_MODEL=voyage-4
+```
+
+Every gateway model is **1024** dimensions, against the `1536` default. That is
+handled — `ProviderManager` aligns `embedding_dimension` to the model, unless you
+pinned a non-default value — but it is baked into the vector indexes at creation.
+Switching a provider after documents exist means re-creating
+`memories_vector_index`, `episodes_vector_index`, and `cache_vector_index` at the
+new dimension. A dimension mismatch does not raise; recall just returns nothing.
 
 ### One caveat about `workers_in_process=False`
 

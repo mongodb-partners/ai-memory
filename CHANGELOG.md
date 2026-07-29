@@ -71,6 +71,13 @@ and `scoped_user()`, isolated per asyncio Task and per thread.
 
 ### Fixed
 
+- `voyage-4`, `voyage-4-large`, and `voyage-4-lite` are recognized in the model
+  dimension table (all 1024), so `embedding_dimension` auto-aligns for them
+  instead of staying at the 1536 default. An unrecognized model left the default
+  in place, which builds a 1536-dim index for a 1024-dim embedder — and that
+  mismatch does not raise, it just returns nothing from recall. The README now
+  documents that the Atlas embeddings gateway and the public Voyage API need
+  different keys, URLs, and models.
 - Vector-index filter fields are now declared for `user_id`, `thread_id`, and
   `agent_name`. An undeclared field used in a `$vectorSearch` pre-filter makes
   the branch return nothing silently, with no error — the failure mode is an

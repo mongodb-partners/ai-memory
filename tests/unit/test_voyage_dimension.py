@@ -26,6 +26,16 @@ class TestVoyageDimensionSync:
         ProviderManager(cfg)
         assert cfg.embedding_dimension == 1024
 
+    def test_voyage_4_family_sets_dimension_1024(self):
+        """voyage-4 is what the Atlas gateway serves today; all three variants
+        are 1024, verified against the live gateway."""
+        for model in ("voyage-4", "voyage-4-large", "voyage-4-lite"):
+            cfg = _config(embedding_provider="voyage", voyage_model=model,
+                          voyage_api_key="k")
+            ProviderManager(cfg)
+            assert cfg.embedding_dimension == 1024, model
+            assert cfg.embedding_model == model
+
     def test_voyage_3_large_sets_dimension_1024(self):
         cfg = _config(embedding_provider="voyage", voyage_model="voyage-3-large",
                       voyage_api_key="k")
