@@ -31,6 +31,8 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from agent_memory.providers.base import is_usable_summary
+
 from .prompt import build_call, build_system_text, format_context
 
 log = logging.getLogger(__name__)
@@ -68,6 +70,32 @@ def _first_text(doc: dict, keys: tuple[str, ...]) -> str:
     return ""
 
 
+def collapse_stm_ltm_pairs(docs: list[dict]) -> list[dict]:
+    """Keep one document per fact, preferring the long-term half of a pair.
+
+    ``store_stm`` writes two documents for a significant human message: the
+    short-term record and a long-term candidate carrying ``source_stm_id``
+    pointing back at it. Both are real, both are indexed, and both match the same
+    query — so the raw ``search`` primitive returns the fact twice, correctly.
+
+    ``MemoryService.recall`` dedups these internally, but the panel needs the raw
+    fused scores that only ``search`` returns, so the collapse happens here.
+    Keeping the *long-term* half is the deliberate choice: it is the one with the
+    enriched importance score and the summary, which is what the tier is *for*.
+    The short-term twin has the placeholder 0.5 and no summary, and a panel that
+    showed it would be arguing against the slide it sits next to.
+
+    Ranks are assigned after this runs, so the numbers the audience sees are
+    consecutive rather than skipping the suppressed twins.
+    """
+    # Compared as strings because `_sanitize_doc` coerces `ObjectId` on read and
+    # the two fields do not necessarily arrive in the same representation.
+    superseded = {
+        str(doc["source_stm_id"]) for doc in docs if doc.get("source_stm_id")
+    }
+    return [doc for doc in docs if str(doc.get("_id")) not in superseded]
+
+
 def rank_label(index: int, score: float | None) -> str:
     """A rank the audience can read, since the raw RRF score is unreadable.
 
@@ -100,8 +128,20 @@ def project_memory_hit(doc: dict, index: int = 0) -> dict:
     score = doc.get("final_score")
     if score is None:
         score = doc.get("score")
+    # `summary` first, but only when it is one. Documents seeded before the
+    # consolidation guard landed still carry stored refusals ("This text fragment
+    # is too brief and lacks sufficient context"), and a panel that trusts the
+    # field renders the complaint in place of the memory. Checking here rather
+    # than only at write time means old data reads correctly too.
+    content = doc.get("content") or ""
+    summary = doc.get("summary")
+    text = (
+        summary.strip()
+        if is_usable_summary(summary, content)
+        else _first_text(doc, ("content", "summary"))
+    )
     return {
-        "text": _first_text(doc, ("summary", "content")),
+        "text": text,
         "score": score,
         "rank": rank_label(index, score),
         "importance": doc.get("importance"),
@@ -164,8 +204,14 @@ class TurnRunner:
         """
 
         async def _semantic() -> list[dict]:
-            result = await self._memory.search(user_id, query, limit=RECALL_LIMIT)
-            return result.get("results", [])
+            # Over-fetch, because collapsing STM/LTM twins removes rows and the
+            # panel should still show RECALL_LIMIT distinct facts. Doubling is the
+            # worst case: at most one twin per fact.
+            result = await self._memory.search(
+                user_id, query, limit=RECALL_LIMIT * 2
+            )
+            collapsed = collapse_stm_ltm_pairs(result.get("results", []))
+            return collapsed[:RECALL_LIMIT]
 
         async def _episodic() -> list[dict]:
             result = await self._memory.recall_activity(

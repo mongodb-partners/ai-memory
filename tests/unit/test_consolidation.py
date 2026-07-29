@@ -24,6 +24,15 @@ def _make_providers():
     return providers
 
 
+# Long enough to clear MIN_SUMMARIZABLE_CHARS. Below that threshold `_compress_stm`
+# skips the memory entirely, so a short fixture would make the tests below pass
+# without ever reaching the LLM — green for the wrong reason.
+LONG_CONTENT = (
+    "I cook for four most nights and for six when guests come over, so I plan "
+    "around sheet-pan roasts and one-pot pasta that scale without extra work."
+)
+
+
 def _make_collection():
     col = MagicMock()
     col.find = MagicMock()
@@ -43,7 +52,7 @@ class TestCompressSTM:
 
         old_memory = {
             "_id": ObjectId(),
-            "content": "old STM content to compress",
+            "content": LONG_CONTENT,
             "tier": "stm",
         }
         mock_cursor = AsyncMock()
@@ -53,7 +62,7 @@ class TestCompressSTM:
         count = await worker._compress_stm()
 
         assert count == 1
-        providers.llm.generate_summary.assert_called_once_with("old STM content to compress")
+        providers.llm.generate_summary.assert_called_once_with(LONG_CONTENT)
         col.update_one.assert_called_once()
         update_set = col.update_one.call_args[0][1]["$set"]
         assert update_set["summary"] == "compressed summary"
@@ -82,12 +91,85 @@ class TestCompressSTM:
 
         mock_cursor = AsyncMock()
         mock_cursor.to_list = AsyncMock(return_value=[
-            {"_id": ObjectId(), "content": "content", "tier": "stm"},
+            {"_id": ObjectId(), "content": LONG_CONTENT, "tier": "stm"},
         ])
         col.find = MagicMock(return_value=mock_cursor)
 
         count = await worker._compress_stm()
         assert count == 0
+
+
+class TestCompressSTMRejectsNonSummaries:
+    """REQ-E-121: a reply is not a summary just because the call succeeded.
+
+    ``generate_summary`` on a short conversational turn returns a well-formed
+    string saying the model cannot do it. Storing that string put "This text
+    fragment is too brief and lacks sufficient context" into the sample UI's
+    memory panel, where the memory should have been — visible on a booth screen,
+    and invisible to every test, because nothing raised and the field was set.
+    """
+
+    async def _run(self, content: str, reply: str):
+        col = _make_collection()
+        providers = _make_providers()
+        providers.llm.generate_summary = AsyncMock(return_value=reply)
+        worker = ConsolidationWorker(col, _make_config(), providers)
+
+        cursor = AsyncMock()
+        cursor.to_list = AsyncMock(
+            return_value=[{"_id": ObjectId(), "content": content, "tier": "stm"}]
+        )
+        col.find = MagicMock(return_value=cursor)
+
+        count = await worker._compress_stm()
+        return count, col, providers
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "I don't see the original text that needs to be summarized.",
+            "This text fragment is too brief and lacks sufficient context.",
+            "I'll help summarize this text, but it appears to be incomplete.",
+            "Please provide the text you would like me to summarize.",
+            "",
+            "   ",
+        ],
+    )
+    async def test_a_refusal_is_not_stored(self, reply):
+        count, col, _ = await self._run(LONG_CONTENT, reply)
+
+        assert count == 0
+        # Not stored *at all* — leaving the field unset is what makes readers
+        # fall back to `content`, which is always the memory itself.
+        col.update_one.assert_not_called()
+
+    async def test_a_summary_longer_than_its_source_is_rejected(self):
+        """Compression that expands is not compression."""
+        count, col, _ = await self._run(
+            "Short.", "A detailed elaboration of the single word above, at length."
+        )
+
+        assert count == 0
+        col.update_one.assert_not_called()
+
+    async def test_content_too_short_is_never_sent_to_the_model(self):
+        """The skip is before the call, not after: no point paying for a refusal."""
+        count, col, providers = await self._run(
+            "No alcohol in pairings.", "compressed summary"
+        )
+
+        assert count == 0
+        providers.llm.generate_summary.assert_not_called()
+        col.update_one.assert_not_called()
+
+    async def test_a_real_summary_still_lands(self):
+        """The guard must not swallow the working case."""
+        count, col, _ = await self._run(LONG_CONTENT, "Cooks for four to six.")
+
+        assert count == 1
+        assert col.update_one.call_args[0][1]["$set"]["summary"] == (
+            "Cooks for four to six."
+        )
 
 
 class TestForgetLowImportance:

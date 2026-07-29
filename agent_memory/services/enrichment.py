@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 
 from agent_memory.core.config import MCPConfig
+from agent_memory.providers.base import MIN_SUMMARIZABLE_CHARS, is_usable_summary
 
 logger = logging.getLogger(__name__)
 
@@ -116,13 +117,7 @@ class EnrichmentWorker:
         else:
             importance = await self.providers.llm.assess_importance(memory["content"])
 
-        summary_prompt = await self._get_prompt("summary_generation")
-        if summary_prompt:
-            summary = await self.providers.llm.generate_summary(
-                memory["content"], prompt=summary_prompt,
-            )
-        else:
-            summary = await self.providers.llm.generate_summary(memory["content"])
+        summary = await self._summarize(memory["content"])
 
         # Memory evolution check
         await self.memory_service.evolve_memory(
@@ -131,17 +126,43 @@ class EnrichmentWorker:
             memory["embedding"],
         )
 
-        await self.memories.update_one(
-            {"_id": memory_id},
-            {
-                "$set": {
-                    "enrichment_status": "complete",
-                    "importance": importance,
-                    "summary": summary,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
-        )
+        update = {
+            "enrichment_status": "complete",
+            "importance": importance,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        # Only set `summary` when there is one worth setting. Absent is the safe
+        # state: readers fall back to `content`, which is the memory itself.
+        if summary is not None:
+            update["summary"] = summary
+
+        await self.memories.update_one({"_id": memory_id}, {"$set": update})
+
+    async def _summarize(self, content: str) -> str | None:
+        """Summarize `content`, or return None when no usable summary exists.
+
+        Short memories are skipped rather than summarized: a one-line
+        conversational turn is already shorter than any summary of it, and asking
+        the model to compress it produces a refusal — "I don't see the original
+        text that needs to be summarized" — which reads as a successful call
+        returning a string. See `is_usable_summary` for why storing that is worse
+        than storing nothing.
+        """
+        if len(content) < MIN_SUMMARIZABLE_CHARS:
+            return None
+
+        summary_prompt = await self._get_prompt("summary_generation")
+        if summary_prompt:
+            summary = await self.providers.llm.generate_summary(
+                content, prompt=summary_prompt,
+            )
+        else:
+            summary = await self.providers.llm.generate_summary(content)
+
+        if not is_usable_summary(summary, content):
+            logger.debug("Discarded non-summary reply, keeping content as-is")
+            return None
+        return summary
 
     async def _process_merge(self, memory: dict) -> None:
         """Merge memory with its target via LLM, then soft-delete the target."""
@@ -176,9 +197,11 @@ class EnrichmentWorker:
                 f"Memory 1: {target['content']}\n\n"
                 f"Memory 2: {memory['content']}"
             )
-        merged_content = await self.providers.llm.chat(
-            messages=[{"role": "user", "content": merge_text}],
-        )
+        # `complete` builds the message in the provider's own shape. Passing an
+        # OpenAI-shaped `[{"role": "user", "content": str}]` here — as this line
+        # used to — makes every merge fail on Bedrock, the default provider, and
+        # the failure is swallowed by the caller's `except` into a log line.
+        merged_content = await self.providers.llm.complete(merge_text)
 
         now = datetime.now(timezone.utc)
 

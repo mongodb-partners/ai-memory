@@ -9,12 +9,11 @@ SDK at a compatible gateway (e.g. Grove). The SDK is an opt-in extra
 
 from __future__ import annotations
 
-import re
 from collections.abc import AsyncIterator
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.exceptions import ConfigError
-from agent_memory.providers.base import LLMProvider
+from agent_memory.providers.base import LLMProvider, parse_importance
 
 try:  # optional dependency
     from anthropic import AsyncAnthropic
@@ -69,11 +68,10 @@ class AnthropicLLMProvider(LLMProvider):
             "Respond with ONLY a single integer.\n\n"
             f"Memory: {content}"
         )
-        response = await self.chat([{"role": "user", "content": text}])
-        match = re.search(r"\d+", response or "")
-        if match:
-            return max(0.1, min(1.0, int(match.group()) / 10.0))
-        return 0.5
+        response = await self.complete(text)
+        # Handles both the 1-10 scale prompted above and a 0.0-1.0 reply, which a
+        # custom prompt may ask for. See `parse_importance`.
+        return parse_importance(response)
 
     async def generate_summary(self, content: str, max_length: int = 100) -> str:
         text = (
@@ -81,4 +79,4 @@ class AnthropicLLMProvider(LLMProvider):
             "Be concise and capture the key points.\n\n"
             f"Text: {content}"
         )
-        return await self.chat([{"role": "user", "content": text}])
+        return await self.complete(text)

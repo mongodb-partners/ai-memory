@@ -9,12 +9,15 @@ with that hint if it is missing.
 
 from __future__ import annotations
 
-import re
 from collections.abc import AsyncIterator
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.exceptions import ConfigError
-from agent_memory.providers.base import EmbeddingProvider, LLMProvider
+from agent_memory.providers.base import (
+    EmbeddingProvider,
+    LLMProvider,
+    parse_importance,
+)
 
 try:  # optional dependency
     from openai import AsyncOpenAI
@@ -72,11 +75,10 @@ class OpenAILLMProvider(LLMProvider):
             "Respond with ONLY a single integer.\n\n"
             f"Memory: {content}"
         )
-        response = await self.chat([{"role": "user", "content": text}])
-        match = re.search(r"\d+", response or "")
-        if match:
-            return max(0.1, min(1.0, int(match.group()) / 10.0))
-        return 0.5
+        response = await self.complete(text)
+        # Handles both the 1-10 scale prompted above and a 0.0-1.0 reply, which a
+        # custom prompt may ask for. See `parse_importance`.
+        return parse_importance(response)
 
     async def generate_summary(self, content: str, max_length: int = 100) -> str:
         text = (
@@ -84,7 +86,7 @@ class OpenAILLMProvider(LLMProvider):
             "Be concise and capture the key points.\n\n"
             f"Text: {content}"
         )
-        return await self.chat([{"role": "user", "content": text}])
+        return await self.complete(text)
 
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):

@@ -41,7 +41,12 @@ from server.cache_key import DemoResponseCache  # noqa: E402
 from server.history import ConversationHistory  # noqa: E402
 from server.prompt import build_call, build_system_text, format_context  # noqa: E402
 from server.sse import sse_response  # noqa: E402
-from server.turn import TurnRunner, project_episode_hit, project_memory_hit  # noqa: E402
+from server.turn import (  # noqa: E402
+    TurnRunner,
+    collapse_stm_ltm_pairs,
+    project_episode_hit,
+    project_memory_hit,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -484,6 +489,122 @@ class TestProjections:
         hit = project_memory_hit({"content": "raw turn text", "tier": "stm"})
 
         assert hit["text"] == "raw turn text"
+
+    def test_a_stored_refusal_does_not_displace_the_memory(self):
+        """REQ-E-121. The worker no longer stores these, but documents written
+        before that guard landed still carry them, and the panel is what shows
+        them. Preferring `summary` unconditionally put "This text fragment is too
+        brief and lacks sufficient context" on screen where the memory belonged."""
+        hit = project_memory_hit(
+            {
+                "content": (
+                    "I cook for four most nights and for six when guests come "
+                    "over, so I plan around meals that scale without extra work."
+                ),
+                "summary": "This text fragment is too brief and lacks context.",
+                "tier": "ltm",
+            }
+        )
+
+        assert hit["text"].startswith("I cook for four")
+
+    def test_a_real_summary_is_still_preferred_over_content(self):
+        """The summary is the enriched, condensed form — that is what the tier is
+        for, and a panel row has limited width."""
+        hit = project_memory_hit(
+            {
+                "content": (
+                    "I cook for four most nights and for six when guests come "
+                    "over, so I plan around meals that scale without extra work."
+                ),
+                "summary": "Cooks for four to six; wants meals that scale.",
+                "tier": "ltm",
+            }
+        )
+
+        assert hit["text"] == "Cooks for four to six; wants meals that scale."
+
+
+# ── STM/LTM twins ────────────────────────────────────────────────────
+
+
+class TestCollapseStmLtmPairs:
+    """``store_stm`` writes two documents per significant human message.
+
+    Both are real and both match the same query, so the raw ``search`` primitive
+    returns each fact twice — correct for a search primitive, wrong for a panel
+    whose whole job is to make the tiers legible. Left uncollapsed, the demo shows
+    "I'm allergic to shellfish" twice with two different importance scores, and the
+    obvious audience question ("why is it in there twice?") costs more time than
+    the talk has.
+    """
+
+    def test_the_short_term_twin_is_suppressed(self):
+        docs = [
+            {"_id": "ltm1", "source_stm_id": "stm1", "tier": "ltm"},
+            {"_id": "stm1", "tier": "stm"},
+        ]
+
+        kept = collapse_stm_ltm_pairs(docs)
+
+        assert [d["_id"] for d in kept] == ["ltm1"]
+
+    def test_the_long_term_half_is_the_one_kept(self):
+        """Not an arbitrary choice: only the LTM half has the enriched importance
+        and the summary, which is the difference the tier exists to show."""
+        docs = [
+            {"_id": "stm1", "tier": "stm", "importance": 0.5, "summary": None},
+            {"_id": "ltm1", "source_stm_id": "stm1", "tier": "ltm",
+             "importance": 0.9, "summary": "Allergic to shellfish"},
+        ]
+
+        kept = collapse_stm_ltm_pairs(docs)
+
+        assert len(kept) == 1
+        assert kept[0]["importance"] == 0.9
+        assert kept[0]["summary"] == "Allergic to shellfish"
+
+    def test_an_unpaired_short_term_doc_survives(self):
+        """Assistant turns and short human turns get no LTM candidate. Dropping
+        every STM row would empty the short-term group the slide names."""
+        docs = [
+            {"_id": "stm_solo", "tier": "stm"},
+            {"_id": "ltm1", "source_stm_id": "stm_other", "tier": "ltm"},
+        ]
+
+        kept = collapse_stm_ltm_pairs(docs)
+
+        assert {d["_id"] for d in kept} == {"stm_solo", "ltm1"}
+
+    def test_retrieval_order_is_preserved(self):
+        """The panel's ranks come from this list's order, and reordering here
+        would misreport what retrieval actually returned."""
+        docs = [
+            {"_id": "a", "tier": "ltm"},
+            {"_id": "stm1", "tier": "stm"},
+            {"_id": "b", "tier": "ltm", "source_stm_id": "stm1"},
+            {"_id": "c", "tier": "stm"},
+        ]
+
+        assert [d["_id"] for d in collapse_stm_ltm_pairs(docs)] == ["a", "b", "c"]
+
+    def test_object_ids_and_strings_compare_equal(self):
+        """``_sanitize_doc`` coerces ``ObjectId`` to ``str`` on read, and the two
+        id fields do not necessarily arrive in the same representation. Comparing
+        them raw would silently never match, and the collapse would be a no-op
+        that still passed every other test here."""
+        from bson import ObjectId
+
+        oid = ObjectId()
+        docs = [
+            {"_id": str(oid), "tier": "stm"},
+            {"_id": "ltm1", "source_stm_id": oid, "tier": "ltm"},
+        ]
+
+        assert [d["_id"] for d in collapse_stm_ltm_pairs(docs)] == ["ltm1"]
+
+    def test_an_empty_result_set_is_not_an_error(self):
+        assert collapse_stm_ltm_pairs([]) == []
 
 
 # ── SSE transport ────────────────────────────────────────────────────

@@ -1,0 +1,83 @@
+[
+  {
+    "$rankFusion": {
+      "input": {
+        "pipelines": {
+          "vectorPipeline": [
+            {
+              "$vectorSearch": {
+                "index": "episodes_vector_index",
+                "path": "embedding",
+                "queryVector": "<<EMBEDDING>>",
+                "numCandidates": 100,
+                "limit": 20,
+                "filter": {
+                  "user_id": "<<USER_ID>>"
+                }
+              }
+            }
+          ],
+          "fullTextPipeline": [
+            {
+              "$search": {
+                "index": "episodes_fts_index",
+                "compound": {
+                  "must": [
+                    {
+                      "text": {
+                        "query": "<<QUERY>>",
+                        "path": [
+                          "search_text"
+                        ]
+                      }
+                    }
+                  ],
+                  "filter": [
+                    {
+                      "equals": {
+                        "path": "user_id",
+                        "value": "<<USER_ID>>"
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "$limit": 20
+            }
+          ]
+        }
+      },
+      "combination": {
+        "weights": {
+          "vectorPipeline": 1.0,
+          "fullTextPipeline": 0.7
+        }
+      }
+    }
+  },
+  {
+    "$limit": 5
+  },
+  {
+    "$addFields": {
+      "score": {
+        "$meta": "score"
+      }
+    }
+  },
+  {
+    "$project": {
+      "_id": 0,
+      "search_text": 1,
+      "thread_id": 1,
+      "agent_name": 1,
+      "step": 1,
+      "ts": 1,
+      "correlation_id": 1,
+      "files_touched": 1,
+      "score": 1
+    }
+  }
+]

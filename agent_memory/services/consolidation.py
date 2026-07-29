@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from agent_memory.core.config import MCPConfig
+from agent_memory.providers.base import MIN_SUMMARIZABLE_CHARS, is_usable_summary
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,23 @@ class ConsolidationWorker:
 
         count = 0
         for memory in old_stm:
+            content = memory.get("content") or ""
+            # A single conversational turn is already as short as its summary
+            # would be. Asking anyway wastes a model call and invites a refusal.
+            if len(content) < MIN_SUMMARIZABLE_CHARS:
+                continue
             try:
-                summary = await self.providers.llm.generate_summary(memory["content"])
+                summary = await self.providers.llm.generate_summary(content)
+                if not is_usable_summary(summary, content):
+                    # Leave `summary` unset so every reader falls back to
+                    # `content`. Storing the reply would put "I don't see the
+                    # original text that needs to be summarized" wherever the
+                    # summary is preferred over the content — which is most
+                    # places, including the sample UI's memory panel.
+                    logger.debug(
+                        "Discarded non-summary reply for STM %s", memory["_id"]
+                    )
+                    continue
                 await self.memories.update_one(
                     {"_id": memory["_id"]},
                     {

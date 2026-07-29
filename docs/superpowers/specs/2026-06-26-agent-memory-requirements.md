@@ -238,6 +238,33 @@ the agent *did*, as distinct from what it *knows*. Ported from
 - **REQ-E-118:** THE SYSTEM SHALL grant the episodic operations to the
   `power_user` and `end_user` governance profiles, and `seed_defaults` SHALL add
   operations missing from an already-seeded profile.
+- **REQ-E-119:** WHEN parsing an importance score from an LLM reply THE SYSTEM
+  SHALL accept both a 1–10 rating and a 0.0–1.0 fraction, inferring the scale from
+  the value, and SHALL clamp the result to [0.1, 1.0]. WHERE the reply contains no
+  parseable number THE SYSTEM SHALL return the default of 0.5. WHERE the value is
+  exactly 1 — ambiguous between the two scales — THE SYSTEM SHALL resolve it to
+  1.0, because the opposite reading places the memory at the forgetting threshold
+  and is therefore unrecoverable.
+- **REQ-E-120:** THE SYSTEM SHALL provide `LLMProvider.user_turn(text)` returning
+  a one-message list in the provider's own native shape, and
+  `LLMProvider.complete(text, **kwargs)` which sends it via `chat` and forwards
+  every keyword argument. WHERE a provider's API requires content blocks rather
+  than a string — Bedrock Converse — it SHALL override `user_turn`. Every
+  library-internal caller holding only a prompt string SHALL use `complete` and
+  SHALL NOT construct a `messages` list itself, because both shapes are a
+  `list[dict]` and a mismatch is therefore invisible to typing, to review, and to
+  any test that mocks `chat`.
+- **REQ-E-121:** THE SYSTEM SHALL provide `is_usable_summary(summary, content)`
+  and SHALL NOT store a summary that fails it, leaving the field absent so every
+  reader falls back to `content`. WHERE `content` is shorter than
+  `MIN_SUMMARIZABLE_CHARS` THE SYSTEM SHALL NOT call the model at all, because a
+  single conversational turn is already shorter than any summary of it. A reply
+  SHALL be rejected WHEN it is empty, WHEN it is at least as long as its source,
+  or WHEN it matches a known refusal form — `generate_summary` returns whatever the
+  model said, and on short input what it says is frequently "I don't see the
+  original text that needs to be summarized", which is a successful call returning
+  a well-formed string. Readers preferring `summary` over `content` SHALL apply the
+  same check, so documents written before this guard still read correctly.
 
 ### Non-functional
 

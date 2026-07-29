@@ -1,0 +1,104 @@
+[
+  {
+    "$rankFusion": {
+      "input": {
+        "pipelines": {
+          "vectorPipeline": [
+            {
+              "$vectorSearch": {
+                "index": "memories_vector_index",
+                "path": "embedding",
+                "queryVector": "<<EMBEDDING>>",
+                "numCandidates": 100,
+                "limit": 20,
+                "filter": {
+                  "user_id": "<<USER_ID>>",
+                  "deleted_at": null,
+                  "tier": {
+                    "$in": [
+                      "stm",
+                      "ltm"
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          "fullTextPipeline": [
+            {
+              "$search": {
+                "index": "memories_fts_index",
+                "compound": {
+                  "must": [
+                    {
+                      "text": {
+                        "query": "<<QUERY>>",
+                        "path": [
+                          "content",
+                          "summary"
+                        ]
+                      }
+                    }
+                  ],
+                  "filter": [
+                    {
+                      "equals": {
+                        "path": "user_id",
+                        "value": "<<USER_ID>>"
+                      }
+                    },
+                    {
+                      "equals": {
+                        "path": "is_deleted",
+                        "value": false
+                      }
+                    },
+                    {
+                      "in": {
+                        "path": "tier",
+                        "value": [
+                          "stm",
+                          "ltm"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "$limit": 20
+            }
+          ]
+        }
+      },
+      "combination": {
+        "weights": {
+          "vectorPipeline": 1.0,
+          "fullTextPipeline": 0.7
+        }
+      }
+    }
+  },
+  {
+    "$limit": 5
+  },
+  {
+    "$addFields": {
+      "score": {
+        "$meta": "score"
+      }
+    }
+  },
+  {
+    "$project": {
+      "_id": 0,
+      "content": 1,
+      "tier": 1,
+      "importance": 1,
+      "access_count": 1,
+      "created_at": 1,
+      "score": 1
+    }
+  }
+]

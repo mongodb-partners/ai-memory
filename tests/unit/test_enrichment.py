@@ -33,11 +33,20 @@ def _make_memory_service():
     return svc
 
 
+# Long enough to clear MIN_SUMMARIZABLE_CHARS. Below that threshold `_summarize`
+# returns None without calling the model, so a short fixture would assert nothing
+# about summarization while appearing to. See REQ-E-121.
+LONG_CONTENT = (
+    "A test memory that needs enrichment, written long enough to be worth "
+    "summarizing rather than skipped as its own best summary."
+)
+
+
 def _make_pending_memory():
     return {
         "_id": ObjectId(),
         "user_id": "user1",
-        "content": "A test memory that needs enrichment",
+        "content": LONG_CONTENT,
         "enrichment_status": "pending",
         "enrichment_retries": 0,
         "embedding": [0.1] * 1536,
@@ -166,6 +175,60 @@ class TestEnrichmentWorkerEmptyQueue:
         col.update_one.assert_not_called()
 
 
+class TestEnrichmentWorkerSummaryGuard:
+    """REQ-E-121: enrichment must not store a refusal as a summary.
+
+    The same defect as in ``ConsolidationWorker._compress_stm``, on the path the
+    sample UI actually exercises — every LTM candidate queued by ``store_stm``
+    comes through here. Importance still has to land; dropping the summary must
+    not take the rest of the enrichment with it.
+    """
+
+    async def test_a_refusal_leaves_the_field_unset(self):
+        memory = _make_pending_memory()
+        col = _make_col_with_cursor([memory])
+        providers = _make_providers()
+        providers.llm.generate_summary = AsyncMock(
+            return_value="I don't see the original text that needs to be summarized."
+        )
+
+        worker = EnrichmentWorker(col, _make_config(), providers, _make_memory_service())
+        await worker.process_batch()
+
+        update_set = col.update_one.call_args[0][1]["$set"]
+        assert "summary" not in update_set
+        # Enrichment is not abandoned — a memory with no summary is still enriched.
+        assert update_set["enrichment_status"] == "complete"
+        assert update_set["importance"] == 0.7
+
+    async def test_short_content_skips_the_call_entirely(self):
+        memory = _make_pending_memory()
+        memory["content"] = "No alcohol in pairings."
+        col = _make_col_with_cursor([memory])
+        providers = _make_providers()
+
+        worker = EnrichmentWorker(col, _make_config(), providers, _make_memory_service())
+        await worker.process_batch()
+
+        providers.llm.generate_summary.assert_not_called()
+        update_set = col.update_one.call_args[0][1]["$set"]
+        assert "summary" not in update_set
+        # Importance is still assessed: short does not mean unimportant. "No
+        # alcohol" is exactly the kind of short, high-importance constraint the
+        # memory tier exists to keep.
+        assert update_set["importance"] == 0.7
+
+    async def test_a_real_summary_is_stored(self):
+        memory = _make_pending_memory()
+        col = _make_col_with_cursor([memory])
+        providers = _make_providers()
+
+        worker = EnrichmentWorker(col, _make_config(), providers, _make_memory_service())
+        await worker.process_batch()
+
+        assert col.update_one.call_args[0][1]["$set"]["summary"] == "A test summary"
+
+
 class TestEnrichmentWorkerMergePending:
     """REQ-E-005: Enrichment worker handles merge_pending memories."""
 
@@ -197,14 +260,20 @@ class TestEnrichmentWorkerMergePending:
 
         config = _make_config()
         providers = _make_providers()
-        providers.llm.chat = AsyncMock(return_value="merged content combining both")
+        # `complete`, not `chat`: the worker must not build the message itself.
+        # See REQ-E-120 — this assertion used to be on `chat`, which let the
+        # worker send an OpenAI-shaped message to every provider. Bedrock (the
+        # default) rejected it and the merge silently never happened.
+        providers.llm.complete = AsyncMock(
+            return_value="merged content combining both"
+        )
         memory_svc = _make_memory_service()
 
         worker = EnrichmentWorker(col, config, providers, memory_svc)
         await worker.process_batch()
 
         # Should have called LLM to merge content
-        providers.llm.chat.assert_called_once()
+        providers.llm.complete.assert_called_once()
         # Should update the memory with merged content and set status to complete
         update_calls = col.update_one.call_args_list
         assert len(update_calls) >= 2  # One for merged memory, one for soft-delete target

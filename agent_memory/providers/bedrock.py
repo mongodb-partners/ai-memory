@@ -10,7 +10,11 @@ import boto3
 from botocore.config import Config as BotocoreConfig
 
 from agent_memory.core.config import MCPConfig
-from agent_memory.providers.base import EmbeddingProvider, LLMProvider
+from agent_memory.providers.base import (
+    EmbeddingProvider,
+    LLMProvider,
+    parse_importance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +94,10 @@ class BedrockLLMProvider(LLMProvider):
         """Send a chat request to the LLM."""
         return await asyncio.to_thread(self._invoke_converse, messages, **kwargs)
 
+    def user_turn(self, text: str) -> list[dict]:
+        """Converse requires content blocks; a bare string is rejected outright."""
+        return [{"role": "user", "content": [{"text": text}]}]
+
     async def assess_importance(self, content: str, prompt: str | None = None) -> float:
         """Ask the LLM to rate importance on a 1-10 scale, normalize to 0.1-1.0."""
         if prompt:
@@ -101,19 +109,10 @@ class BedrockLLMProvider(LLMProvider):
                 "Respond with ONLY a single integer.\n\n"
                 f"Memory: {content}"
             )
-        messages = [
-            {
-                "role": "user",
-                "content": [{"text": text}],
-            }
-        ]
-        response = await self.chat(messages)
-        # Extract numeric value, normalize 1-10 → 0.1-1.0
-        match = re.search(r"\d+", response)
-        if match:
-            score = int(match.group())
-            return max(0.1, min(1.0, score / 10.0))
-        return 0.5  # Default on parse failure
+        response = await self.complete(text)
+        # Handles both scales, because `prompt` may ask for either. See
+        # `parse_importance` — a naive `\d+` silently floors every 0.0-1.0 reply.
+        return parse_importance(response)
 
     async def generate_summary(self, content: str, max_length: int = 100, prompt: str | None = None) -> str:
         """Ask the LLM to summarize content."""
@@ -125,13 +124,7 @@ class BedrockLLMProvider(LLMProvider):
                 "Be concise and capture the key points.\n\n"
                 f"Text: {content}"
             )
-        messages = [
-            {
-                "role": "user",
-                "content": [{"text": text}],
-            }
-        ]
-        return await self.chat(messages)
+        return await self.complete(text)
 
     async def chat_stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:
         """Stream text deltas from Bedrock's ``converse_stream``.
