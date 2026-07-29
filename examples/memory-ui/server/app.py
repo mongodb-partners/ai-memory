@@ -184,13 +184,13 @@ def create_app() -> FastAPI:
             episodic = await cursor.to_list(None)
 
         groups: dict[str, list[dict]] = {"stm": [], "ltm": [], "episodic": []}
-        for doc in semantic:
+        for index, doc in enumerate(semantic):
             doc.pop("_id", None)
-            hit = project_memory_hit(doc)
+            hit = project_memory_hit(doc, index)
             groups["stm" if doc.get("tier") == "stm" else "ltm"].append(hit)
-        for doc in episodic:
+        for index, doc in enumerate(episodic):
             doc.pop("_id", None)
-            groups["episodic"].append(project_episode_hit(doc))
+            groups["episodic"].append(project_episode_hit(doc, index))
 
         return {"user_id": user_id, "query": query, "groups": groups}
 

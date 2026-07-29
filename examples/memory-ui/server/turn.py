@@ -68,16 +68,42 @@ def _first_text(doc: dict, keys: tuple[str, ...]) -> str:
     return ""
 
 
-def project_memory_hit(doc: dict) -> dict:
+def rank_label(index: int, score: float | None) -> str:
+    """A rank the audience can read, since the raw RRF score is unreadable.
+
+    ``$rankFusion`` returns a reciprocal-rank sum: with the default ``k`` of 60,
+    a document ranked first in one branch scores about ``1/61`` — so a *perfect*
+    top hit displays as **0.016**. On a booth screen that reads as a failed
+    match, and it takes a paragraph of explanation to undo.
+
+    So the panel leads with ``#1``, ``#2`` and keeps the raw value alongside it
+    for anyone who asks. The score is still reported verbatim in the frame — this
+    is a label, not a replacement, and inventing a rescaled "relevance
+    percentage" would be presenting a made-up number as a measurement.
+    """
+    if score is None:
+        return f"#{index + 1}"
+    return f"#{index + 1} · rrf {score:.4f}"
+
+
+def project_memory_hit(doc: dict, index: int = 0) -> dict:
     """Project a ``memories`` document to the panel's hit shape.
 
     Keeps ``score`` and ``importance``. The retail UI this borrows from joined
     recalled memories into one string and discarded the scores — precisely the
     evidence a memory demo needs on screen.
     """
+    # `final_score` is the calibrated blend (recency + importance + relevance)
+    # that ranking applies on top of retrieval; `score` is the raw fused rank.
+    # Prefer the calibrated one when present — it is what actually ordered the
+    # list — but `or` would swallow a legitimate 0.0, so test for None.
+    score = doc.get("final_score")
+    if score is None:
+        score = doc.get("score")
     return {
         "text": _first_text(doc, ("summary", "content")),
-        "score": doc.get("final_score") or doc.get("score"),
+        "score": score,
+        "rank": rank_label(index, score),
         "importance": doc.get("importance"),
         "access_count": doc.get("access_count"),
         "ts": doc.get("created_at"),
@@ -85,7 +111,7 @@ def project_memory_hit(doc: dict) -> dict:
     }
 
 
-def project_episode_hit(doc: dict) -> dict:
+def project_episode_hit(doc: dict, index: int = 0) -> dict:
     """Project an ``episodes`` document. Tool names and files are this tier's point.
 
     ``search_text`` (the embedded question-plus-answer) reads better on screen
@@ -101,6 +127,7 @@ def project_episode_hit(doc: dict) -> dict:
     return {
         "text": _first_text(doc, ("search_text",)),
         "score": doc.get("score"),
+        "rank": rank_label(index, doc.get("score")),
         "ts": doc.get("ts"),
         "step": doc.get("step"),
         "tools": tools,
@@ -166,10 +193,15 @@ class TurnRunner:
         # One hybrid query covers both semantic tiers; split by the document's own
         # tier field so the panel can show which tier each hit came from.
         groups: dict[str, list[dict]] = {"stm": [], "ltm": [], "episodic": []}
-        for doc in semantic:
-            hit = project_memory_hit(doc)
+        for index, doc in enumerate(semantic):
+            # The rank is the document's position in the *combined* result set,
+            # not within its tier — that is the order retrieval actually
+            # returned, and renumbering per tier would misreport it.
+            hit = project_memory_hit(doc, index)
             groups["stm" if doc.get("tier") == "stm" else "ltm"].append(hit)
-        groups["episodic"] = [project_episode_hit(doc) for doc in episodic]
+        groups["episodic"] = [
+            project_episode_hit(doc, index) for index, doc in enumerate(episodic)
+        ]
         return groups
 
     # ── The turn ─────────────────────────────────────────────────────────

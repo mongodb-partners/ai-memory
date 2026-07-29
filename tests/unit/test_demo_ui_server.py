@@ -452,6 +452,32 @@ class TestProjections:
         assert hit["files"] == ["menu.md"]
         assert hit["step"] == 2
 
+    def test_the_rank_label_leads_with_position_not_the_raw_score(self):
+        """A perfect top hit scores ~0.016 under RRF with k=60. Displayed raw,
+        that reads as a failed match to an audience, and costs a paragraph of
+        explanation from the stage."""
+        hit = project_memory_hit({"summary": "x", "score": 0.0163934}, 0)
+
+        assert hit["rank"].startswith("#1")
+        # The measurement is still reported verbatim; the label is additional.
+        assert hit["score"] == 0.0163934
+
+    def test_a_zero_calibrated_score_is_not_mistaken_for_absent(self):
+        """`final_score or score` would swallow a legitimate 0.0 and silently
+        fall back to the raw fused rank — reporting a different number than the
+        one that actually ordered the list."""
+        hit = project_memory_hit({"summary": "x", "final_score": 0.0, "score": 0.9})
+
+        assert hit["score"] == 0.0
+
+    def test_a_scoreless_hit_still_gets_a_rank(self):
+        """Browse mode lists documents without running a search, so there is no
+        score — but the rows still need to be numbered."""
+        hit = project_memory_hit({"summary": "x"}, 2)
+
+        assert hit["rank"] == "#3"
+        assert hit["score"] is None
+
     def test_content_is_used_when_no_summary_exists(self):
         """STM documents are unenriched — summary arrives later, from the
         worker. Showing a blank row would read as a recall failure."""
@@ -530,6 +556,44 @@ class TestSSETransport:
 
         assert frames[-1]["event"] == "error"
         assert "cid-42" in frames[-1]["data"]
+
+    async def test_leading_spaces_survive_the_wire(self):
+        """The whitespace contract, locked because getting it wrong is invisible
+        in code review and mangles every answer on screen.
+
+        SSE frames a value as ``data: `` + value, and a conforming client strips
+        exactly *one* space after the colon. A token of ``" the"`` therefore goes
+        out as ``data:  the`` (two spaces) and comes back as ``" the"``. A client
+        that instead calls ``.strip()`` on the line — the obvious-looking thing —
+        eats the word boundary, and the answer renders as "Roastthepeppers".
+        """
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        chunks = ["Roast", " the", " peppers", " and", " serve", "."]
+        app = FastAPI()
+
+        @app.post("/s")
+        async def _s():
+            async def drive():
+                for chunk in chunks:
+                    yield {"event": "token", "data": chunk}
+
+            return sse_response(drive, "cid", 5.0)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as client:
+            raw = (await client.post("/s")).text
+
+        assert "data:  the" in raw  # two spaces: one padding, one meaningful
+        received = "".join(
+            line[6:] if line.startswith("data: ") else line[5:]
+            for line in raw.split("\r\n")
+            if line.startswith("data:")
+            and line[5:].lstrip() not in ("cid", "[DONE]")
+        )
+        assert received == "".join(chunks)
 
     async def test_the_generator_is_closed_on_exit(self):
         """The driver holds a Bedrock response and a Motor cursor; neither is

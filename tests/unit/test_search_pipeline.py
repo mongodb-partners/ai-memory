@@ -69,12 +69,30 @@ class TestRankFusionPipeline:
         # TC-EP-SP-006: embedding is excluded by default — it dominates the payload.
         pipeline = _pipeline()
         assert pipeline[1] == {"$limit": 5}
-        assert pipeline[2] == {"$project": {"embedding": 0}}
+        assert pipeline[2] == {"$addFields": {"score": {"$meta": "score"}}}
+        assert pipeline[3] == {"$project": {"embedding": 0}}
+
+    def test_the_fused_score_is_projected(self):
+        # TC-EP-SP-009: $rankFusion does not surface its own rank, so a consumer
+        # that wants to explain *why* a document ranked has nothing to show.
+        pipeline = _pipeline()
+        assert {"$addFields": {"score": {"$meta": "score"}}} in pipeline
+
+    def test_the_score_is_its_own_stage_not_a_projection_field(self):
+        # TC-EP-SP-010: `{"score": {"$meta": "score"}}` inside an exclusion
+        # $project does not error on Atlas — it silently returns null. Keeping it
+        # as a separate $addFields stage is what makes the score real.
+        pipeline = _pipeline()
+        project = next(s for s in pipeline if "$project" in s)["$project"]
+        assert "score" not in project
+        assert pipeline.index({"$addFields": {"score": {"$meta": "score"}}}) < (
+            pipeline.index({"$project": project})
+        )
 
     def test_projection_is_overridable(self):
         # TC-EP-SP-007
         pipeline = _pipeline(project={"embedding": 0, "search_text": 0})
-        assert pipeline[2] == {"$project": {"embedding": 0, "search_text": 0}}
+        assert pipeline[3] == {"$project": {"embedding": 0, "search_text": 0}}
 
     def test_branch_depth_is_tunable(self):
         # TC-EP-SP-008

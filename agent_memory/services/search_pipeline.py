@@ -99,6 +99,16 @@ def rank_fusion_pipeline(
             }
         },
         {"$limit": limit},
+        # $rankFusion does not project its fused rank; without this the caller
+        # gets ranked documents carrying no score at all, and any consumer that
+        # wants to show *why* a document ranked has nothing to show.
+        #
+        # It has to be $addFields rather than a computed field inside the
+        # $project below: mixing `{"score": {"$meta": "score"}}` into an
+        # exclusion projection does not error, it just silently yields null.
+        # Verified against Atlas 8.3 — with the field inside $project every
+        # score came back None; as its own stage the RRF values appear.
+        {"$addFields": {"score": {"$meta": "score"}}},
         {"$project": project if project is not None else {"embedding": 0}},
     ]
 
