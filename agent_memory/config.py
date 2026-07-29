@@ -27,7 +27,7 @@ class MemoryConfig(MCPConfig):
     # Anthropic provider (LLM only; no embeddings API)
     anthropic_api_key: str | None = None
     anthropic_base_url: str | None = None
-    anthropic_model: str = "claude-sonnet-4-6"
+    anthropic_model: str = "claude-sonnet-5"
 
     # Worker lifecycle seam (SP1). True → run enrichment/consolidation/audit-flush
     # in-process. False → an external runtime (Atlas Triggers / worker process)

@@ -75,6 +75,7 @@ class TestBedrockConverseKwargs:
         provider = BedrockLLMProvider.__new__(BedrockLLMProvider)
         provider._config = config
         provider._client = MagicMock()
+        provider._unsupported_sampling = set()
         return provider
 
     async def test_system_prompt_reaches_converse(self):
@@ -112,6 +113,7 @@ class TestBedrockStreaming:
         provider = BedrockLLMProvider.__new__(BedrockLLMProvider)
         provider._config = config
         provider._client = MagicMock()
+        provider._unsupported_sampling = set()
         provider._client.converse_stream.return_value = {"stream": iter(events)}
         return provider
 

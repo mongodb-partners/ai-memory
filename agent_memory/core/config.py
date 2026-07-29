@@ -35,7 +35,11 @@ class MCPConfig(BaseSettings):
 
     # LLM Provider
     llm_provider: str = "bedrock"
-    llm_model: str = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    # A cross-region inference profile, not a bare model id: the newest Claude
+    # models on Bedrock are only invocable through one. Sonnet rather than Opus
+    # because the LLM here does importance scoring and summarization — short,
+    # high-volume calls where latency matters more than depth.
+    llm_model: str = "global.anthropic.claude-sonnet-5"
 
     # AWS (Bedrock)
     aws_region: str = "us-east-1"
