@@ -5,9 +5,13 @@ Tue Aug 4, 2026 · 11:00–11:15 AM PST
 Wed Aug 5, 2026 · 11:00–11:15 AM PST
 Speaker: Mohammad Daoud Farooqi — Partner Solutions Architect for AI, MongoDB
 
-> **Status: DRAFT.** Slide bodies are final-ish; demo screens (5–7) get their real
-> screenshots once the sample UI lands. Everything here is deliverable without the UI —
-> the fallback for each demo slide is stated in its notes.
+> **Status: content final; screenshots outstanding.** The sample UI has landed at
+> `examples/memory-ui/` and every beat behind slides 5–7 is verified running against
+> live Atlas and Bedrock — see `examples/memory-ui/demo/rehearsal-log.md` for the
+> measured timings and `demo/compass-tabs.md` for the four Compass tabs. What slides
+> 5–7 still need is the capture itself: the 60–90s OFF-vs-ON recording and the
+> stills. Everything here remains deliverable without them — the fallback for each
+> demo slide is stated in its notes.
 
 **Abstract as submitted:**
 > Every team building agents hits the same wall: the model forgets, and a bigger context
@@ -15,7 +19,7 @@ Speaker: Mohammad Daoud Farooqi — Partner Solutions Architect for AI, MongoDB
 > short-term state, long-term semantic memory, and smart retrieval, all in one database
 > instead of four bolted together.
 
-**Time budget — 15:00 total, with 2:45 held back for churn and one question.**
+**Time budget — 15:00 total. The slides sum to 12:45, leaving 2:15 for churn and one question.**
 
 | # | Slide | Time | Cumulative |
 |---|---|---|---|
@@ -32,9 +36,12 @@ Speaker: Mohammad Daoud Farooqi — Partner Solutions Architect for AI, MongoDB
 | 11 | Takeaway | 0:30 | 12:30 |
 | 12 | Build it today | 0:15 | 12:45 |
 
-**Two clocks to watch, not twelve.** At **5:15** you should be starting the demo; at
+**Two clocks to watch, not twelve.** At **3:15** you should be starting the demo; at
 **9:45** you should be leaving slide 8. If you are late at the second checkpoint, drop
 slide 9 (it is built to be dropped) and you land on time with slide 10 intact.
+
+The cumulative column is *leave-by*, not arrive-by — 5:15 is when slide 5 should be behind
+you, not when it starts. Both checkpoints above are read the same way as the table.
 
 **Hard content rules for this deck**
 - No framework logos, names, or imports on any slide. The library is framework-neutral;
@@ -110,7 +117,7 @@ Two more things that are memory even though nobody calls them that:
 **sticky decisions** (once you've decided, stop re-deciding) and the
 **audit trail** (who recalled what, when).
 
-**Notes (2:00).** This table is the spine of the talk — but *say* far less than is printed
+**Notes (1:15).** This table is the spine of the talk — but *say* far less than is printed
 on it. Name the four, land the one line, move. Slides 5–7 re-teach all of it concretely,
 so anything you explain here you will explain twice.
 
@@ -166,7 +173,13 @@ I started a brand-new conversation. Nothing was in the context window."**
 
 Then switch the user ID in the header and re-run: the other user gets nothing. Per-user
 isolation, enforced in the query, not in the prompt. That is the second-most convincing
-five seconds of this talk.
+five seconds of this talk — and it only works if that second user id was **never seeded**.
+Seed one user, type a different one.
+
+Measured in rehearsal: the memory-ON turns take 11–13 seconds each, the memory-OFF turns
+2–3. That asymmetry is honest — recall plus inference costs more than inference alone — but
+13 seconds of silence in front of a standing crowd is why this screen is recorded rather
+than run live. Do not talk yourself into going live because rehearsal went well on good wifi.
 
 **Fallback if there is no recording:** describe it in 20 seconds and go straight to
 slide 6, which is a static screenshot and carries the same point. Never debug live at a
@@ -202,18 +215,33 @@ Then point at the cache: "Second identical question — cache hit, zero inferenc
 Every exec in the crowd hears that as a line item. Quote the similarity number only if
 it's legible on screen behind you; the *hit* is the point, not the decimal.
 
+If the recording shows the clock, use it: rehearsal measured the same question at 12.7
+seconds cold and **0.3 seconds** cached. That drop is legible from the back of the booth
+without anyone having to read a score.
+
 ---
 
 ## Slide 7 — DEMO: Compass, the documents
 
-*Two Compass panes side by side, or three tabs clicked through.*
+*Four Compass tabs, clicked through in order. Stills are equally good.*
 
-- A **long-term memory** document — `content`, `importance`, `access_count`, `embedding`
-- An **episodic** document — `messages[]`, `tool_calls`, `files_touched[]`, `step`, `parent_step`
+- A **short-term** document — `content`, `expires_at`, importance still at its placeholder
+- A **long-term** document — `content`, `importance`, `access_count`, `source_stm_id`
+- An **episodic** document — `messages[]`, `tool_calls`, `step`, `parent_step`, `correlation_id`
 - The **index list** — vector, full-text, and TTL indexes, side by side in one collection list
+
+Tabs 1 and 2 are the same collection. That is the point: the tier is a field, not a
+second system.
 
 **Notes (1:30).** "Same cluster. Same database. No sync job, no ETL, no second system.
 The documents the agent retrieves are the documents it writes."
+
+The exact filter for each tab, verified against the seeded data, is in
+`examples/memory-ui/demo/compass-tabs.md`. Set them up from that file the night before —
+not from this slide, and not by typing a filter in front of the crowd.
+
+Short on time? **Cut tab 1, not tab 3.** Tab 1's `expires_at` point is also carried by the
+TTL entry on tab 4's index list. Tab 3 is the episodic differentiator that slide 10 pays off.
 
 Land the TTL point here because it's the one an ops person in the crowd is already
 worried about: "Short-term state expires on its own — that's a TTL index, not a cron job
@@ -223,6 +251,12 @@ you have to remember to write. Retention for the activity log is one `collMod` a
 (`memories`, `episodes`, `cache`), 2 full-text indexes (`memories`, `episodes`), and 7 TTL
 indexes. Those move as the library changes, and Compass is showing the truth right next to
 you. Say "vector, full-text, and TTL, in the same index list" and point.
+
+Two fields not to over-claim, both checked against the current seed. Short-term documents
+carry **`conversation_id`, not `thread_id`** — `thread_id` lives on `episodes`. And
+`files_touched` is **empty**, because the demo agent has no filesystem tools; it is a good
+answer to a question and a bad thing to point at. Slide 10 shows the populated shape, which
+is where that field belongs.
 
 Have every Compass tab pre-opened, pre-scrolled, connected before the session starts.
 Static screenshots are a perfectly good substitute and I will not apologize for them.
@@ -288,7 +322,7 @@ because "most similar" is not the same as "most worth showing."
 
 ## Slide 9 — Four boxes → one cluster
 
-> **THIS IS THE CUT SLIDE.** If you are past 11:30 when you leave slide 8, or the crowd is
+> **THIS IS THE CUT SLIDE.** If you are past 9:45 when you leave slide 8, or the crowd is
 > thinning, skip it entirely and go to slide 10. Slide 10 is the differentiator; this one
 > is the argument. Losing the argument costs you nothing — slide 11 makes it in two lines,
 > and Thursday's main session *is* this slide for 45 minutes.

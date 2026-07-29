@@ -35,7 +35,7 @@ video player.
 - [ ] Display mirroring confirmed at the booth resolution. Check the *bottom* of the memory panel is not cut off.
 - [ ] Font size sanity check: stand 8 feet back and read the importance score. If you can't, zoom the recording.
 - [ ] Video player already open with `screen1-off-on.mov` loaded, paused at frame 0.
-- [ ] Compass open, connected, three tabs pre-opened and pre-scrolled (§3) — even if you plan to use stills.
+- [ ] Compass open, connected, **four** tabs pre-opened and pre-scrolled (§3) — even if you plan to use stills. Filters come from `examples/memory-ui/demo/compass-tabs.md`.
 - [ ] Deck open at slide 1, presenter notes on the laptop only.
 - [ ] Water within reach. You do this twice; the second one is harder.
 
@@ -145,7 +145,7 @@ Two fields not to over-claim, both verified as of the last seed:
 Do not scroll hunting for a field. Everything is pre-scrolled. Do not connect to a
 cluster in front of the crowd.
 
-**Fallback:** the three stills, shown in the same order, same lines. Indistinguishable to
+**Fallback:** the four stills, shown in the same order, same lines. Indistinguishable to
 the audience.
 
 ---
@@ -173,11 +173,13 @@ plus the RRF math in the pipeline, which the library also supports.
 
 Glance at the clock at exactly two points. Don't watch it continuously.
 
+These come from the per-slide budget in `slides.md`, which sums to 12:45 of a 15:00 slot.
+
 | At | You should be | If you're behind |
 |---|---|---|
-| **4:00** | Starting the recording (slide 5) | Cut slide 3's second half — the table reads fine on its own |
-| **9:00** | Leaving Compass, arriving at slide 8 | Skip slide 9 entirely; slide 10 is the more distinctive one |
-| **13:30** | On slide 12 | — |
+| **3:15** | Starting the recording (slide 5) | Cut slide 3's second half — the table reads fine on its own |
+| **9:45** | Leaving slide 8 | Skip slide 9 entirely; slide 10 is the more distinctive one |
+| **12:45** | Done, taking one question | — |
 
 Never sacrifice slide 8 or slide 10 for time. Those two are the reason the talk is worth
 standing for. Slide 9 is the one that cuts cleanly.
@@ -189,7 +191,7 @@ standing for. Slide 9 is the one that cuts cleanly.
 **Aug 4 → Aug 5.** Same script both mornings. After Tuesday, write down:
 - Which slide the crowd's attention broke on
 - Which question came up more than once (promote its answer into the talk)
-- Whether the 4:00 checkpoint held
+- Whether the 3:15 checkpoint held
 
 Reset for Wednesday: re-run `seed.py` (the demo user's `access_count` drifted on
 Tuesday), re-check display mirroring, re-load the video at frame 0.

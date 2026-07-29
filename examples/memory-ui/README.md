@@ -43,6 +43,30 @@ already running, so no shebang is consulted and the failure cannot occur.
 
 Then open http://localhost:5173.
 
+### Optional: seed a user, and mind the order
+
+The UI works against an empty user — the memory-ON pass fills the panel as you go.
+But the OFF-vs-ON contrast is sharper when the agent already knows things, so
+`demo/seed.py` plants a deterministic set spanning all four tiers:
+
+```bash
+cd examples/memory-ui && uv run --extra demo python -m demo.seed --user ai4-demo
+```
+
+**Seed after the server is up, not before.** `ConsolidationWorker` runs a
+consolidation pass at startup rather than after its first interval, so a server
+starting up behind a fresh seed immediately promotes every eligible short-term
+memory. The seeded promotion candidates vanish, the STM/LTM split shifts, and the
+promotion pipeline in `demo/compass-pipelines/` returns nothing. Nothing errors —
+the state just quietly stops matching what the seed reported.
+
+Expect `stm 12 · ltm 6 · episodes 3 · candidates 5`. If `candidates` is 0, the
+order was wrong; re-seed and leave the server running.
+
+Leave a second user id unseeded. Typing it into the header is how you show that
+per-user isolation is enforced inside the query rather than in the prompt — and
+that only works if the second user has nothing to recall.
+
 Configuration comes from the repository root's `.env` (see `.env.example`), which
 `server/app.py` loads explicitly. The library itself never reads a `.env` — that
 is correct for a library, and it is why the server does it.
@@ -111,6 +135,11 @@ reason an exact repeat should not pay for an embedding round-trip.
 `demo/compass-pipelines/` holds the saved aggregations behind the panel. Opening
 one is the "why it works" screen: the hybrid recall is `$rankFusion` over a
 `$vectorSearch` branch and a `$search` branch, in one pipeline, in one database.
+
+`demo/compass-tabs.md` is the companion: which four documents to have open, the
+verified filter for each, and the fields worth pointing at. `demo/rehearsal-log.md`
+records the measured latency of every demo beat, so a slow run on the day is
+recognizable as a network problem rather than a surprise.
 
 A note on reading those scores live: `$rankFusion` returns a reciprocal-rank sum,
 so with the default `k` of 60 a **first-place** document scores about 1/61 ≈
