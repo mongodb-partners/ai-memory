@@ -15,7 +15,14 @@ video player.
 ## Pre-flight (do this the night before, then again 20 min before)
 
 **Night before**
-- [ ] `python demo/seed.py --user daoud --user alex` — plants the deterministic memory set
+- [ ] **Start the demo server, then seed — in that order.** `ConsolidationWorker` runs a pass at startup, so a server booting after the seed promotes all 5 candidates within seconds and Compass pipeline 03 goes empty. Full ordering and the verification commands: `examples/memory-ui/demo/compass-tabs.md`.
+      ```bash
+      cd examples/memory-ui
+      uv run --extra demo uvicorn server.app:app --host 127.0.0.1 --port 8100   # shell 1
+      uv run --extra demo python -m demo.seed --user ai4-demo                    # shell 2
+      ```
+      Expect `stm 12 · ltm 6 · episodes 3 · candidates 5`.
+- [ ] **Do not seed the second user.** Step 8 of §1 proves isolation by showing `alex` recalls *nothing* — seeding `alex` gives it the same memories and inverts the beat. `--user` takes one value; the second user exists only as an empty user id typed into the header.
 - [ ] Record `screen1-off-on.mov` (60–90 sec, see §1). Re-record until it's clean; there is no live fallback that is as good.
 - [ ] Capture `screen2-memory-panel.png` (all four groups populated, scores legible at 1080p)
 - [ ] Capture Compass stills: `compass-ltm-doc.png`, `compass-episode-doc.png`, `compass-indexes.png`
@@ -109,17 +116,31 @@ live zoom.
 
 **Slide 7. Pre-opened tabs, or stills.**
 
-Click order, no exploring:
+Click order, no exploring. The filters for each tab are verified against the seeded data
+in **`examples/memory-ui/demo/compass-tabs.md`** — set them up from that file, not from
+memory:
 
 | Tab | Show | Say |
 |---|---|---|
-| 1 | `memories` — one LTM doc expanded, `importance` / `access_count` / `embedding` visible | *"The document the agent just read. Not an abstraction — a document."* |
-| 2 | `episodes` — one doc with `messages[]`, `files_touched[]`, `step`, `parent_step` | *"And the turn log. What it did, in order, under a trace ID."* |
-| 3 | Index list — vector, full-text, and TTL indexes in one list | *"Short-term state expires on its own. That's an index, not a cron job."* |
+| 1 | `memories` — one STM doc, `expires_at` and the placeholder `importance: 0.5` visible | *"Short-term state. Expires on its own — that date is enforced by a TTL index."* |
+| 2 | `memories` — one LTM doc, `importance` / `access_count` / `source_stm_id` visible | *"The document the agent just read. Not an abstraction — a document. And that score wasn't hand-written."* |
+| 3 | `episodes` — one doc with `messages[]`, `step`, `parent_step`, `correlation_id` | *"And the turn log. What it did, in order, under a trace ID."* |
+| 4 | Index list — both vector indexes plus the TTLs | *"Two vector indexes, same cluster, same 1024 dimensions. And the expiry is an index, not a cron job."* |
 
-Do not quote index counts. Compass is showing the real list next to you; point at it and
-say "vector, full-text, and TTL, same collection list." (For reference only, not for
-speaking: 3 vector, 2 full-text, 7 TTL as the schema stands today.)
+If you are short on time, **cut tab 1**, not tab 3. Tab 1's point is also made by the
+`expires_at` line on tab 4's index list; tab 3 is the episodic differentiator and the
+reason the talk is distinctive.
+
+Do not quote index counts from this script. Compass is showing the real list next to you;
+point at it. (For reference only, not for speaking: `memories` and `episodes` each carry
+one vector index at 1024 dims and one full-text index; `memories` has two TTL indexes,
+`episodes` one.)
+
+Two fields not to over-claim, both verified as of the last seed:
+- STM documents carry **`conversation_id`, not `thread_id`** — `thread_id` is on `episodes`.
+- `files_touched` is **empty** on the seeded episodes; the demo agent has no filesystem
+  tools. Don't point at it as though it were populated. It's a good answer to a question,
+  not a thing to show.
 
 Do not scroll hunting for a field. Everything is pre-scrolled. Do not connect to a
 cluster in front of the crowd.
