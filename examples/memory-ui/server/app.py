@@ -20,7 +20,9 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -35,6 +37,14 @@ from .sse import SHUTDOWN, drain_in_flight, sse_response
 from .turn import TurnRunner, project_episode_hit, project_memory_hit
 
 log = logging.getLogger(__name__)
+
+# The library reads config from the real environment and never loads a .env of
+# its own — correct for a library, but it means `uvicorn server.app:app` in a
+# fresh shell fails on a missing connection string. Loading the repo root's .env
+# here keeps the documented one-line run command working. `override=False` so an
+# explicitly exported value still wins, which is how the booth machine can point
+# at a different cluster without editing the file.
+load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
 
 # Per-turn ceiling. Generous enough for a cold Bedrock call on booth wifi, short
 # enough that a hung turn surfaces as an error frame while the presenter is still

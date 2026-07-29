@@ -174,3 +174,9 @@ cython_debug/
 .pypirc
 superpowers/
 talks/
+# Node — the sample UI (examples/memory-ui/frontend). `dist/` is already covered
+# above by the Python build rule, which happens to match Vite's output too.
+node_modules/
+.vite/
+npm-debug.log*
+*.tsbuildinfo

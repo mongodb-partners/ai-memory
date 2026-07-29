@@ -234,6 +234,11 @@ class TurnRunner:
                         "query": message,
                         "cache_hit": True,
                         "score": cached.get("score"),
+                        # "exact" or "semantic". Reported because they are
+                        # different claims: one skipped an embedding call as well
+                        # as the model, the other proves the cache matches meaning
+                        # rather than characters.
+                        "match": cached.get("match"),
                         "hits": [],
                     },
                 )

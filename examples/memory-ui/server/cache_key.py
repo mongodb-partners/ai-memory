@@ -30,6 +30,7 @@ nothing, which is the worst of both outcomes.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -48,6 +49,15 @@ SIMILARITY_THRESHOLD = 0.97
 # the second morning's warm-up is fast, short enough that Tuesday's answers do
 # not surface on Wednesday when the seed data has been reset.
 TTL_SECONDS = 6 * 60 * 60
+
+
+def normalize(query: str) -> str:
+    """Collapse a query to a comparable key: casefolded, punctuation-free.
+
+    ``"What should I make Friday?"`` and ``"what should i make friday"`` are the
+    same question and must be the same key.
+    """
+    return re.sub(r"[^a-z0-9]+", " ", query.casefold()).strip()
 
 
 class DemoResponseCache:
@@ -70,6 +80,17 @@ class DemoResponseCache:
             )
         except Exception:
             log.warning("demo cache TTL index not created", exc_info=True)
+
+        # Backs the exact-match fast path in `lookup`. A plain B-tree index, so it
+        # is queryable the instant the write commits — which is the entire reason
+        # that path exists.
+        try:
+            await self._collection.create_index(
+                [("user_id", 1), ("memory_enabled", 1), ("query_key", 1)],
+                name="ix_demo_cache_exact",
+            )
+        except Exception:
+            log.warning("demo cache exact index not created", exc_info=True)
 
         try:
             existing = await (
@@ -109,7 +130,49 @@ class DemoResponseCache:
     async def lookup(
         self, user_id: str, query: str, *, memory_enabled: bool
     ) -> dict[str, Any] | None:
-        """Return a cached response for this user *and* this memory mode."""
+        """Return a cached response for this user *and* this memory mode.
+
+        Two lookups, in order, and the order is the point.
+
+        **Exact match first.** Atlas Search indexes are eventually consistent: a
+        document inserted at the end of one turn is typically not queryable by
+        ``$vectorSearch`` for a few seconds. The demo asks the identical question
+        immediately after the answer that populated the cache, so the vector path
+        alone reliably *misses* on the one repeat the audience is watching for —
+        and the fix cannot be "the presenter pauses long enough", because on stage
+        that pause is dead air. A normalized-string lookup on a B-tree index is
+        queryable the moment the write commits, so the repeat hits every time.
+
+        This is not a demo cheat. A production semantic cache wants the same fast
+        path for the same reason: an exact repeat should never pay for an
+        embedding round-trip plus a vector search.
+
+        **Then similarity.** The vector path is what earns the word *semantic* —
+        it catches a reworded question that the string key cannot. Both are real;
+        the frame reports which one answered so the panel can say so.
+        """
+        try:
+            exact = await self._collection.find_one(
+                {
+                    "user_id": user_id,
+                    "memory_enabled": memory_enabled,
+                    "query_key": normalize(query),
+                },
+                {"embedding": 0},
+                sort=[("created_at", -1)],
+            )
+            if exact is not None:
+                return {
+                    "query": exact.get("query"),
+                    "response": exact.get("response"),
+                    # An exact string match is a similarity of 1.0 by definition,
+                    # not a measurement being passed off as one.
+                    "score": 1.0,
+                    "match": "exact",
+                }
+        except Exception:
+            log.warning("demo cache exact lookup failed; trying vector", exc_info=True)
+
         try:
             embedding = await self._embedding.generate_embedding(query)
             cursor = await self._collection.aggregate(
@@ -146,6 +209,7 @@ class DemoResponseCache:
             "query": top.get("query"),
             "response": top.get("response"),
             "score": top.get("score"),
+            "match": "semantic",
         }
 
     async def store(
@@ -161,6 +225,10 @@ class DemoResponseCache:
                     "user_id": user_id,
                     "memory_enabled": memory_enabled,
                     "query": query,
+                    # The exact-match key. Stored alongside the raw query rather
+                    # than replacing it, because the panel displays what was
+                    # actually asked.
+                    "query_key": normalize(query),
                     "response": response,
                     "embedding": embedding,
                     "created_at": datetime.now(timezone.utc),

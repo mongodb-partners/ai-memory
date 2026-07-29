@@ -1,0 +1,229 @@
+@import './tokens.css';
+@import './fonts.css';
+
+/* ── Reset / base ───────────────────────────────────────────────────────── */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.5;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+a {
+  color: var(--spring-green);
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+/* Brand focus ring (spring green) */
+:focus-visible {
+  outline: 2px solid var(--spring-green);
+  outline-offset: 2px;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(123, 140, 154, 0.4);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(123, 140, 154, 0.7);
+}
+
+/* ── Keyframes ──────────────────────────────────────────────────────────── */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* A memory row flashes green once when it first appears. On a booth screen the
+   audience needs to see *which* rows the turn just produced; a static list
+   reads as pre-baked. */
+@keyframes memory-land {
+  from {
+    background: rgba(0, 237, 100, 0.16);
+    border-color: rgba(0, 237, 100, 0.45);
+  }
+  to {
+    background: rgba(255, 255, 255, 0.02);
+    border-color: var(--border);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+/* The demo runs on a booth monitor at a known size, but the layout still has
+   to survive a laptop screen during rehearsal. Below 1100px the memory panel
+   drops under the chat instead of beside it. */
+@media (max-width: 1100px) {
+  .split {
+    grid-template-columns: 1fr !important;
+  }
+  .memory-panel {
+    max-height: 420px !important;
+  }
+}
+
+/* ── Markdown (assistant bubbles, dark) ─────────────────────────────────── */
+.chat-markdown {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.chat-markdown > *:first-child {
+  margin-top: 0;
+}
+.chat-markdown > *:last-child {
+  margin-bottom: 0;
+}
+.chat-markdown pre {
+  background: #05080c;
+  color: var(--mist);
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  margin: 10px 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+}
+.chat-markdown code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.chat-markdown :not(pre) > code {
+  background: rgba(0, 237, 100, 0.1);
+  color: var(--spring-green);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.chat-markdown p {
+  margin: 7px 0;
+}
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 7px 0;
+  padding-left: 20px;
+}
+.chat-markdown li {
+  margin: 3px 0;
+}
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4 {
+  margin: 14px 0 6px;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  line-height: 1.25;
+}
+.chat-markdown h1 {
+  font-size: 1.2rem;
+}
+.chat-markdown h2 {
+  font-size: 1.08rem;
+}
+.chat-markdown h3 {
+  font-size: 0.98rem;
+}
+.chat-markdown table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 13px;
+  width: 100%;
+}
+.chat-markdown th,
+.chat-markdown td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.chat-markdown th {
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 600;
+}
+.chat-markdown blockquote {
+  border-left: 3px solid var(--spring-green);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--text-secondary);
+}
+.chat-markdown a {
+  color: var(--spring-green);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.chat-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
