@@ -52,6 +52,14 @@ all = [
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
 ]
+# The sample UI's backend (examples/memory-ui/server). Not part of `all`: the
+# library itself never imports sse-starlette, and a demo dependency has no
+# business in a production install.
+demo = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "sse-starlette>=2.1.0",
+]
 dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.23",
@@ -60,6 +68,8 @@ dev = [
     "fastapi>=0.115.0",
     "openai>=1.40.0",
     "anthropic>=0.39.0",
+    # The demo server has tests, so its transport must be importable here too.
+    "sse-starlette>=2.1.0",
 ]
 
 # PyPI metadata is immutable per release, so these point at the repository's
