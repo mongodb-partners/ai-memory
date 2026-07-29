@@ -10,6 +10,7 @@ SDK at a compatible gateway (e.g. Grove). The SDK is an opt-in extra
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.exceptions import ConfigError
@@ -47,6 +48,19 @@ class AnthropicLLMProvider(LLMProvider):
             model=self._model, messages=messages, **kwargs
         )
         return response.content[0].text
+
+    async def chat_stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:
+        """Stream text deltas via the SDK's ``messages.stream`` helper.
+
+        ``text_stream`` yields text only, which is exactly this method's
+        contract — no filtering of tool-use or thinking blocks needed here.
+        """
+        kwargs.setdefault("max_tokens", _MAX_TOKENS)
+        async with self._client.messages.stream(
+            model=self._model, messages=messages, **kwargs
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
 
     async def assess_importance(self, content: str) -> float:
         text = (

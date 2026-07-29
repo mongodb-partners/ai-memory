@@ -10,6 +10,7 @@ with that hint if it is missing.
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.exceptions import ConfigError
@@ -44,6 +45,25 @@ class OpenAILLMProvider(LLMProvider):
             model=self._model, messages=messages, **kwargs
         )
         return response.choices[0].message.content
+
+    async def chat_stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:
+        """Stream text deltas from a chat-completions stream.
+
+        A chunk can carry an empty ``choices`` list (the usage-only final chunk
+        when ``stream_options`` is set) and ``delta.content`` is ``None`` on the
+        role-announcing first chunk, so both are guarded rather than indexed.
+        """
+        kwargs.pop("stream", None)
+        stream = await self._client.chat.completions.create(
+            model=self._model, messages=messages, stream=True, **kwargs
+        )
+        async for chunk in stream:
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            text = getattr(choices[0].delta, "content", None)
+            if text:
+                yield text
 
     async def assess_importance(self, content: str) -> float:
         text = (

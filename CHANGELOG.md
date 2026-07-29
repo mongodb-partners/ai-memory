@@ -48,6 +48,17 @@ none — can feed it.
 **Per-user scoping via `contextvars`** (`core/context.py`): `current_user_id()`
 and `scoped_user()`, isolated per asyncio Task and per thread.
 
+**`LLMProvider.chat_stream()` — token streaming.** `chat()` returns a complete
+string, so there was no way to stream a response through the provider seam at
+all. `chat_stream()` yields text deltas and is implemented natively for Bedrock
+(`converse_stream`), Anthropic (`messages.stream`), and OpenAI
+(`stream=True`) — no agent framework involved.
+
+It is concrete rather than abstract: the default implementation awaits `chat()`
+and yields one chunk, so a provider that cannot stream stays correct and no
+existing implementation breaks. Text only — tool-call and usage events would make
+the return type provider-shaped, which defeats the point of the seam.
+
 ### Changed
 
 - `services/search_pipeline.py` extracts the `$rankFusion` builder that was
@@ -92,6 +103,10 @@ and `scoped_user()`, isolated per asyncio Task and per thread.
   mismatch does not raise, it just returns nothing from recall. The README now
   documents that the Atlas embeddings gateway and the public Voyage API need
   different keys, URLs, and models.
+- `BedrockLLMProvider.chat()` no longer discards `**kwargs`. It accepted them
+  and dropped them, so a caller passing `system`, `inferenceConfig`, or a
+  per-call `modelId` got none of it and no error — the parameters simply had no
+  effect. Anything the Converse API accepts now passes through.
 - Vector-index filter fields are now declared for `user_id`, `thread_id`, and
   `agent_name`. An undeclared field used in a `$vectorSearch` pre-filter makes
   the branch return nothing silently, with no error — the failure mode is an

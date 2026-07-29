@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+from collections.abc import AsyncIterator
 
 import boto3
 
@@ -102,9 +103,75 @@ class BedrockLLMProvider(LLMProvider):
         ]
         return await self.chat(messages)
 
+    async def chat_stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:
+        """Stream text deltas from Bedrock's ``converse_stream``.
+
+        boto3's event stream is a blocking iterator, so it cannot be consumed
+        directly from the event loop. A worker thread drains it into a queue and
+        this coroutine yields from the queue — the alternative, calling
+        ``next()`` inside ``to_thread`` per event, pays a thread hop per token.
+
+        The sentinel is a tuple ``(kind, payload)`` rather than a bare ``None``
+        so a failure inside the thread is re-raised here instead of being
+        swallowed into a silently-truncated answer.
+        """
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue(maxsize=256)
+
+        def _pump() -> None:
+            try:
+                stream = self._client.converse_stream(
+                    **self._converse_kwargs(messages, **kwargs)
+                )["stream"]
+                for event in stream:
+                    delta = event.get("contentBlockDelta")
+                    if delta:
+                        text = delta.get("delta", {}).get("text")
+                        if text:
+                            # The queue is bounded, so a slow consumer applies
+                            # backpressure to the pump rather than buffering an
+                            # unbounded response in memory.
+                            asyncio.run_coroutine_threadsafe(
+                                queue.put(("text", text)), loop
+                            ).result()
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the loop
+                asyncio.run_coroutine_threadsafe(
+                    queue.put(("error", exc)), loop
+                ).result()
+            finally:
+                asyncio.run_coroutine_threadsafe(
+                    queue.put(("done", None)), loop
+                ).result()
+
+        pump = asyncio.create_task(asyncio.to_thread(_pump))
+        try:
+            while True:
+                kind, payload = await queue.get()
+                if kind == "text":
+                    yield payload  # type: ignore[misc]
+                elif kind == "error":
+                    raise payload  # type: ignore[misc]
+                else:
+                    return
+        finally:
+            # A consumer that breaks early (client disconnect) must not leave
+            # the pump thread holding an open HTTP response.
+            if not pump.done():
+                pump.cancel()
+
+    def _converse_kwargs(self, messages: list[dict], **kwargs) -> dict:
+        """Build the Converse API payload, honouring caller overrides.
+
+        Previously ``**kwargs`` was accepted and then silently discarded, so a
+        caller passing a system prompt or a temperature got neither and no
+        error. Anything the Converse API accepts (``system``,
+        ``inferenceConfig``, ``toolConfig``) now passes through, and ``modelId``
+        is overridable for a per-call model switch.
+        """
+        payload: dict = {"modelId": self._config.llm_model, "messages": messages}
+        payload.update(kwargs)
+        return payload
+
     def _invoke_converse(self, messages: list[dict], **kwargs) -> str:
-        response = self._client.converse(
-            modelId=self._config.llm_model,
-            messages=messages,
-        )
+        response = self._client.converse(**self._converse_kwargs(messages, **kwargs))
         return response["output"]["message"]["content"][0]["text"]
