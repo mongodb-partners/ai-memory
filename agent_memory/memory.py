@@ -41,7 +41,7 @@ class AsyncMemory:
         """
         from agent_memory.core.collections import EPISODES, EPISODES_COUNTERS
         from agent_memory.core.database import DatabaseManager
-        from agent_memory.core.migrations import ensure_indexes, ensure_search_indexes
+        from agent_memory.core.migrations import ensure_indexes
         from agent_memory.providers.manager import ProviderManager
         from agent_memory.services.admin import AdminService
         from agent_memory.services.audit import AuditService

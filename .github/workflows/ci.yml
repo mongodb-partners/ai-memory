@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't cancel 3.12 and 3.13 because 3.11 failed — a version-specific
+      # break is exactly what this matrix exists to find.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras --python ${{ matrix.python-version }}
+
+      - name: Lint
+        run: uv run ruff check agent_memory/
+
+      # The unit suite is fully mocked — no Atlas, no cloud credentials. The
+      # integration tier gates on server reachability and is intentionally not
+      # run here.
+      - name: Unit tests
+        run: uv run pytest tests/unit -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build
+        run: uv build
+
+      # A live .env exists in developer working trees, and a PyPI release cannot
+      # be edited after upload. The sdist uses an allow-list, so this is the
+      # second gate rather than the only one.
+      - name: Assert no secrets in the artifacts
+        run: |
+          if tar tzf dist/*.tar.gz | grep -iE '\.env|\.coverage'; then
+            echo "::error::Credential-shaped file found in the sdist."
+            exit 1
+          fi
+          echo "sdist is clean."
+
+      - name: Assert the package imports from the built wheel
+        run: |
+          uv venv /tmp/smoke
+          VIRTUAL_ENV=/tmp/smoke uv pip install dist/*.whl
+          /tmp/smoke/bin/python -c \
+            "from agent_memory import AsyncMemory, Memory, MemoryConfig, __version__; print(__version__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

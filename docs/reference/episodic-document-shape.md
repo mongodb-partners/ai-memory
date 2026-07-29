@@ -25,6 +25,13 @@ service, this is what you can rely on.
 }
 ```
 
+**What the library returns is not quite what is stored.** Reads project
+`embedding` out — a 1536-float array per turn would dominate the response for no
+reader benefit — and coerce BSON to JSON-safe values in place: `_id` becomes a
+string, `ts` becomes an ISO string, and the coercion recurses into `messages[]`,
+`todos[]`, and `files_touched[]`. Query the collection directly (Compass, an
+aggregation) and you see the raw BSON above, `embedding` included.
+
 Four of those defaults are load-bearing:
 
 **`user_id` and `thread_id` are required.** A turn missing either is discarded

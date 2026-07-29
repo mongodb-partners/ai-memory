@@ -48,8 +48,6 @@ def build_combined_app(config: MemoryConfig):
     on. The mounted MCP ASGI app's own lifespan is chained in so its tools
     register against the same facade.
     """
-    from fastapi import FastAPI
-
     shared: dict = {"app": None}
 
     class _Proxy:

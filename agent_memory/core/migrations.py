@@ -16,7 +16,7 @@ import logging
 from pymongo.errors import OperationFailure
 from pymongo.operations import SearchIndexModel
 
-from agent_memory.core.collections import STANDARD_INDEXES, SEARCH_INDEXES, get_search_indexes
+from agent_memory.core.collections import STANDARD_INDEXES, get_search_indexes
 
 logger = logging.getLogger(__name__)
 
