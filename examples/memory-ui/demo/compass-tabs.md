@@ -147,23 +147,39 @@ uv run --extra demo uvicorn server.app:app --host 127.0.0.1 --port 8100
 # 2. Then seed, in a second shell
 uv run --extra demo python -m demo.seed --user ai4-demo
 
-# 3. Then verify the pipelines, which also confirms 03 has rows
+# 3. Empty the second user. Wipe, do not seed — see below.
+uv run --extra demo python -m demo.seed --user alex --wipe-only
+
+# 4. Then verify the pipelines, which also confirms 03 has rows
 uv run --extra demo python -m demo.compass_pipelines \
     --query "what can't I eat?" --user ai4-demo --out /tmp/pipelines
 ```
 
-Expected after step 3: `stm 12 · ltm 6 · episodes 3 · candidates 5`, and all four
+Expected after step 4: `stm 12 · ltm 6 · episodes 3 · candidates 5`, and all four
 pipelines non-empty. If `candidates` is 0 or `03` returns nothing, the server ate
 them — re-seed, and do not restart the server afterwards.
+
+**Step 3 is not redundant, and it is the one you will skip.** The second user proves
+per-user isolation by recalling nothing, so it must be empty — but rehearsing types
+that beat's question at it with memory ON, and the question is *stored*. Measured
+after one dry run: `alex` held 2 STM documents, 1 episode, and 1 cache entry, one of
+which was the demo's own question verbatim. The next run can then recall its own
+residue and return hits where the whole point is zero. `--wipe-only` clears a user
+across all three collections and plants nothing, which `--user` alone cannot express.
+
+Verify it reports `memories=0 episodes=0 cache=0`. Anything nonzero is residue this
+step just saved you from showing.
 
 ## Pre-flight, in order
 
 1. Server up, health 200.
-2. Seed. Confirm the counts above.
-3. Compass pipelines verified non-empty.
-4. All four tabs open, in order, scrolled to the field being discussed.
-5. One warm-up turn through the UI. Atlas Search indexes are eventually
-   consistent, so the first turn after a write may miss; spend that miss in
-   private rather than on stage.
-6. Recorded OFF-vs-ON capture queued and ready in a window you can reach without
+2. Seed the demo user. Confirm the counts above.
+3. Wipe the second user. Confirm `memories=0 episodes=0 cache=0`.
+4. Compass pipelines verified non-empty.
+5. All four tabs open, in order, scrolled to the field being discussed.
+6. One warm-up turn through the UI, **as the demo user**. Atlas Search indexes are
+   eventually consistent, so the first turn after a write may miss; spend that miss
+   in private rather than on stage. Do not warm up as the second user — that is how
+   the residue gets planted.
+7. Recorded OFF-vs-ON capture queued and ready in a window you can reach without
    alt-tabbing through anything with credentials in it.

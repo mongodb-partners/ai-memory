@@ -67,6 +67,14 @@ Leave a second user id unseeded. Typing it into the header is how you show that
 per-user isolation is enforced inside the query rather than in the prompt — and
 that only works if the second user has nothing to recall.
 
+Unseeded is not the same as empty, though. Asking that user a question with memory
+ON *stores the question*, so a second run can recall the first run's own words and
+the point evaporates. Clear it without planting anything:
+
+```bash
+uv run --extra demo python -m demo.seed --user alex --wipe-only
+```
+
 Configuration comes from the repository root's `.env` (see `.env.example`), which
 `server/app.py` loads explicitly. The library itself never reads a `.env` — that
 is correct for a library, and it is why the server does it.

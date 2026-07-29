@@ -45,10 +45,36 @@ this measurement excludes.
 of a standing crowd, it is long — which is the whole reason Screen 1 is recorded.
 Do not decide to run it live because it worked in rehearsal on good wifi.
 
-**The rehearsal drifts the state.** Running the beats promotes and evolves
-memories: LTM in `seed-thread-hosting` went 2 → 5 through the evolution path, and
-three new threads appeared. Re-seed after any rehearsal, and re-seed between
-Tuesday and Wednesday. That is what the two-show reset in the demo script is for.
+**The rehearsal drifts the state, in both directions.** Measured the morning after
+this dry run, before touching anything:
+
+| | Seeded | Next morning |
+|---|---|---|
+| `ai4-demo` | stm 12 · ltm 6 | **stm 7 · ltm 11** |
+| `alex` (the "empty" user) | nothing | **2 stm · 1 episode · 1 cache entry** |
+
+Both numbers matter and neither is an error. The demo user's short-term memories
+were promoted by the running consolidation worker, which is the library working
+correctly — but it leaves Compass tab 1 showing 7 where the script says 12.
+
+The second row is the one that would have broken a beat. `alex` proves per-user
+isolation by recalling *nothing*, and the rehearsal typed the isolation beat's own
+question at it with memory ON — so the question got stored. One of those two
+short-term documents was `What should I make Friday?` verbatim. Run the beat again
+and it can recall its own residue and return hits, which is the opposite of the
+point, with no error to warn you.
+
+Hence `--wipe-only`, added after this run. Reset **both** users, server left up:
+
+```bash
+uv run --extra demo python -m demo.seed --user alex --wipe-only   # empty it
+uv run --extra demo python -m demo.seed --user ai4-demo          # re-plant it
+```
+
+Verified after doing exactly that: `stm 12 · ltm 6 · episodes 3 · candidates 5`,
+still holding 45 seconds later with the server running, `alex` at zero across all
+three collections, and all four Compass pipelines returning their original row
+counts and top scores. Re-run this between Tuesday and Wednesday.
 
 **Ordering, again.** The server was already running when this seed was planted. If
 you seed first and start the server second, its startup consolidation pass eats
@@ -64,7 +90,9 @@ the 5 promotion candidates and Compass pipeline 03 returns nothing. See
 | `03-stm-to-ltm-promotion.json` | 5 | — |
 | `04-tier-inventory.json` | 2 | — |
 
-Query: `what can't I eat?`, user `ai4-demo`.
+Query: `what can't I eat?`, user `ai4-demo`. Re-verified after the reset above and
+unchanged — row counts and both top scores identical, which is what makes them
+usable as a pre-flight check rather than just a record.
 
 ## Still outstanding
 

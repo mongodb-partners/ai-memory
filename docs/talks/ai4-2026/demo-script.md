@@ -22,7 +22,11 @@ video player.
       uv run --extra demo python -m demo.seed --user ai4-demo                    # shell 2
       ```
       Expect `stm 12 · ltm 6 · episodes 3 · candidates 5`.
-- [ ] **Do not seed the second user.** Step 8 of §1 proves isolation by showing `alex` recalls *nothing* — seeding `alex` gives it the same memories and inverts the beat. `--user` takes one value; the second user exists only as an empty user id typed into the header.
+- [ ] **Do not seed the second user — but do wipe it.** Step 8 of §1 proves isolation by showing `alex` recalls *nothing*, so seeding it inverts the beat. Rehearsing, though, types step 8's question *at* `alex` with memory ON, and that question gets stored: after one dry run the "empty" user holds the exact words the next run asks about, and the beat can recall its own residue instead of returning zero hits. Empty it without planting anything:
+      ```bash
+      uv run --extra demo python -m demo.seed --user alex --wipe-only
+      ```
+      Verify it reports `memories=0 episodes=0 cache=0` — nonzero means a previous run left residue, which is exactly what this clears.
 - [ ] Record `screen1-off-on.mov` (60–90 sec, see §1). Re-record until it's clean; there is no live fallback that is as good.
 - [ ] Capture `screen2-memory-panel.png` (all four groups populated, scores legible at 1080p)
 - [ ] Capture Compass stills: `compass-ltm-doc.png`, `compass-episode-doc.png`, `compass-indexes.png`
@@ -193,8 +197,19 @@ standing for. Slide 9 is the one that cuts cleanly.
 - Which question came up more than once (promote its answer into the talk)
 - Whether the 3:15 checkpoint held
 
-Reset for Wednesday: re-run `seed.py` (the demo user's `access_count` drifted on
-Tuesday), re-check display mirroring, re-load the video at frame 0.
+Reset for Wednesday — **both** users, and the order matters as much as it does the night
+before:
+
+```bash
+uv run --extra demo python -m demo.seed --user alex --wipe-only   # empty it
+uv run --extra demo python -m demo.seed --user ai4-demo          # re-plant it
+```
+
+Leave the server running through both. Tuesday's show drifts the state in two directions:
+the demo user's counts move as recall reinforces `access_count` and the consolidation
+worker promotes (measured after one dry run: `stm 12 · ltm 6` became `stm 7 · ltm 11`), and
+the second user quietly acquires the isolation beat's own question. Neither shows up as an
+error. Then re-check display mirroring and re-load the video at frame 0.
 
 **Between shows:** do not re-record anything. Tuesday's recording worked; Wednesday is
 not the day to improve it.

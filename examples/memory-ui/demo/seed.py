@@ -31,6 +31,14 @@ cache beat a HIT on the first ask, which is backwards — the audience needs to 
 the miss before the hit for the hit to mean anything.
 
 Idempotent: ``--user`` is wiped before seeding unless ``--keep`` is passed.
+
+The demo's *second* user is reset the other way round. It proves per-user isolation
+by recalling nothing, so it must be empty — but a rehearsal types the demo's
+question at it, and with memory ON that question gets stored. After one dry run the
+"empty" user holds the exact words the next run asks about. ``--wipe-only`` clears a
+user and plants nothing:
+
+    uv run --extra demo python -m demo.seed --user alex --wipe-only
 """
 
 from __future__ import annotations
@@ -140,6 +148,46 @@ def _oneline(text: str | None) -> str:
     return collapsed[:EXCERPT] + ("…" if len(collapsed) > EXCERPT else "")
 
 
+async def _wipe(memory: AsyncMemory, db, user_id: str) -> None:
+    """Remove every trace of `user_id` across all three collections.
+
+    `wipe_user_data` covers `memories`, but `episodes` and the demo's response
+    cache are outside the library's user-data contract and have to be named
+    explicitly. Missing either one is not a visible error — it is a stale document
+    that surfaces mid-demo.
+    """
+    result = await memory.wipe_user_data(user_id, confirm=True)
+    episodes = await db["episodes"].delete_many({"user_id": user_id})
+    cache = await db["demo_response_cache"].delete_many({"user_id": user_id})
+    log.info(
+        "wiped %s: memories=%s episodes=%s cache=%s",
+        user_id, result.get("memories_deleted", "?"),
+        episodes.deleted_count, cache.deleted_count,
+    )
+
+
+async def wipe_only(user_id: str) -> int:
+    """Clear a user without seeding it — the reset for the isolation beat.
+
+    The second user in the demo proves per-user isolation by recalling *nothing*,
+    which means it must be empty and must stay empty. But a rehearsal types the
+    demo's question at it, and with memory ON that question is itself stored: after
+    one dry run the "empty" user holds the very words the next run will ask about,
+    and the beat can recall its own residue instead of returning zero hits.
+
+    `seed()` wipes only as a prelude to planting data, so it cannot express "empty
+    this one and stop". This can.
+    """
+    config = MemoryConfig.from_env(await_search_indexes=True)
+    memory = await AsyncMemory.create(config)
+    try:
+        await _wipe(memory, memory._db_manager.db, user_id)
+        log.info("%s is now empty — that is the point; do not seed it", user_id)
+        return 0
+    finally:
+        await memory.close()
+
+
 async def seed(user_id: str, *, keep: bool, promote: bool) -> int:
     config = MemoryConfig.from_env(await_search_indexes=True)
     memory = await AsyncMemory.create(config)
@@ -147,13 +195,7 @@ async def seed(user_id: str, *, keep: bool, promote: bool) -> int:
 
     try:
         if not keep:
-            result = await memory.wipe_user_data(user_id, confirm=True)
-            episodes = await db["episodes"].delete_many({"user_id": user_id})
-            await db["demo_response_cache"].delete_many({"user_id": user_id})
-            log.info(
-                "wiped %s: memories=%s episodes=%s",
-                user_id, result.get("memories_deleted", "?"), episodes.deleted_count,
-            )
+            await _wipe(memory, db, user_id)
 
         now = datetime.now(timezone.utc)
 
@@ -374,11 +416,20 @@ def main() -> int:
         help="run the consolidation worker, promoting the candidates to LTM; "
              "leaves Compass pipeline 03 empty until the next seed",
     )
+    parser.add_argument(
+        "--wipe-only", action="store_true",
+        help="clear the user and plant nothing — the reset for the second user, "
+             "which proves isolation by recalling nothing and so must stay empty",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
         level=logging.INFO, format="%(levelname)-7s %(name)s: %(message)s"
     )
+    if args.wipe_only:
+        if args.keep:
+            parser.error("--wipe-only and --keep contradict each other")
+        return asyncio.run(wipe_only(args.user))
     return asyncio.run(seed(args.user, keep=args.keep, promote=args.promote))
 
 
