@@ -90,6 +90,58 @@ class TestDelegation:
         assert (await tools["recall_decision"]("u1", "k"))["value"] is None
 
 
+class TestEpisodicTools:
+    """TC-MCP-EP-001..004: the five episodic tools over the facade."""
+
+    def _wired(self):
+        app = _app()
+        app.log_activity = AsyncMock(return_value={"enqueued": True, "thread_id": "t1"})
+        app.recall_activity = AsyncMock(return_value={"results": [], "count": 0})
+        app.get_thread = AsyncMock(return_value={"results": [], "count": 0})
+        app.get_activity_by_correlation = AsyncMock(return_value={"results": [], "count": 0})
+        app.set_activity_retention = AsyncMock(return_value={"ttl_seconds": 7200})
+        mcp = MagicMock()
+        tools = _capture_tool(mcp)
+        register_all_tools(mcp, app)
+        return app, tools
+
+    async def test_all_five_episodic_tools_delegate(self):
+        app, tools = self._wired()
+        assert (await tools["log_activity"]("u1", "t1", [{"type": "human"}]))["enqueued"] is True
+        await tools["search_activity"]("u1", "q", thread_id="t1")
+        await tools["get_thread"]("u1", "t1")
+        await tools["get_correlation"]("u1", "corr-1")
+        assert (await tools["set_activity_retention"]("u1", 7200))["ttl_seconds"] == 7200
+
+        app.log_activity.assert_awaited_once()
+        app.recall_activity.assert_awaited_once()
+        app.get_thread.assert_awaited_once()
+        app.get_activity_by_correlation.assert_awaited_once()
+        app.set_activity_retention.assert_awaited_once()
+
+    async def test_log_activity_forwards_trace_and_tenant_fields(self):
+        app, tools = self._wired()
+        await tools["log_activity"](
+            "u1", "t1", [{"type": "ai"}], todos=[{"id": "1"}], agent_name="planner",
+            correlation_id="corr", conversation_id="c1",
+        )
+        kwargs = app.log_activity.call_args.kwargs
+        assert kwargs["correlation_id"] == "corr"
+        assert kwargs["conversation_id"] == "c1"
+        assert kwargs["agent_name"] == "planner"
+
+    async def test_retention_accepts_none_as_keep_forever(self):
+        """None is a value here, not a missing argument."""
+        app, tools = self._wired()
+        await tools["set_activity_retention"]("u1", None)
+        assert app.set_activity_retention.call_args.kwargs["ttl_seconds"] is None
+
+    async def test_episodic_denial_becomes_an_error_dict(self):
+        app, tools = self._wired()
+        app.recall_activity = AsyncMock(side_effect=AccessError("denied"))
+        assert await tools["search_activity"]("u1", "q") == {"error": "denied"}
+
+
 class TestErrorTranslation:
     """TC-MCP-002: AccessError / RateLimitError → {"error": ...}."""
 
@@ -137,6 +189,24 @@ class TestAutoCapture:
         config.auto_capture_max_content_length = 2000
         mw = AutoCaptureMiddleware(app, config)
         await mw.capture("store_memory", {"user_id": "u1"}, {"result": "r"})
+        app.add.assert_not_awaited()
+
+    @pytest.mark.parametrize("tool", ["log_activity", "set_activity_retention"])
+    async def test_episodic_write_tools_are_never_auto_captured(self, tool):
+        """The episodic tier is already the record of what the agent did.
+
+        Capturing a turn-log write would store a memory *about* the log, so the
+        two tiers would feed each other — pure amplification, and it is the
+        failure mode most likely to go unnoticed because everything still works.
+        """
+        app = _app()
+        config = MagicMock()
+        config.auto_capture_enabled = True
+        config.auto_capture_tools = [tool]  # explicitly opted in — exclusion still wins
+        config.auto_capture_min_length = 1
+        config.auto_capture_max_content_length = 2000
+        mw = AutoCaptureMiddleware(app, config)
+        await mw.capture(tool, {"user_id": "u1", "thread_id": "t1"}, {"result": "r"})
         app.add.assert_not_awaited()
 
 

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Operations classified as "search" for governance limit mapping (INV-005).
 _SEARCH_OPERATIONS = frozenset(
-    {"recall_memory", "hybrid_search", "check_cache"}
+    {"recall_memory", "hybrid_search", "check_cache", "search_activity"}
 )
 
 
@@ -39,6 +39,7 @@ class AsyncMemory:
         Equivalent to the former FastMCP ``lifespan`` startup, lifted out and
         made callable by any consumer.
         """
+        from agent_memory.core.collections import EPISODES, EPISODES_COUNTERS
         from agent_memory.core.database import DatabaseManager
         from agent_memory.core.migrations import ensure_indexes, ensure_search_indexes
         from agent_memory.providers.manager import ProviderManager
@@ -46,6 +47,7 @@ class AsyncMemory:
         from agent_memory.services.audit import AuditService
         from agent_memory.services.cache import CacheService
         from agent_memory.services.decision import DecisionService
+        from agent_memory.services.episodic import EpisodicService
         from agent_memory.services.governance import GovernanceService
         from agent_memory.services.memory import MemoryService
         from agent_memory.services.prompt_library import PromptLibrary
@@ -74,6 +76,12 @@ class AsyncMemory:
         )
         self.audit_service = AuditService(db["audit_log"], config)
         self.decision_service = DecisionService(db["decisions"], config)
+        # Episodic owns its own writer task; _maybe_start_workers schedules it.
+        self.episodic_service = EpisodicService(
+            db[EPISODES], config, self.providers,
+            counter_collection=db[EPISODES_COUNTERS],
+            audit_service=self.audit_service,
+        )
         self.prompt_library = PromptLibrary(db["prompts"], config)
         self.admin_service = AdminService(db)
 
@@ -141,7 +149,9 @@ class AsyncMemory:
                 "workers_in_process=False: in-process enrichment/consolidation/"
                 "audit-flush are disabled. Memories persist but are never enriched, "
                 "promoted, or forgotten until an external runtime (SP1) drains the "
-                "queues."
+                "queues. Episodic logging also has no consumer, so log_activity() "
+                "fills its bounded queue and then discards the oldest turns; set "
+                "episodic_enabled=False to make that explicit."
             )
             self._workers = []
             return
@@ -161,6 +171,10 @@ class AsyncMemory:
             asyncio.create_task(enrichment.run()),
             asyncio.create_task(consolidation.run()),
             asyncio.create_task(audit_flush.run()),
+            # The episodic writer's consumer loop. Unlike the other three it owns
+            # queued data, so close() flushes it explicitly rather than relying on
+            # task.cancel() — see close().
+            asyncio.create_task(self.episodic_service.worker.run()),
         ]
 
     @staticmethod
@@ -187,7 +201,19 @@ class AsyncMemory:
             )
 
     async def close(self) -> None:
-        """Cancel workers, flush audit, close the database connection."""
+        """Drain episodic, cancel workers, flush audit, close the connection.
+
+        Order matters. Episodic is drained *first*, while its consumer task is
+        still alive and the database is still open — the queue holds turns that
+        have not reached Atlas, and cancelling the task would discard them.
+        """
+        episodic = getattr(self, "episodic_service", None)
+        if episodic is not None:
+            try:
+                await episodic.close(self.config.episodic_shutdown_timeout_seconds)
+            except Exception:
+                logger.warning("Episodic drain failed on close.", exc_info=True)
+
         for task in getattr(self, "_workers", []):
             task.cancel()
         search_task = getattr(self, "_search_index_task", None)
@@ -339,6 +365,88 @@ class AsyncMemory:
             return await self.decision_service.recall(user_id, key)
 
         return await self._run(user_id, "recall_decision", "decision:read", _do, key=key)
+
+    # ── Episodic memory (the agent activity log) ─────────────────────────────
+
+    async def log_activity(self, user_id: str, thread_id: str, messages: list,
+                           *, todos=None, agent_name=None, correlation_id=None,
+                           conversation_id=None, ts=None) -> dict:
+        """Record one agent turn. Non-blocking: enqueues and returns.
+
+        Deliberately does **not** go through ``_run``. ``_run`` writes one audit
+        record per call, and a turn log is high-volume by nature — routing it
+        there produces audit amplification, where logging the agent costs more
+        writes than the agent. Governance and rate limiting still apply via
+        ``_check_access``; the worker emits one audit entry per flushed batch.
+        """
+        await self._check_access(user_id, "log_activity")
+        enqueued = self.episodic_service.log_activity(
+            user_id, thread_id, messages, todos=todos, agent_name=agent_name,
+            correlation_id=correlation_id, conversation_id=conversation_id, ts=ts,
+        )
+        return {"enqueued": enqueued, "thread_id": thread_id}
+
+    async def recall_activity(self, user_id: str, query: str, *, thread_id=None,
+                              agent_name=None, since=None, limit: int = 5) -> dict:
+        """Hybrid recall over logged turns — "what did I actually do?"."""
+        async def _do():
+            results = await self.episodic_service.search(
+                user_id, query, thread_id=thread_id, agent_name=agent_name,
+                since=since, limit=limit,
+            )
+            return {"results": results, "count": len(results)}
+
+        return await self._run(
+            user_id, "search_activity", "episodic:read", _do, query=query,
+        )
+
+    async def get_thread(self, user_id: str, thread_id: str, *, limit=None,
+                        ascending: bool = True) -> dict:
+        """Replay a thread's turns in step order."""
+        async def _do():
+            results = await self.episodic_service.get_thread(
+                user_id, thread_id, limit=limit, ascending=ascending
+            )
+            return {"results": results, "count": len(results)}
+
+        return await self._run(
+            user_id, "get_thread", "episodic:read", _do, thread_id=thread_id,
+        )
+
+    async def get_activity_by_correlation(self, user_id: str, correlation_id: str,
+                                          *, limit=None) -> dict:
+        """Every turn sharing a trace id — the join back to your tracing stack."""
+        async def _do():
+            results = await self.episodic_service.get_by_correlation_id(
+                user_id, correlation_id, limit=limit
+            )
+            return {"results": results, "count": len(results)}
+
+        return await self._run(
+            user_id, "get_correlation", "episodic:read", _do,
+            correlation_id=correlation_id,
+        )
+
+    async def flush_activity(self, timeout: float = 5.0) -> bool:
+        """Wait for queued turns to reach Atlas. No user scope; no audit entry.
+
+        Not an access-controlled operation: it is a lifecycle call about this
+        process's own buffer, not a read or write of anyone's data.
+        """
+        return await self.episodic_service.flush(timeout)
+
+    async def set_activity_retention(self, user_id: str, *, ttl_seconds) -> dict:
+        """Change episodic retention in place. ``None`` makes the log permanent."""
+        async def _do():
+            return await self.episodic_service.set_retention(ttl_seconds)
+
+        return await self._run(
+            user_id, "set_activity_retention", "admin", _do, ttl_seconds=ttl_seconds,
+        )
+
+    def activity_stats(self) -> dict:
+        """Episodic queue and throughput counters. Synchronous, no round trip."""
+        return self.episodic_service.stats()
 
     async def health(self, user_id: str) -> dict:
         async def _do():

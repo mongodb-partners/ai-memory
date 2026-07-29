@@ -1,18 +1,29 @@
-"""Collection names and index definitions for Memory-MCP Phase 0.
+"""Collection names and index definitions.
 
 Index definitions are separated from migration logic so they serve as
-the canonical reference for the database schema.
+the canonical reference for the database schema. ``core/migrations.py`` is
+data-driven over these two lists, so adding a collection here is enough.
 """
 
 # ─── Collection Names ────────────────────────────────────────────
 
 MEMORIES: str = "memories"
+EPISODES: str = "episodes"
+# Per-thread step counters, kept out of EPISODES so that collection stays
+# homogeneous — one document shape, one TTL policy, one index set.
+EPISODES_COUNTERS: str = "episodes_counters"
 SEMANTIC_CACHE: str = "semantic_cache"
 AUDIT_LOG: str = "audit_log"
 RATE_LIMITS: str = "rate_limits"
 GOVERNANCE_PROFILES: str = "governance_profiles"
 PROMPTS: str = "prompts"
 DECISIONS: str = "decisions"
+
+# Default episodic retention. A turn log is high-volume and loses value fast;
+# 30 days covers "what did we do last month" without unbounded growth. Tunable
+# at runtime via ``set_activity_retention`` (collMod) — STANDARD_INDEXES is a
+# static list, so it cannot be config-driven here.
+EPISODES_DEFAULT_TTL_SECONDS: int = 30 * 86400
 
 # ─── Standard (B-tree) Indexes ───────────────────────────────────
 #
@@ -52,6 +63,36 @@ STANDARD_INDEXES: list[dict] = [
             "expireAfterSeconds": 30 * 86400,  # 30 days
             "partialFilterExpression": {"deleted_at": {"$type": "date"}},
         },
+    },
+    # -- episodes --
+    # Thread replay in step order; the primary read path for "show me this
+    # conversation's turns".
+    {
+        "collection": EPISODES,
+        "keys": [("thread_id", 1), ("step", 1)],
+        "name": "ix_episodes_thread_step",
+    },
+    {
+        "collection": EPISODES,
+        "keys": [("user_id", 1), ("ts", -1)],
+        "name": "ix_episodes_user_ts",
+    },
+    {
+        "collection": EPISODES,
+        "keys": [("thread_id", 1), ("ts", -1)],
+        "name": "ix_episodes_thread_ts",
+    },
+    # Join a logged turn back to a trace or support ticket.
+    {
+        "collection": EPISODES,
+        "keys": [("user_id", 1), ("correlation_id", 1)],
+        "name": "ix_episodes_correlation",
+    },
+    {
+        "collection": EPISODES,
+        "keys": [("ts", 1)],
+        "name": "ix_episodes_ttl",
+        "kwargs": {"expireAfterSeconds": EPISODES_DEFAULT_TTL_SECONDS},
     },
     # -- semantic_cache --
     {
@@ -162,6 +203,45 @@ def get_search_indexes(embedding_dimension: int = _DEFAULT_EMBEDDING_DIMENSION) 
                         "user_id": {"type": "token"},
                         "tier": {"type": "token"},
                         "is_deleted": {"type": "token"},
+                    },
+                }
+            },
+        },
+        # Vector search on episodes. Every field used as a $vectorSearch
+        # pre-filter must be declared here or the branch silently returns
+        # nothing — hence thread_id and agent_name alongside user_id.
+        {
+            "collection": EPISODES,
+            "name": "episodes_vector_index",
+            "type": "vectorSearch",
+            "definition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": embedding_dimension,
+                        "similarity": "cosine",
+                    },
+                    {"type": "filter", "path": "user_id"},
+                    {"type": "filter", "path": "thread_id"},
+                    {"type": "filter", "path": "agent_name"},
+                ]
+            },
+        },
+        # Full-text search on episodes. The scoping fields are `token`, not
+        # `string`: an analyzed field cannot back an exact `equals` filter.
+        {
+            "collection": EPISODES,
+            "name": "episodes_fts_index",
+            "type": "search",
+            "definition": {
+                "mappings": {
+                    "dynamic": False,
+                    "fields": {
+                        "search_text": {"type": "string"},
+                        "user_id": {"type": "token"},
+                        "thread_id": {"type": "token"},
+                        "agent_name": {"type": "token"},
                     },
                 }
             },

@@ -20,8 +20,17 @@ from agent_memory.core.config import MCPConfig
 logger = logging.getLogger(__name__)
 
 # Tools that must never be auto-captured regardless of config.
+#
+# ``log_activity`` is here for a sharper reason than the others: capturing it
+# would store a memory *about* the turn log, and if that memory write were ever
+# itself logged the two would feed each other. The episodic tier is already a
+# complete record of what the agent did — capturing it again is pure
+# amplification. ``set_activity_retention`` is an admin knob, not content.
 _EXCLUDED_TOOLS = frozenset(
-    {"store_memory", "wipe_user_data", "delete_memory", "cache_invalidate"}
+    {
+        "store_memory", "wipe_user_data", "delete_memory", "cache_invalidate",
+        "log_activity", "set_activity_retention",
+    }
 )
 
 

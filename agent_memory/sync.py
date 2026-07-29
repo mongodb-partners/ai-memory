@@ -78,6 +78,30 @@ class Memory:
     def wipe_user_data(self, *a, **k):
         return self._submit(self._async.wipe_user_data(*a, **k))
 
+    # ── Episodic memory ───────────────────────────────────────────────────────
+
+    def log_activity(self, *a, **k):
+        return self._submit(self._async.log_activity(*a, **k))
+
+    def recall_activity(self, *a, **k):
+        return self._submit(self._async.recall_activity(*a, **k))
+
+    def get_thread(self, *a, **k):
+        return self._submit(self._async.get_thread(*a, **k))
+
+    def get_activity_by_correlation(self, *a, **k):
+        return self._submit(self._async.get_activity_by_correlation(*a, **k))
+
+    def flush_activity(self, *a, **k):
+        return self._submit(self._async.flush_activity(*a, **k))
+
+    def set_activity_retention(self, *a, **k):
+        return self._submit(self._async.set_activity_retention(*a, **k))
+
+    def activity_stats(self):
+        """Already synchronous on the core — no loop hop needed."""
+        return self._async.activity_stats()
+
     # ── Teardown ──────────────────────────────────────────────────────────────
 
     def close(self) -> None:

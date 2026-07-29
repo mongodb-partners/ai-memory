@@ -67,6 +67,22 @@ class DecisionRequest(BaseModel):
     ttl_days: int | None = None
 
 
+class ActivityRequest(BaseModel):
+    user_id: str
+    thread_id: str
+    messages: list[dict]
+    todos: list[dict] | None = None
+    agent_name: str | None = None
+    correlation_id: str | None = None
+    conversation_id: str | None = None
+
+
+class RetentionRequest(BaseModel):
+    user_id: str
+    # None is meaningful, not missing: it drops the TTL and keeps the log forever.
+    ttl_seconds: int | None = None
+
+
 def create_app(app, config: MemoryConfig | None = None) -> FastAPI:
     """Build a FastAPI app bound to facade ``app``.
 
@@ -116,9 +132,47 @@ def create_app(app, config: MemoryConfig | None = None) -> FastAPI:
     async def recall_decision(user_id: str, key: str):
         return await app.recall_decision(user_id, key)
 
+    # ── Episodic memory (the agent activity log) ──────────────────────────
+    @api.post("/activity", dependencies=protected)
+    async def log_activity(body: ActivityRequest):
+        return await app.log_activity(
+            body.user_id, body.thread_id, body.messages, todos=body.todos,
+            agent_name=body.agent_name, correlation_id=body.correlation_id,
+            conversation_id=body.conversation_id,
+        )
+
+    @api.get("/activity/search", dependencies=protected)
+    async def search_activity(user_id: str, query: str, thread_id: str | None = None,
+                              agent_name: str | None = None, limit: int = 5):
+        return await app.recall_activity(user_id, query, thread_id=thread_id,
+                                         agent_name=agent_name, limit=limit)
+
+    @api.get("/activity/thread/{thread_id}", dependencies=protected)
+    async def get_thread(thread_id: str, user_id: str, limit: int | None = None,
+                         ascending: bool = True):
+        return await app.get_thread(user_id, thread_id, limit=limit, ascending=ascending)
+
+    @api.get("/activity/correlation/{correlation_id}", dependencies=protected)
+    async def get_correlation(correlation_id: str, user_id: str, limit: int | None = None):
+        return await app.get_activity_by_correlation(user_id, correlation_id, limit=limit)
+
+    @api.put("/activity/retention", dependencies=protected)
+    async def set_activity_retention(body: RetentionRequest):
+        return await app.set_activity_retention(body.user_id, ttl_seconds=body.ttl_seconds)
+
     @api.get("/health")
     async def health():
-        return {"status": "ok"}
+        """Liveness plus the episodic writer's counters.
+
+        The queue depth and failure counts are what an operator actually needs
+        to see: a 200 with a full queue and rising write failures is not health.
+        """
+        body = {"status": "ok"}
+        try:
+            body["episodic"] = app.activity_stats()
+        except Exception:  # pragma: no cover - a probe must never 500
+            pass
+        return body
 
     return api
 

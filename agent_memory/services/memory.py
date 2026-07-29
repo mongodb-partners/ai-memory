@@ -7,19 +7,34 @@ from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 
 from agent_memory.core.config import MCPConfig
+from agent_memory.services.search_pipeline import rank_fusion_pipeline
 
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_value(val):
+    """Return ``val`` with BSON types replaced by JSON-safe equivalents."""
+    if isinstance(val, ObjectId):
+        return str(val)
+    if isinstance(val, datetime):
+        return val.isoformat()
+    if isinstance(val, dict):
+        _sanitize_doc(val)
+        return val
+    if isinstance(val, list):
+        return [_sanitize_value(item) for item in val]
+    return val
+
+
 def _sanitize_doc(doc: dict) -> None:
-    """Convert BSON types (ObjectId, datetime) to JSON-safe strings in place."""
+    """Convert BSON types (ObjectId, datetime) to JSON-safe strings in place.
+
+    Recurses into lists as well as dicts: episodic documents carry
+    ``messages[]``, ``todos[]``, and ``files_touched[]``, which would otherwise
+    leak raw BSON through the JSON boundary.
+    """
     for key, val in list(doc.items()):
-        if isinstance(val, ObjectId):
-            doc[key] = str(val)
-        elif isinstance(val, datetime):
-            doc[key] = val.isoformat()
-        elif isinstance(val, dict):
-            _sanitize_doc(val)
+        doc[key] = _sanitize_value(val)
 
 
 class MemoryService:
@@ -352,50 +367,18 @@ class MemoryService:
         if tiers:
             fts_filter_clauses.append({"in": {"path": "tier", "value": tiers}})
 
-        pipeline = [
-            {
-                "$rankFusion": {
-                    "input": {
-                        "pipelines": {
-                            "vectorPipeline": [
-                                {
-                                    "$vectorSearch": {
-                                        "index": "memories_vector_index",
-                                        "path": "embedding",
-                                        "queryVector": query_embedding,
-                                        "numCandidates": 100,
-                                        "limit": 20,
-                                        "filter": vs_filter,
-                                    }
-                                },
-                            ],
-                            "fullTextPipeline": [
-                                {
-                                    "$search": {
-                                        "index": "memories_fts_index",
-                                        "compound": {
-                                            "must": [
-                                                {"text": {"query": query, "path": ["content", "summary"]}}
-                                            ],
-                                            "filter": fts_filter_clauses,
-                                        },
-                                    }
-                                },
-                                {"$limit": 20},
-                            ],
-                        }
-                    },
-                    "combination": {
-                        "weights": {
-                            "vectorPipeline": self.config.rrf_vector_weight,
-                            "fullTextPipeline": self.config.rrf_text_weight,
-                        },
-                    },
-                }
-            },
-            {"$limit": limit},
-            {"$project": {"embedding": 0}},
-        ]
+        pipeline = rank_fusion_pipeline(
+            query=query,
+            query_embedding=query_embedding,
+            vector_index="memories_vector_index",
+            fts_index="memories_fts_index",
+            fts_paths=["content", "summary"],
+            vs_filter=vs_filter,
+            fts_filter_clauses=fts_filter_clauses,
+            limit=limit,
+            vector_weight=self.config.rrf_vector_weight,
+            text_weight=self.config.rrf_text_weight,
+        )
 
         cursor = await self.memories.aggregate(pipeline)
         results = await cursor.to_list(None)

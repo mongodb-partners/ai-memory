@@ -154,6 +154,91 @@ Closest analog: tools/memory_tools.py orchestration → absorbed by AsyncMemory.
 - **REQ-E-082:** THE SYSTEM `agent_memory.__init__` SHALL export `Memory`,
   `AsyncMemory`, `MemoryConfig`, and the exception classes.
 
+### Episodic memory — the agent activity log (`agent_memory/services/episodic.py`)
+
+Added in 4.1.0. The fourth memory tier: an append-only, per-turn record of what
+the agent *did*, as distinct from what it *knows*. Ported from
+`langchain-mongodb-agent-log` as framework-neutral code.
+
+**Projection (`core/projection.py`)**
+
+- **REQ-E-090:** THE SYSTEM SHALL project messages to exactly seven keys in
+  order — `type`, `content`, `tool_calls`, `tool_call_id`, `usage`, `model_id`,
+  `finish_reason` — accepting either a `Mapping` or an attribute-bearing object
+  as the message.
+- **REQ-E-091:** WHEN a message's `content` is a list of blocks THE SYSTEM SHALL
+  keep only `{"type": "text"}` blocks and bare strings, discarding all others.
+- **REQ-E-092:** WHEN projected text exceeds the configured cap THE SYSTEM SHALL
+  truncate it and append a marker reporting the original length; WHEN the cap is
+  less than or equal to zero THE SYSTEM SHALL NOT truncate.
+- **REQ-E-093:** THE SYSTEM SHALL project todos to `id` / `content` / `status`,
+  clamping any status outside `pending|in_progress|completed` to `pending` rather
+  than raising, and accepting `text` as an alias for `content`.
+- **REQ-E-094:** THE SYSTEM SHALL derive `files_touched` from filesystem-write
+  tool calls on assistant messages only, keeping the last write per path, sorted
+  by path, labelling `op` as `write` for create-tools and `edit` otherwise.
+- **REQ-E-095:** THE SYSTEM SHALL classify a turn as a final step only when its
+  last assistant message carries no `tool_calls`, and SHALL build `search_text`
+  from the first human message and the last assistant message, returning the
+  empty string when either is absent.
+
+**Per-user scoping (`core/context.py`, `core/correlation.py`)**
+
+- **REQ-E-096:** THE SYSTEM SHALL expose ambient user scoping via a
+  `ContextVar`, isolated per asyncio Task and per thread, restoring the previous
+  value on scope exit including on exception.
+- **REQ-E-097:** THE SYSTEM SHALL derive a correlation id in precedence order —
+  explicit `correlation_id`, W3C `traceparent` trace id, `x_request_id`, then a
+  fresh UUID4 — and SHALL never return an empty string.
+
+**Write path (`services/episodic.py`, `services/episodic_worker.py`)**
+
+- **REQ-E-100:** WHEN `log_activity` is called THE SYSTEM SHALL enqueue the
+  projected document and return without awaiting the database or the embedding
+  provider.
+- **REQ-E-101:** IF `user_id` or `thread_id` is missing or empty THEN THE SYSTEM
+  SHALL NOT write a document.
+- **REQ-E-102:** WHEN the bounded queue is full THE SYSTEM SHALL evict the
+  oldest pending turn, count the eviction, and retain the newest turn.
+- **REQ-E-103:** THE SYSTEM SHALL assign a durable monotonic `step` per thread
+  and set `parent_step` to `step - 1`, or to `null` at step zero.
+- **REQ-E-104:** IF the durable step counter fails THEN THE SYSTEM SHALL insert
+  the document with `step` and `parent_step` set to `null` rather than dropping
+  the turn.
+- **REQ-E-105:** WHEN a turn is a final step THE SYSTEM SHALL generate the
+  embedding before assigning `search_text`, so an embedding failure leaves
+  neither field present.
+- **REQ-E-106:** THE SYSTEM SHALL swallow and count every write and embedding
+  failure, exposing them through `stats()`, and SHALL NOT propagate an exception
+  to the caller of `log_activity`.
+- **REQ-E-107:** THE SYSTEM SHALL provide a bounded `flush(timeout)` returning a
+  boolean and an idempotent `close()`, neither of which raises.
+
+**Read path**
+
+- **REQ-E-110:** THE SYSTEM SHALL provide `recall_activity` using `$rankFusion`
+  over a vector branch and a full-text branch with the `user_id` filter inside
+  both branches.
+- **REQ-E-111:** THE SYSTEM SHALL provide `get_thread` ordered by `step` and
+  `get_activity_by_correlation` filtered by `user_id` and `correlation_id`.
+- **REQ-E-112:** THE SYSTEM SHALL coerce `ObjectId` and `datetime` values to
+  JSON-safe strings on read, recursing into nested lists as well as dicts.
+
+**Storage and governance**
+
+- **REQ-E-115:** THE SYSTEM SHALL store episodic records in a dedicated
+  `episodes` collection with five B-tree indexes, a TTL index on `ts`, a vector
+  index on `embedding` declaring `user_id` / `thread_id` / `agent_name` as filter
+  fields, and a full-text index on `search_text`.
+- **REQ-E-116:** THE SYSTEM SHALL provide `set_activity_retention` implemented
+  with `collMod` and a `create_index` fallback, which SHALL NOT raise.
+- **REQ-E-117:** WHEN `log_activity` is called THE SYSTEM SHALL enforce
+  governance and rate limits but SHALL NOT emit one audit record per call;
+  instead it SHALL emit one audit record per flushed batch.
+- **REQ-E-118:** THE SYSTEM SHALL grant the episodic operations to the
+  `power_user` and `end_user` governance profiles, and `seed_defaults` SHALL add
+  operations missing from an already-seeded profile.
+
 ### Non-functional
 
 - **REQ-NF-COV:** THE SYSTEM SHALL maintain at minimum 80% line coverage on

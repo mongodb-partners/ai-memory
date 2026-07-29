@@ -20,6 +20,13 @@ def _app():
     app.delete = AsyncMock(return_value={"deleted_count": 0})
     app.remember_decision = AsyncMock(return_value={"key": "k", "status": "stored"})
     app.recall_decision = AsyncMock(return_value={"key": "k", "value": "v"})
+    app.log_activity = AsyncMock(return_value={"enqueued": True, "thread_id": "t1"})
+    app.recall_activity = AsyncMock(return_value={"results": [], "count": 0})
+    app.get_thread = AsyncMock(return_value={"results": [], "count": 0})
+    app.get_activity_by_correlation = AsyncMock(return_value={"results": [], "count": 0})
+    app.set_activity_retention = AsyncMock(return_value={"ttl_seconds": 7200})
+    # activity_stats is synchronous on the facade — /health must not await it.
+    app.activity_stats = MagicMock(return_value={"enqueued": 3, "queue_depth": 0})
     return app
 
 
@@ -107,6 +114,71 @@ class TestRemainingRoutes:
         r = _client(facade).get("/decisions", params={"user_id": "u1", "key": "k"})
         assert r.status_code == 200
         facade.recall_decision.assert_awaited_once()
+
+
+class TestActivityRoutes:
+    """TC-REST-EP-001..006: the five episodic routes plus /health counters."""
+
+    def test_post_activity(self):
+        facade = _app()
+        r = _client(facade).post("/activity", json={
+            "user_id": "u1", "thread_id": "t1",
+            "messages": [{"type": "human", "content": "hi"}],
+            "correlation_id": "corr", "agent_name": "planner",
+        })
+        assert r.status_code == 200
+        assert r.json()["enqueued"] is True
+        kwargs = facade.log_activity.call_args.kwargs
+        assert kwargs["correlation_id"] == "corr" and kwargs["agent_name"] == "planner"
+
+    def test_get_activity_search(self):
+        facade = _app()
+        r = _client(facade).get("/activity/search",
+                                params={"user_id": "u1", "query": "q", "thread_id": "t1"})
+        assert r.status_code == 200
+        assert facade.recall_activity.call_args.kwargs["thread_id"] == "t1"
+
+    def test_get_thread(self):
+        facade = _app()
+        r = _client(facade).get("/activity/thread/t1", params={"user_id": "u1"})
+        assert r.status_code == 200
+        assert facade.get_thread.await_args.args == ("u1", "t1")
+
+    def test_get_correlation(self):
+        facade = _app()
+        r = _client(facade).get("/activity/correlation/corr-1", params={"user_id": "u1"})
+        assert r.status_code == 200
+        assert facade.get_activity_by_correlation.await_args.args == ("u1", "corr-1")
+
+    def test_put_retention_accepts_null_as_keep_forever(self):
+        """An omitted ttl_seconds means "drop the TTL", not "no change"."""
+        facade = _app()
+        r = _client(facade).put("/activity/retention",
+                                json={"user_id": "u1", "ttl_seconds": None})
+        assert r.status_code == 200
+        assert facade.set_activity_retention.call_args.kwargs["ttl_seconds"] is None
+
+    def test_health_reports_episodic_counters(self):
+        facade = _app()
+        body = _client(facade).get("/health").json()
+        assert body["status"] == "ok"
+        assert body["episodic"]["enqueued"] == 3
+
+    def test_health_still_200_when_stats_are_unavailable(self):
+        """A probe that 500s because a counter is missing is worse than useless."""
+        facade = _app()
+        facade.activity_stats = MagicMock(side_effect=RuntimeError("not wired"))
+        r = _client(facade).get("/health")
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok"}
+
+    def test_activity_denial_maps_to_403(self):
+        facade = _app()
+        facade.log_activity = AsyncMock(side_effect=AccessError("denied"))
+        r = _client(facade).post("/activity", json={
+            "user_id": "u1", "thread_id": "t1", "messages": [{"type": "human"}],
+        })
+        assert r.status_code == 403
 
 
 class TestAuth:
