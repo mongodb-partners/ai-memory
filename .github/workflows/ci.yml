@@ -74,3 +74,31 @@ jobs:
         with:
           name: dist
           path: dist/
+
+  # The image build broke once already and nothing noticed: adding `readme` to
+  # pyproject made README.md a build-time requirement the Dockerfile did not
+  # copy. Building here is the only thing that catches that class of drift.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Build the image
+        run: docker build -t agent-memory:ci .
+
+      # Asserting the USER directive took effect, not merely that it is present.
+      # A chown that misses the venv, or a base-image change, would leave this
+      # reporting uid=0 while the Dockerfile still reads correctly.
+      - name: Assert the container does not run as root
+        run: |
+          uid="$(docker run --rm agent-memory:ci id -u)"
+          if [ "$uid" = "0" ]; then
+            echo "::error::Container runs as root (uid 0)."
+            exit 1
+          fi
+          echo "Container runs as uid $uid."
+
+      - name: Assert the package imports inside the image
+        run: |
+          docker run --rm agent-memory:ci uv run python -c \
+            "from agent_memory import AsyncMemory, Memory, MemoryConfig, __version__; print(__version__)"
