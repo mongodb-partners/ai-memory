@@ -2,17 +2,22 @@
 
 from pydantic_settings import BaseSettings
 
+from agent_memory.version import __version__
+
 
 class MCPConfig(BaseSettings):
-    """Memory-MCP configuration.
+    """Configuration for the agent-memory shells and services.
 
     All values can be overridden via environment variables (case-insensitive).
     ``mongodb_connection_string`` is the only required field.
     """
 
     # Server
-    app_name: str = "memory-mcp"
-    app_version: str = "3.2.0"
+    app_name: str = "agent-memory"
+    # Read from the installed package rather than hardcoded: this value is
+    # served by /health and stamped on audit records, and a second copy of the
+    # version is a copy that goes stale.
+    app_version: str = __version__
     port: int = 8000
     transport: str = "streamable-http"
     debug: bool = False

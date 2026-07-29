@@ -31,11 +31,20 @@ class TestMCPConfigDefaults:
 
     def test_server_defaults(self):
         config = _make_config()
-        assert config.app_name == "memory-mcp"
-        assert config.app_version == "3.2.0"
+        assert config.app_name == "agent-memory"
         assert config.port == 8000
         assert config.transport == "streamable-http"
         assert config.debug is False
+
+    def test_app_version_tracks_the_package(self):
+        """A hardcoded second copy of the version is a copy that goes stale.
+
+        This one had already drifted to 3.2.0 while the package said 4.0.0, and
+        it is served by /health and stamped on audit records.
+        """
+        import agent_memory
+
+        assert _make_config().app_version == agent_memory.__version__
 
     def test_transport_override(self):
         config = _make_config(transport="stdio")

@@ -4,9 +4,33 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-memory"
-version = "4.0.0"
-description = "MongoDB Atlas-backed agent memory library with MCP + REST shells"
+version = "4.1.0"
+description = "MongoDB Atlas-backed agent memory: short-term, long-term, episodic, and semantic cache in one cluster"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [
+    { name = "Mohammad Daoud Farooqi", email = "mohammaddaoud.farooqi@mongodb.com" },
+]
+keywords = [
+    "agent-memory", "mongodb", "atlas", "vector-search", "rag",
+    "episodic-memory", "semantic-cache", "mcp", "llm", "agents",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "fastmcp>=3.2.0",
     "pymongo>=4.12.0",
@@ -38,11 +62,34 @@ dev = [
     "anthropic>=0.39.0",
 ]
 
+# PyPI metadata is immutable per release, so these point at the repository's
+# current name. GitHub issues a permanent redirect after a rename, so an
+# ai-memory URL keeps resolving once the repo becomes agent-memory; the reverse
+# would 404 until the rename actually happened.
+[project.urls]
+Homepage = "https://github.com/mongodb-partners/ai-memory"
+Repository = "https://github.com/mongodb-partners/ai-memory"
+Issues = "https://github.com/mongodb-partners/ai-memory/issues"
+Changelog = "https://github.com/mongodb-partners/ai-memory/blob/main/CHANGELOG.md"
+
 [project.scripts]
 agent-memory = "agent_memory.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent_memory"]
+
+# Explicit allow-list rather than an exclude-list. A live .env exists in this
+# working tree, so a forgotten exclude pattern would publish credentials to a
+# public index — an unrecoverable mistake, since a PyPI release cannot be edited.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/agent_memory",
+    "/tests",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
 
 [tool.coverage.report]
 exclude_lines = [

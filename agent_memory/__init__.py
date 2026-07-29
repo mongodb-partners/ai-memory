@@ -1,4 +1,8 @@
-"""agent-memory v4: MongoDB Atlas-backed memory library with MCP + REST shells.
+"""agent-memory: MongoDB Atlas-backed agent memory with MCP + REST shells.
+
+Four memory tiers in one Atlas cluster — short-term state, long-term semantic
+memory, episodic memory (what the agent actually did), and a semantic response
+cache — with no agent-framework dependency.
 
 Public API:
     from agent_memory import Memory, AsyncMemory, MemoryConfig
@@ -15,8 +19,7 @@ from agent_memory.exceptions import (
 )
 from agent_memory.memory import AsyncMemory
 from agent_memory.sync import Memory
-
-__version__ = "4.0.0"
+from agent_memory.version import __version__
 
 __all__ = [
     "Memory",
