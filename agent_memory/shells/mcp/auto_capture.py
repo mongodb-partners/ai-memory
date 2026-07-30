@@ -15,7 +15,7 @@ import asyncio
 import functools
 import logging
 
-from agent_memory.auth.identity import IdentityError, resolve_caller
+from agent_memory.auth.identity import Caller, IdentityError, resolve_caller
 from agent_memory.core.config import MCPConfig
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ class AutoCaptureMiddleware:
         params: dict,
         response: dict,
         user_id: str | None = None,
+        role: str | None = None,
     ) -> asyncio.Task | None:
         """Start a capture in the background, retaining a reference to it.
 
@@ -85,11 +86,11 @@ class AutoCaptureMiddleware:
         contexts — capture is best-effort and must never be the reason a tool call
         fails.
 
-        ``user_id`` is the resolved identity; see :meth:`capture`.
+        ``user_id`` and ``role`` are the resolved identity; see :meth:`capture`.
         """
         try:
             task = asyncio.create_task(
-                self.capture(tool_name, params, response, user_id=user_id),
+                self.capture(tool_name, params, response, user_id=user_id, role=role),
                 name=f"agent-memory:auto-capture:{tool_name}",
             )
         except RuntimeError:  # pragma: no cover - no running loop
@@ -174,6 +175,7 @@ class AutoCaptureMiddleware:
         params: dict,
         response: dict,
         user_id: str | None = None,
+        role: str | None = None,
     ) -> None:
         """Fire-and-forget memory storage via ``app.add``. Failures are logged.
 
@@ -183,6 +185,15 @@ class AutoCaptureMiddleware:
         auth-enabled deployment the ``user_id`` in there is whatever the client
         typed. When it is None the capture is dropped — see
         :func:`resolve_capture_identity` for why a refusal must not be stored.
+
+        ``role`` is the caller's role claim, and it must be passed for the same
+        reason: without it ``app.add`` authorizes against ``auth_default_role``
+        instead of the caller. A token whose role may only read was therefore able
+        to trigger a write, through the one write path the caller never asked for —
+        every explicit tool passes its role, so auto-capture was the single hole.
+        ``None`` here means the token carried no role claim, which the facade
+        already treats as "use the configured default"; it is not the same as
+        failing to forward one.
         """
         if not self.should_capture(tool_name, params):
             return
@@ -203,6 +214,7 @@ class AutoCaptureMiddleware:
                 user_id,
                 f"auto:{tool_name}",
                 [{"role": "system", "message_type": "system", "content": content}],
+                role=role,
             )
         except Exception:
             logger.warning("Auto-capture failed for %s", tool_name, exc_info=True)
@@ -218,8 +230,15 @@ def _was_refused(result) -> bool:
     return isinstance(result, dict) and "error" in result
 
 
-def resolve_capture_identity(app, params: dict, result) -> str | None:
-    """The identity a capture may be written under, or None to skip.
+def resolve_capture_identity(app, params: dict, result) -> Caller | None:
+    """The identity a capture may act as, or None to skip.
+
+    Returns the whole :class:`Caller`, not just its ``user_id``. It used to return
+    the id alone and discard the rest, which is how the role went missing: the
+    role claim was resolved correctly on this line and then thrown away, so
+    ``app.add`` fell back to ``auth_default_role`` and a read-only token could
+    trigger a write. Returning the resolved principal makes the identity travel
+    as one value, so a future authorization input cannot be dropped the same way.
 
     This exists because auto-capture used to write under
     ``params["user_id"]`` — the raw, client-supplied tool argument — *after* the
@@ -245,8 +264,11 @@ def resolve_capture_identity(app, params: dict, result) -> str | None:
     config = getattr(app, "config", None)
     auth_on = bool(getattr(config, "auth_enabled", False))
     if not auth_on:
-        # Single-tenant: the request's own value is the only identity there is.
-        return requested if requested else None
+        # Single-tenant: the request's own value is the only identity there is, and
+        # there is no token to carry a role — `role=None` sends the facade to
+        # `auth_default_role`, which is the same authorization the tool itself just
+        # used on this call.
+        return Caller(user_id=requested) if requested else None
 
     try:
         from fastmcp.server.dependencies import get_access_token
@@ -262,7 +284,7 @@ def resolve_capture_identity(app, params: dict, result) -> str | None:
         # `access` may still be None here — stdio and in-process calls have no
         # request. `resolve_caller` treats that as the single-tenant case, which is
         # the same answer the tool itself just used.
-        return resolve_caller(access, requested, config).user_id
+        return resolve_caller(access, requested, config)
     except IdentityError:
         # Should be unreachable: the tool would have refused first and we would
         # have returned above. Kept because "unreachable" here means "silently
@@ -289,7 +311,16 @@ def wrap_tools(mcp, auto_capture: AutoCaptureMiddleware) -> None:
             # `spawn` rather than a bare `create_task`: it keeps a strong reference
             # so the capture cannot be garbage-collected mid-write.
             who = resolve_capture_identity(auto_capture.app, kwargs, result)
-            auto_capture.spawn(_name, kwargs, {"result": str(result)}, user_id=who)
+            auto_capture.spawn(
+                _name,
+                kwargs,
+                {"result": str(result)},
+                user_id=who.user_id if who else None,
+                # The caller's own role, so the capture is authorized as the caller
+                # rather than as `auth_default_role`. Without it a read-only token
+                # could trigger a write it never requested.
+                role=who.role if who else None,
+            )
             return result
 
         component.fn = wrapped

@@ -428,6 +428,90 @@ class TestMcpToolsResolveIdentityToo:
         )
 
 
+def _wrap_real_tools(facade, config, access, monkeypatch):
+    """Register the real tools, then wrap them the way the lifespan does.
+
+    Module-level rather than a method because two classes need it: one asserts
+    *whose* account a capture writes to, the other asserts *what role* it writes
+    as. Both need the genuine article — the refusal-is-a-return-value behaviour
+    that makes auto-capture hard to get right lives in the real tools, so a stub
+    tool would test the wrapper against a shape production never presents.
+    """
+    from agent_memory.shells.mcp import tools as tools_mod
+    from agent_memory.shells.mcp.auto_capture import AutoCaptureMiddleware, wrap_tools
+
+    registered: dict = {}
+
+    class _Component:
+        def __init__(self, name, fn):
+            self.name = name
+            self.fn = fn
+
+    class _Mcp:
+        def __init__(self):
+            self.local_provider = MagicMock()
+
+        def tool(self, name=None, description=None):
+            def deco(fn):
+                registered[name] = _Component(name, fn)
+                return fn
+
+            return deco
+
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_access_token", lambda: access
+    )
+    mcp = _Mcp()
+    tools_mod.register_all_tools(mcp, facade)
+    mcp.local_provider._components = {
+        f"tool:{name}": comp for name, comp in registered.items()
+    }
+    capture = AutoCaptureMiddleware(facade, config)
+    wrap_tools(mcp, capture)
+    return {name: comp.fn for name, comp in registered.items()}, capture
+
+
+class _ProfileCollection:
+    """The `governance_profiles` collection, enough of it for `get_profile`.
+
+    Real profiles rather than a patched `check_allowed`, because the question is
+    whether the role reaches a *decision*. A stubbed check would answer "was a
+    role passed", which was never the doubt — the value was resolved correctly and
+    then dropped one call later.
+    """
+
+    def __init__(self, profiles: dict) -> None:
+        self._profiles = profiles
+
+    async def find_one(self, query: dict):
+        return self._profiles.get(query.get("role"))
+
+
+# Two roles, differing only in whether they may write. `store_memory` is the
+# operation `app.add` authorises against, and `recall_memory` is the tool call
+# both roles are allowed to make — so the only variable between the two tests
+# below is the role the capture is authorised as.
+_READ_ONLY_PROFILES = {
+    "reader": {
+        "role": "reader",
+        "allowed_operations": ["recall_memory", "hybrid_search"],
+    },
+    "writer": {
+        "role": "writer",
+        "allowed_operations": ["recall_memory", "hybrid_search", "store_memory"],
+    },
+}
+
+
+def _capture_config(**overrides) -> MemoryConfig:
+    return _auth_config(
+        auto_capture_enabled=True,
+        auto_capture_tools=["recall_memory", "hybrid_search"],
+        auto_capture_min_length=1,
+        **overrides,
+    )
+
+
 class TestAutoCaptureCannotWriteCrossTenant:
     """A refused tool call must not be captured into the account it named.
 
@@ -444,46 +528,10 @@ class TestAutoCaptureCannotWriteCrossTenant:
     """
 
     def _wrapped(self, facade, config, access, monkeypatch):
-        """Register the real tools, then wrap them the way the lifespan does."""
-        from agent_memory.shells.mcp import tools as tools_mod
-        from agent_memory.shells.mcp.auto_capture import AutoCaptureMiddleware, wrap_tools
-
-        registered: dict = {}
-
-        class _Component:
-            def __init__(self, name, fn):
-                self.name = name
-                self.fn = fn
-
-        class _Mcp:
-            def __init__(self):
-                self.local_provider = MagicMock()
-
-            def tool(self, name=None, description=None):
-                def deco(fn):
-                    registered[name] = _Component(name, fn)
-                    return fn
-
-                return deco
-
-        monkeypatch.setattr(
-            "fastmcp.server.dependencies.get_access_token", lambda: access
-        )
-        mcp = _Mcp()
-        tools_mod.register_all_tools(mcp, facade)
-        mcp.local_provider._components = {
-            f"tool:{name}": comp for name, comp in registered.items()
-        }
-        capture = AutoCaptureMiddleware(facade, config)
-        wrap_tools(mcp, capture)
-        return {name: comp.fn for name, comp in registered.items()}, capture
+        return _wrap_real_tools(facade, config, access, monkeypatch)
 
     def _capture_config(self) -> MemoryConfig:
-        return _auth_config(
-            auto_capture_enabled=True,
-            auto_capture_tools=["recall_memory", "hybrid_search"],
-            auto_capture_min_length=1,
-        )
+        return _capture_config()
 
     @pytest.mark.asyncio
     async def test_refused_call_is_not_stored_under_the_named_victim(
@@ -576,3 +624,193 @@ class TestAutoCaptureCannotWriteCrossTenant:
         await capture.drain(2.0)
         facade.add.assert_awaited_once()
         assert facade.add.await_args.args[0] == "solo"
+
+
+class TestAutoCaptureActsAsTheCallerNotTheDefaultRole:
+    """The role has to travel with the identity, or the write is authorised wrong.
+
+    `resolve_capture_identity` resolved the whole `Caller` — role claim included —
+    and then returned `caller.user_id`, discarding the rest. So `app.add` got no
+    `role`, `_check_access` fell back to `auth_default_role`, and the capture was
+    evaluated as whatever profile that names rather than as the caller.
+
+    Both directions of that are wrong, and which one bites depends on the
+    deployment:
+
+    * A token whose role may only read could still trigger a write, through the
+      one write path the caller never asked for. Every explicit tool forwards its
+      role; auto-capture was the single hole.
+    * On a deployment whose default role is *narrower* than the caller's, the
+      captures of a legitimate admin were silently refused and logged as denials
+      — an audit trail full of authorisation failures for calls that were allowed.
+
+    Nothing raised either way: `capture` swallows failures by design, because a
+    capture must never be the reason a tool call fails. So the symptom was a
+    write happening (or not) under a role nobody chose, with no signal anywhere.
+
+    Asserted against a real `GovernanceService` over an in-memory profile
+    collection rather than a mocked access check: the property under test is that
+    the role reaches a decision and changes it. A mock that records `role=` would
+    pass while `_check_access` still ignored the value.
+    """
+
+    def _facade_with_governance(self, config, profiles):
+        """A facade wired to the real governance service and audit log.
+
+        `memory_service` is the only mock — it is the thing being authorised, and
+        whether it ran is exactly the observation these tests make.
+        """
+        from agent_memory.memory import AsyncMemory
+        from agent_memory.services.governance import GovernanceService
+
+        col = _ProfileCollection(profiles)
+        m = AsyncMemory.__new__(AsyncMemory)
+        m.config = config
+        m.memory_service = AsyncMock()
+        m.memory_service.store_stm = AsyncMock(return_value=["id1"])
+        m.cache_service = AsyncMock()
+        m.decision_service = AsyncMock()
+        m.admin_service = AsyncMock()
+        m.audit_service = AsyncMock()
+        m.episodic_service = AsyncMock()
+        m.episodic_service.log_activity = MagicMock(return_value=True)
+        m.governance_service = GovernanceService(col, config)
+        m.rate_limiter = None
+        m.providers = MagicMock()
+        m._workers = []
+        m._erasing = set()
+        return m
+
+    @pytest.mark.asyncio
+    async def test_a_read_only_role_cannot_trigger_a_write(self, monkeypatch) -> None:
+        """The finding. `reader` may recall and may not store.
+
+        The tool call itself is legitimate and succeeds — it is a read, which is
+        what the token is for. The write is the capture, which the caller never
+        requested and whose authorisation was therefore never checked against it.
+        """
+        config = _capture_config(governance_enabled=True)
+        facade = self._facade_with_governance(config, _READ_ONLY_PROFILES)
+        tools, capture = _wrap_real_tools(
+            facade, config, _token("alice", role="reader"), monkeypatch
+        )
+
+        result = await tools["recall_memory"](user_id="alice", query="q")
+        assert "error" not in result, "precondition: the read itself is allowed"
+        await capture.drain(2.0)
+
+        facade.memory_service.store_stm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_callers_role_is_what_reaches_the_access_check(
+        self, monkeypatch
+    ) -> None:
+        """Stated positively: a role permitted to write still captures.
+
+        Paired with the test above so the fix cannot be "refuse every capture",
+        which would pass a refusal assertion while disabling the feature.
+        """
+        config = _capture_config(governance_enabled=True)
+        facade = self._facade_with_governance(config, _READ_ONLY_PROFILES)
+        tools, capture = _wrap_real_tools(
+            facade, config, _token("alice", role="writer"), monkeypatch
+        )
+
+        await tools["recall_memory"](user_id="alice", query="q")
+        await capture.drain(2.0)
+
+        facade.memory_service.store_stm.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_the_role_is_forwarded_verbatim(self, monkeypatch) -> None:
+        """The mechanical half: `app.add` receives the claim, not a default.
+
+        Kept alongside the behavioural tests because it says *which* value moved.
+        A governance assertion alone would also pass if the capture happened to be
+        allowed for an unrelated reason.
+        """
+        config = _capture_config()
+        facade = _facade()
+        facade.config = config
+        tools, capture = _wrap_real_tools(
+            facade, config, _token("alice", role="admin"), monkeypatch
+        )
+
+        await tools["recall_memory"](user_id="alice", query="q")
+        await capture.drain(2.0)
+
+        facade.add.assert_awaited_once()
+        assert facade.add.await_args.kwargs["role"] == "admin", (
+            "the capture was authorised as `auth_default_role` rather than as the "
+            "caller: the resolved role claim was discarded before app.add"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_role_claim_still_means_the_configured_default(
+        self, monkeypatch
+    ) -> None:
+        """`None` is a value here, not a failure to forward.
+
+        An API-key caller carries no role claim at all, and the facade already
+        reads `None` as "use `auth_default_role`". Forwarding it explicitly must
+        not turn that common case into a refusal.
+        """
+        config = _capture_config()
+        facade = _facade()
+        facade.config = config
+        tools, capture = _wrap_real_tools(
+            facade, config, _token("alice"), monkeypatch
+        )
+
+        await tools["recall_memory"](user_id="alice", query="q")
+        await capture.drain(2.0)
+
+        facade.add.assert_awaited_once()
+        assert facade.add.await_args.kwargs["role"] is None
+
+    @pytest.mark.asyncio
+    async def test_single_tenant_capture_claims_no_role(self, monkeypatch) -> None:
+        """Auth off: there is no token, so there is no role to claim.
+
+        The capture must be authorised the same way the tool call itself just was
+        — `auth_default_role` — rather than inheriting some other value.
+        """
+        config = _config(
+            auto_capture_enabled=True,
+            auto_capture_tools=["recall_memory"],
+            auto_capture_min_length=1,
+        )
+        facade = _facade()
+        facade.config = config
+        tools, capture = _wrap_real_tools(facade, config, None, monkeypatch)
+
+        await tools["recall_memory"](user_id="solo", query="q")
+        await capture.drain(2.0)
+
+        facade.add.assert_awaited_once()
+        assert facade.add.await_args.kwargs["role"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_tool_and_its_capture_agree_on_the_role(
+        self, monkeypatch
+    ) -> None:
+        """One call, one identity — both halves authorised as the same principal.
+
+        This is the invariant the fix restores, and the reason
+        `resolve_capture_identity` returns the whole `Caller` rather than a pair of
+        strings: an authorisation input that travels as part of one value cannot be
+        dropped while its sibling is kept.
+        """
+        config = _capture_config()
+        facade = _facade()
+        facade.config = config
+        tools, capture = _wrap_real_tools(
+            facade, config, _token("alice", role="power_user"), monkeypatch
+        )
+
+        await tools["recall_memory"](user_id="alice", query="q")
+        await capture.drain(2.0)
+
+        assert facade.recall.await_args.kwargs["role"] == "power_user"
+        assert facade.add.await_args.kwargs["role"] == "power_user"
+        assert facade.recall.await_args.args[0] == facade.add.await_args.args[0]
