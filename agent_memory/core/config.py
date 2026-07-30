@@ -1,5 +1,8 @@
 """Centralized configuration via Pydantic BaseSettings."""
 
+from typing import ClassVar
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 from agent_memory.version import __version__
@@ -97,6 +100,16 @@ class MCPConfig(BaseSettings):
     enrichment_concurrency: int = 5
     enrichment_max_retries: int = 3
 
+    # Importance Scoring
+    # "llm" (default) makes one LLM call per long-term memory. "local" evaluates
+    # a small logistic model over the embedding that already exists by then —
+    # microseconds, no network, no tokens. Default stays "llm" so an upgrade
+    # changes nothing.
+    importance_scorer: str = "llm"
+    # Path to a JSON coefficient artifact. None means auto-select the bundled
+    # artifact matching the configured embedder, falling back to the lexical one.
+    importance_model_path: str | None = None
+
     # Audit
     audit_buffer_size: int = 10
     audit_flush_interval_seconds: int = 60
@@ -111,9 +124,17 @@ class MCPConfig(BaseSettings):
     auth_token_header: str = "Authorization"
     auth_secret: str = ""
     auth_token_expiry_seconds: int = 86400
+    # Which JWT claim carries the identity a request acts as. Read by
+    # `auth.identity.resolve_caller`, which is the only thing that decides the
+    # caller's `user_id` — request bodies do not.
     auth_user_id_claim: str = "sub"
     auth_role_claim: str = "role"
     auth_default_role: str = "end_user"
+    # Refuse to serve with authentication off. Off is the right default for a
+    # library used in-process by a single-tenant app, and the wrong one for a
+    # shell listening on a port — but the process cannot tell which it is, so
+    # this is the operator's assertion that unauthenticated is intended.
+    require_auth_for_multi_tenant: bool = False
 
     # Governance (Phase 2)
     governance_enabled: bool = False
@@ -146,3 +167,64 @@ class MCPConfig(BaseSettings):
         "case_sensitive": False,
         "extra": "ignore",
     }
+
+    @model_validator(mode="after")
+    def _auth_must_not_fail_open(self):
+        """Refuse the configurations that silently disable authentication.
+
+        ``AUTH_ENABLED=true`` with an empty ``AUTH_SECRET`` used to log a warning
+        and serve every route unauthenticated. That is the worst available
+        outcome: the operator asked for auth, the deployment reports healthy, and
+        the only evidence is one line in a log written at startup. An operator who
+        sets the flag has stated their intent, and a missing secret is an
+        incomplete deployment rather than a request to turn the feature off.
+
+        ``REQUIRE_AUTH_FOR_MULTI_TENANT=true`` is the inverse assertion — refuse to
+        start *without* auth — for deployments where unauthenticated access is
+        never acceptable regardless of how the flags end up set.
+        """
+        if self.auth_enabled and not self.auth_secret:
+            raise ValueError(
+                "AUTH_ENABLED=true requires AUTH_SECRET. Refusing to start with "
+                "authentication silently disabled — set the secret, or set "
+                "AUTH_ENABLED=false to accept unauthenticated access explicitly."
+            )
+        if self.require_auth_for_multi_tenant and not self.auth_enabled:
+            raise ValueError(
+                "REQUIRE_AUTH_FOR_MULTI_TENANT=true requires AUTH_ENABLED=true. "
+                "Without authentication every caller supplies its own user_id, so "
+                "tenant isolation cannot be enforced."
+            )
+        return self
+
+    # ClassVar keeps this out of the model's fields. An un-annotated class
+    # attribute would mostly work, but Pydantic v2 treats underscore-prefixed
+    # attributes specially, and ClassVar states the intent outright.
+    _IMPORTANCE_SCORERS: ClassVar[tuple[str, ...]] = ("llm", "local")
+
+    @model_validator(mode="after")
+    def _importance_scorer_must_be_known(self):
+        """Refuse an unrecognized scorer rather than falling back to the LLM.
+
+        Same reasoning as ``_auth_must_not_fail_open``: the operator has stated an
+        intent, and a typo that silently keeps the old path produces no symptom
+        except the invoice. ``IMPORTANCE_SCORER=locl`` would run every enrichment
+        through the LLM while the deployment reports healthy.
+
+        Normalizes case and surrounding whitespace first — ``IMPORTANCE_SCORER=Local``
+        in a hand-edited ``.env`` is a correct intent expressed slightly wrong, and
+        there is nothing to protect by rejecting it.
+        """
+        normalized = (self.importance_scorer or "").strip().lower()
+        if normalized not in self._IMPORTANCE_SCORERS:
+            raise ValueError(
+                f"IMPORTANCE_SCORER={self.importance_scorer!r} is not recognized. "
+                f"Valid values: {', '.join(self._IMPORTANCE_SCORERS)}. Refusing to "
+                "start on a scorer the operator did not ask for."
+            )
+        if normalized != self.importance_scorer:
+            # `mode="after"` gets a constructed model, so plain assignment is the
+            # way to normalize. `validate_assignment` is not set on this model, so
+            # this cannot recurse back into the validator.
+            self.importance_scorer = normalized
+        return self

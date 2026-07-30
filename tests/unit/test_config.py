@@ -13,6 +13,7 @@ def _clean_env(monkeypatch):
         if upper.startswith("MONGODB_") or upper.startswith("AWS_") or upper in (
             "PORT", "DEBUG", "EMBEDDING_DIMENSION", "ENRICHMENT_CONCURRENCY",
             "ENRICHMENT_BATCH_SIZE", "LLM_MODEL_ID",
+            "IMPORTANCE_SCORER", "IMPORTANCE_MODEL_PATH",
             "EMBEDDING_MODEL_ID", "LOGGER_SERVICE_URL", "AI_MEMORY_SERVICE_URL",
             "SEMANTIC_CACHE_SERVICE_URL", "VECTOR_DIMENSION",
         ):
@@ -45,6 +46,26 @@ class TestMCPConfigDefaults:
         import agent_memory
 
         assert _make_config().app_version == agent_memory.__version__
+
+    def test_the_openapi_version_tracks_the_package_too(self):
+        """The REST shell held a *third* copy of the version, and it was stale.
+
+        `app_version` was fixed to read from package metadata, but
+        `FastAPI(version=...)` kept a hardcoded `4.0.0` while the package said
+        4.1.0. This copy is the worst of the three: it is published in the OpenAPI
+        document, which is exactly where a client reads a version to decide what
+        the API supports.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        import agent_memory
+        from agent_memory.shells.rest.app import create_app
+
+        facade = MagicMock()
+        facade.recall = AsyncMock(return_value=[])
+        api = create_app(facade)
+
+        assert api.version == agent_memory.__version__
 
     def test_transport_override(self):
         config = _make_config(transport="stdio")
@@ -194,3 +215,50 @@ class TestMCPConfigAutoCapture:
         """REQ-E-024: prompt_experiment_enabled default changed to true."""
         config = _make_config()
         assert config.prompt_experiment_enabled is True
+
+
+class TestImportanceScorerConfig:
+    """REQ-E-162. Config surface for the pluggable scorer."""
+
+    def test_defaults_to_llm(self):
+        """The safety property of the whole feature: an existing install that
+        upgrades and changes nothing keeps making the same LLM call."""
+        assert _make_config().importance_scorer == "llm"
+
+    def test_model_path_defaults_to_none(self):
+        """None means 'auto-select a bundled artifact', not 'no model'."""
+        assert _make_config().importance_model_path is None
+
+    def test_accepts_local(self):
+        assert _make_config(importance_scorer="local").importance_scorer == "local"
+
+    def test_normalizes_case_and_whitespace(self):
+        """`IMPORTANCE_SCORER=Local ` from a hand-edited .env is a correct
+        intent, not a typo."""
+        assert _make_config(importance_scorer=" Local ").importance_scorer == "local"
+
+    def test_rejects_unknown_scorer(self):
+        """A typo must not silently leave the LLM path enabled. An operator who
+        set this flag to save money would see no symptom but the bill."""
+        with pytest.raises(ValueError, match="IMPORTANCE_SCORER"):
+            _make_config(importance_scorer="locl")
+
+    def test_rejection_names_the_valid_values(self):
+        with pytest.raises(ValueError, match="local"):
+            _make_config(importance_scorer="sklearn")
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("IMPORTANCE_SCORER", "local")
+        monkeypatch.setenv("IMPORTANCE_MODEL_PATH", "/models/x.json")
+        config = MCPConfig(mongodb_connection_string="mongodb://localhost:27017")
+        assert config.importance_scorer == "local"
+        assert config.importance_model_path == "/models/x.json"
+
+    def test_model_path_with_llm_scorer_is_allowed(self):
+        """Not an error — an operator staging a model before flipping the switch
+        is a reasonable sequence, and refusing it would make the rollout
+        two-steps-at-once."""
+        config = _make_config(
+            importance_scorer="llm", importance_model_path="/models/x.json"
+        )
+        assert config.importance_scorer == "llm"
