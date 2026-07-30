@@ -59,10 +59,13 @@ class _Collection:
     ``_id.user_id`` dotted form ``episodes_counters`` needs.
     """
 
-    def __init__(self, name: str, *, failing: bool = False) -> None:
+    def __init__(
+        self, name: str, *, failing: bool = False, count_failing: bool = False
+    ) -> None:
         self.name = name
         self.docs: list[dict] = []
         self.failing = failing
+        self.count_failing = count_failing
 
     async def insert_many(self, batch: list[dict]) -> None:
         if self.failing:
@@ -75,6 +78,20 @@ class _Collection:
         before = len(self.docs)
         self.docs = [d for d in self.docs if not self._matches(d, query)]
         return MagicMock(deleted_count=before - len(self.docs))
+
+    async def count_documents(self, query: dict) -> int:
+        """Used by the facade's post-wipe residue check.
+
+        Real rather than stubbed to 0: without it the check cannot distinguish
+        "verified empty" from "could not look", and its whole job is to catch data
+        the deletion's own counts do not know about. `count_failing` is separate
+        from `failing` so a collection that deletes fine but cannot be read back
+        is expressible — that is the "unverified" case, which must not be reported
+        as residue.
+        """
+        if self.failing or self.count_failing:
+            raise RuntimeError(f"{self.name} unavailable")
+        return sum(1 for d in self.docs if self._matches(d, query))
 
     @staticmethod
     def _matches(doc: dict, query: dict) -> bool:
@@ -90,17 +107,47 @@ class _Collection:
 
 
 class _DB:
-    def __init__(self, *, failing: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        failing: set[str] | None = None,
+        count_failing: set[str] | None = None,
+    ) -> None:
         self._failing = failing or set()
+        self._count_failing = count_failing or set()
         self.cols: dict[str, _Collection] = {}
 
     def __getitem__(self, name: str) -> _Collection:
         if name not in self.cols:
-            self.cols[name] = _Collection(name, failing=name in self._failing)
+            self.cols[name] = _Collection(
+                name,
+                failing=name in self._failing,
+                count_failing=name in self._count_failing,
+            )
         return self.cols[name]
 
 
-def _facade(db: _DB, **config_overrides):
+class _Episodic:
+    """Stands in for ``EpisodicService`` — only what the erasure path touches.
+
+    ``flush`` returning False is the case that matters: queued turns that did not
+    land before the deletion are pending writes, and the wipe must not claim
+    completeness over them.
+    """
+
+    def __init__(self, *, drains: bool = True, raises: bool = False) -> None:
+        self.drains = drains
+        self.raises = raises
+        self.flush_calls: list[float] = []
+
+    async def flush(self, timeout: float = 5.0) -> bool:
+        self.flush_calls.append(timeout)
+        if self.raises:
+            raise RuntimeError("episodic worker is gone")
+        return self.drains
+
+
+def _facade(db: _DB, *, episodic: _Episodic | None = None, **config_overrides):
     """A facade wired to the real ``AdminService`` and real ``AuditService``."""
     from agent_memory.memory import AsyncMemory
 
@@ -111,6 +158,10 @@ def _facade(db: _DB, **config_overrides):
     m.audit_service = AuditService(db["audit_log"], config)
     m.governance_service = None
     m.rate_limiter = None
+    # `create()` sets this; a facade built by hand gets it here so the erasure
+    # barrier is exercised rather than falling back to the class default.
+    m._erasing = set()
+    m.episodic_service = episodic if episodic is not None else _Episodic()
     return m
 
 
@@ -479,3 +530,309 @@ class TestTheMCPToolReportsThePartialState:
 
         assert out["complete"] is True
         assert "failed_collections" not in out
+
+
+class TestQueuedTurnsCannotOutliveTheErasure:
+    """`log_activity` returns once the turn is *queued*; the insert happens later.
+
+    So a turn accepted a moment before the wipe was still in memory when the
+    collections were swept, and landed afterwards — recreating episodic history
+    for a user who had asked to be forgotten. The audit buffer had exactly this
+    shape and was already flushed for exactly this reason; the episodic queue is
+    the same argument applied to the other pending write.
+    """
+
+    async def test_the_queue_is_drained_before_the_delete(self) -> None:
+        order: list[str] = []
+        db = _DB()
+
+        class _Recording(_Episodic):
+            async def flush(self, timeout: float = 5.0) -> bool:
+                order.append("drain")
+                return await super().flush(timeout)
+
+        episodic = _Recording()
+        app = _facade(db, episodic=episodic)
+        original = app.admin_service.wipe_user_data
+
+        async def _traced(user_id: str):
+            order.append("delete")
+            return await original(user_id)
+
+        app.admin_service.wipe_user_data = _traced
+        await app.wipe_user_data("alice", confirm=True)
+
+        assert order == ["drain", "delete"], (
+            "draining after the delete lets a queued turn land in a swept "
+            f"collection; order was {order}"
+        )
+
+    async def test_the_drain_uses_the_configured_timeout(self) -> None:
+        episodic = _Episodic()
+        app = _facade(
+            _DB(), episodic=episodic, episodic_shutdown_timeout_seconds=2.5
+        )
+        await app.wipe_user_data("alice", confirm=True)
+        assert episodic.flush_calls == [2.5]
+
+    async def test_an_undrained_queue_is_not_reported_complete(self) -> None:
+        """The turns have not landed *yet*, so the collections read empty. The
+        deletion's own counts cannot see them, which is the whole problem."""
+        app = _facade(_DB(), episodic=_Episodic(drains=False))
+
+        with pytest.raises(PartialWipeError) as exc:
+            await app.wipe_user_data("alice", confirm=True)
+        assert "episodes" in exc.value.errors
+
+    async def test_a_drain_that_raises_is_not_reported_complete(self) -> None:
+        app = _facade(_DB(), episodic=_Episodic(raises=True))
+
+        with pytest.raises(PartialWipeError):
+            await app.wipe_user_data("alice", confirm=True)
+
+    async def test_a_broken_drain_still_deletes_everything_it_can(self) -> None:
+        """Most of a user's data is in collections the queue never touches.
+        Refusing to delete them because the drain failed would leave *more*
+        behind, not less."""
+        db = _DB()
+        db["memories"].docs.extend([{"user_id": "alice"} for _ in range(4)])
+        app = _facade(db, episodic=_Episodic(drains=False))
+
+        with pytest.raises(PartialWipeError):
+            await app.wipe_user_data("alice", confirm=True)
+        assert db["memories"].docs == [], "gave up on the deletion it could do"
+
+    async def test_no_episodic_service_is_not_a_failure(self) -> None:
+        """`episodic_enabled=False` builds a facade without one."""
+        app = _facade(_DB())
+        app.episodic_service = None
+        result = await app.wipe_user_data("alice", confirm=True)
+        assert result["complete"] is True
+
+
+class TestWritesAreRefusedWhileAUserIsBeingErased:
+    """Nothing stopped a write that arrived mid-wipe from inserting into a
+    collection the deletion had already swept.
+
+    The barrier is per-process and does not pretend otherwise — it is not a
+    distributed lock. What it guarantees is that no write from *this* process
+    survives the erasure; the residue check below covers the rest.
+    """
+
+    @staticmethod
+    def _app():
+        app = _facade(_DB())
+        app._erasing.add("alice")
+        return app
+
+    @pytest.mark.parametrize(
+        "operation",
+        ["store_memory", "store_cache", "store_decision", "log_activity",
+         "delete_memory", "cache_invalidate"],
+    )
+    async def test_every_write_operation_is_refused(self, operation) -> None:
+        from agent_memory.exceptions import ErasureInProgressError
+
+        with pytest.raises(ErasureInProgressError):
+            await self._app()._check_access("alice", operation)
+
+    @pytest.mark.parametrize(
+        "operation",
+        ["recall_memory", "hybrid_search", "check_cache", "search_activity",
+         "get_thread", "recall_decision", "memory_health"],
+    )
+    async def test_reads_stay_available(self, operation) -> None:
+        """A read during a wipe returns progressively less, which is honest.
+        Refusing them would make the erasure look like an outage."""
+        await self._app()._check_access("alice", operation)
+
+    async def test_other_users_are_unaffected(self) -> None:
+        await self._app()._check_access("bob", "store_memory")
+
+    async def test_the_refusal_is_an_access_error(self) -> None:
+        """So the shells' existing 403 mapping and `_run`'s "denied" audit status
+        both apply without either learning a new exception type."""
+        from agent_memory.exceptions import AccessError, ErasureInProgressError
+
+        assert issubclass(ErasureInProgressError, AccessError)
+
+    async def test_the_barrier_is_lifted_afterwards(self) -> None:
+        app = _facade(_DB())
+        await app.wipe_user_data("alice", confirm=True)
+        assert "alice" not in app._erasing
+        await app._check_access("alice", "store_memory")
+
+    async def test_the_barrier_is_lifted_even_when_the_wipe_fails(self) -> None:
+        """A user permanently unable to write because an erasure errored once is
+        worse than the incomplete deletion, and the caller was told to retry."""
+        app = _facade(_DB(failing={"episodes"}))
+
+        with pytest.raises(PartialWipeError):
+            await app.wipe_user_data("alice", confirm=True)
+        assert "alice" not in app._erasing
+        await app._check_access("alice", "store_memory")
+
+    async def test_a_write_during_the_wipe_is_refused_for_real(self) -> None:
+        """Driven through the facade rather than `_check_access` directly: the
+        barrier is only worth anything if it sits on the path `add()` takes."""
+        from agent_memory.exceptions import ErasureInProgressError
+
+        db = _DB()
+        app = _facade(db)
+        app.memory_service = MagicMock()
+        # `store_stm` is what `add()` actually calls; stubbed so that if the
+        # barrier ever stops working, this test fails on the assertion below
+        # rather than on an incomplete fake.
+        app.memory_service.store_stm = AsyncMock(return_value=["m1"])
+        refused: list = []
+        original = app.admin_service.wipe_user_data
+
+        async def _wipe_then_race(user_id: str):
+            # Mid-erasure, exactly where the interleaving write used to survive.
+            try:
+                await app.add("alice", "c1", [{"role": "user", "content": "hi"}])
+            except ErasureInProgressError as e:
+                refused.append(e)
+            return await original(user_id)
+
+        app.admin_service.wipe_user_data = _wipe_then_race
+        await app.wipe_user_data("alice", confirm=True)
+
+        assert refused, "a concurrent add() was accepted during the erasure"
+        assert not app.memory_service.store_stm.await_count, (
+            "the write reached the service layer during the erasure"
+        )
+
+    def test_the_write_list_covers_every_write_the_facade_audits(self) -> None:
+        """A new write path gets no barrier unless it is listed, and nothing about
+        adding one would make anybody look. So the list is checked against the
+        facade's own audit categories: any operation the facade records under a
+        `:write`/`:delete`/admin-mutation category must be in it.
+        """
+        import re
+        from pathlib import Path
+
+        from agent_memory.memory import _WRITE_OPERATIONS
+
+        source = Path("agent_memory/memory.py").read_text()
+        # `_run(user_id, "<operation>", "<category>", ...)` and the two
+        # hand-rolled audit sites (`log_activity`, `wipe_user_data`).
+        pairs = set(re.findall(r'"([a-z_]+)",\s*"([a-z_:]+)"', source))
+        writes = {
+            op for op, cat in pairs
+            if cat.endswith((":write", ":delete"))
+        }
+        # `log_activity` is audited as `episodic:write` with the arguments in the
+        # other order, so it is named rather than pattern-matched.
+        writes.add("log_activity")
+        missing = writes - _WRITE_OPERATIONS
+        assert not missing, (
+            f"write operations with no erasure barrier: {sorted(missing)} — add "
+            "them to _WRITE_OPERATIONS in agent_memory/memory.py"
+        )
+
+
+class TestCompletenessIsVerifiedRatherThanAsserted:
+    """`complete: true` used to mean "no `delete_many` raised".
+
+    That is a claim about this process's own calls, and says nothing about a
+    write from another replica that landed between the delete and the reply. For
+    the one operation whose entire value is being final, the answer is checked.
+    """
+
+    async def test_residue_left_by_another_writer_is_caught(self) -> None:
+        db = _DB()
+        app = _facade(db)
+        original = app.admin_service.wipe_user_data
+
+        async def _wipe_then_another_replica_writes(user_id: str):
+            out = await original(user_id)
+            # A second process, unaffected by this one's in-memory barrier.
+            db["memories"].docs.append({"user_id": "alice", "content": "late"})
+            return out
+
+        app.admin_service.wipe_user_data = _wipe_then_another_replica_writes
+
+        with pytest.raises(PartialWipeError) as exc:
+            await app.wipe_user_data("alice", confirm=True)
+        assert "memories" in exc.value.errors
+
+    async def test_the_residue_is_audited_as_an_error(self) -> None:
+        db = _DB()
+        app = _facade(db)
+        original = app.admin_service.wipe_user_data
+
+        async def _leaves_residue(user_id: str):
+            out = await original(user_id)
+            db["episodes"].docs.append({"user_id": "alice"})
+            return out
+
+        app.admin_service.wipe_user_data = _leaves_residue
+        with pytest.raises(PartialWipeError):
+            await app.wipe_user_data("alice", confirm=True)
+        await app.audit_service.flush()
+
+        record = _entries(db, operation="wipe_user_data")[0]
+        assert record["status"] == "error"
+        assert record["user_id"] == ERASURE_PRINCIPAL, "residue re-identified them"
+
+    async def test_the_counters_composite_id_is_checked_correctly(self) -> None:
+        """`episodes_counters` is keyed by a composite `_id`. A residue check
+        using the obvious `{"user_id": ...}` filter would match nothing there and
+        report clean over surviving counters."""
+        db = _DB()
+        app = _facade(db)
+        original = app.admin_service.wipe_user_data
+
+        async def _leaves_a_counter(user_id: str):
+            out = await original(user_id)
+            db["episodes_counters"].docs.append(
+                {"_id": {"user_id": "alice", "thread_id": "t1"}, "seq": 3}
+            )
+            return out
+
+        app.admin_service.wipe_user_data = _leaves_a_counter
+        with pytest.raises(PartialWipeError) as exc:
+            await app.wipe_user_data("alice", confirm=True)
+        assert "episodes_counters" in exc.value.errors
+
+    async def test_an_unreadable_collection_is_unverified_not_residue(self) -> None:
+        """The delete succeeded; a follow-up read failing is a reason to say
+        "could not confirm", not to tell the operator their data is still there."""
+        db = _DB(count_failing={"decisions"})
+        app = _facade(db)
+
+        result = await app.wipe_user_data("alice", confirm=True)
+
+        assert result["complete"] is True
+        assert result["unverified_collections"] == ["decisions"]
+
+    async def test_a_verified_wipe_says_nothing_about_unverified(self) -> None:
+        result = await _facade(_DB()).wipe_user_data("alice", confirm=True)
+        assert "unverified_collections" not in result
+
+    async def test_the_check_looks_in_every_collection_the_wipe_touches(self) -> None:
+        """Two copies of the collection list would drift, and a residue check
+        missing a collection produces the exact wrong answer this path exists to
+        prevent."""
+        from agent_memory.services.admin import erasure_targets
+
+        db = _DB()
+        app = _facade(db)
+        counted: list[str] = []
+        for _key, name, _q in erasure_targets("alice"):
+            col = db[name]
+            original_count = col.count_documents
+
+            async def _record(query, _name=name, _orig=original_count):
+                counted.append(_name)
+                return await _orig(query)
+
+            col.count_documents = _record
+
+        await app.wipe_user_data("alice", confirm=True)
+
+        expected = {name for _k, name, _q in erasure_targets("alice")}
+        assert set(counted) == expected, (
+            f"unchecked collections: {sorted(expected - set(counted))}"
+        )

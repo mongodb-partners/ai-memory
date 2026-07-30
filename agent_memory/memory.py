@@ -19,7 +19,12 @@ import time
 from agent_memory.config import MemoryConfig
 from agent_memory.core.redaction import redact_error
 from agent_memory.core.response_limit import cap_results
-from agent_memory.exceptions import AccessError, ConfigError, RateLimitError
+from agent_memory.exceptions import (
+    AccessError,
+    ConfigError,
+    ErasureInProgressError,
+    RateLimitError,
+)
 from agent_memory.services.audit import ERASURE_PRINCIPAL
 
 logger = logging.getLogger(__name__)
@@ -29,9 +34,39 @@ _SEARCH_OPERATIONS = frozenset(
     {"recall_memory", "hybrid_search", "check_cache", "search_activity"}
 )
 
+# Operations that persist something attributable to a user. A wipe in progress
+# refuses exactly these, because a write that lands mid-deletion survives it and
+# leaves the user with data they asked to have destroyed.
+#
+# Listed explicitly rather than derived from the audit category, for two reasons:
+# reads stay available during a wipe (they return progressively less, which is
+# honest), and a future operation gets no write barrier by accident. A new write
+# path must be added here — the test below enumerates the facade's `_run` call
+# sites and fails when one is missing, so "someone forgets" is a test failure
+# rather than a silent hole.
+_WRITE_OPERATIONS = frozenset(
+    {
+        "store_memory",
+        "store_cache",
+        "store_decision",
+        "log_activity",
+        "delete_memory",
+        "cache_invalidate",
+    }
+)
+
 
 class AsyncMemory:
     """Programmatic async memory core. Build via ``await AsyncMemory.create(cfg)``."""
+
+    #: Users with a permanent erasure in flight — writes for them are refused
+    #: while their data is being deleted. `create()` replaces this with a
+    #: per-instance set; the class-level empty frozenset is the safe default for
+    #: an instance built by other means (tests construct facades directly), where
+    #: an absent attribute would turn the barrier into an AttributeError on the
+    #: ordinary write path. Immutable so a stray `add` here fails loudly instead
+    #: of quietly blocking one user across every instance in the process.
+    _erasing: frozenset | set = frozenset()
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -59,6 +94,11 @@ class AsyncMemory:
         self = cls.__new__(cls)
         self.config = config
         self._workers = []
+        # Users with a wipe in flight. Read by `_check_access` to refuse writes
+        # for the duration; see `wipe_user_data`. A class attribute backs this so
+        # a facade built by a test without going through `create()` still has the
+        # barrier rather than an AttributeError — see `_erasing` on the class.
+        self._erasing = set()
 
         # 1. Database + 2. Stage-1 indexes (blocking)
         db_manager = await DatabaseManager.initialize(config)
@@ -333,7 +373,22 @@ class AsyncMemory:
     # ── Orchestration ──────────────────────────────────────────────────────
 
     async def _check_access(self, user_id: str, operation: str, role: str | None = None) -> None:
-        """Governance THEN rate limit. Raises AccessError / RateLimitError."""
+        """Erasure barrier, THEN governance, THEN rate limit.
+
+        Raises ``ErasureInProgressError`` / ``AccessError`` / ``RateLimitError``.
+
+        The erasure check is first and cheapest: a set membership test against
+        the users currently being wiped. It runs before governance because a
+        write that is about to be refused should not also consume the caller's
+        rate-limit budget, and because this is the one refusal that is about the
+        state of the data rather than the identity of the caller.
+        """
+        if operation in _WRITE_OPERATIONS and user_id in self._erasing:
+            raise ErasureInProgressError(
+                f"'{operation}' refused: user data is being permanently erased. "
+                "Retry once the erasure completes."
+            )
+
         effective_role = role or self.config.auth_default_role
 
         profile = None
@@ -813,6 +868,28 @@ class AsyncMemory:
         The access check still runs against the real ``user_id`` — authorisation is
         about who is asking, and that decision has to be made before anything is
         deleted. Only the audit subject changes.
+
+        **Pending and concurrent writes.** A deletion is not final if something can
+        write the same data back a moment later, and two things could:
+
+        - *Queued episodic turns.* ``log_activity`` returns as soon as the turn is
+          on the worker's queue; the insert happens later. Turns queued before the
+          wipe would land after it. Drained here, the same way the audit buffer is
+          flushed — a pending write is a write.
+        - *Concurrent calls.* Nothing stopped an ``add()`` that arrived mid-wipe
+          from inserting into a collection the deletion had already swept. The
+          user is added to ``_erasing`` for the duration, and ``_check_access``
+          refuses writes for them while they are in it. Reads are left alone:
+          they return progressively less as collections empty, which is honest.
+
+        Neither is a lock, and this is deliberate: a distributed lock across
+        replicas is a much larger change, and the honest statement of what this
+        gives is "no write from *this process* survives the erasure". The residue
+        check below is what catches the multi-process case — it looks at the
+        collections after deleting and reports what is still there rather than
+        asserting completeness, so a write from another replica surfaces as a
+        ``PartialWipeError`` telling the operator to retry instead of a
+        ``complete: true`` that is wrong.
         """
         if not confirm:
             return {
@@ -835,16 +912,40 @@ class AsyncMemory:
             )
             raise
 
-        # Any buffered entry naming this user is flushed *before* the delete, so
-        # the delete sees it and removes it. `audit_flush_on_write` defaults to
-        # False, so up to `audit_buffer_size` of this user's records normally sit
-        # in memory; without this they would be written to Atlas after the wipe
-        # had already swept the collection, restoring exactly the rows it removed.
-        # An audit buffer is a pending write, and a wipe has to account for it.
-        await self.audit_service.flush()
-
+        # The barrier goes up before anything is drained or deleted, and comes
+        # down only in the `finally` below. Ordering is the whole point: drain
+        # first and a turn enqueued during the drain lands after it.
+        #
+        # `_erasing` is per-instance and replaced by `create()`; guarded here so a
+        # facade built without it (tests construct them directly) still runs the
+        # erasure rather than failing on the class-level frozenset.
+        if not isinstance(self._erasing, set):
+            self._erasing = set()
+        self._erasing.add(user_id)
         try:
+            # Any buffered entry naming this user is flushed *before* the delete,
+            # so the delete sees it and removes it. `audit_flush_on_write`
+            # defaults to False, so up to `audit_buffer_size` of this user's
+            # records normally sit in memory; without this they would be written
+            # to Atlas after the wipe had already swept the collection, restoring
+            # exactly the rows it removed. An audit buffer is a pending write, and
+            # a wipe has to account for it.
+            await self.audit_service.flush()
+            # Same argument, different queue. `log_activity` returns once the turn
+            # is queued, so turns accepted before the barrier went up are still in
+            # memory with their inserts pending. Drained rather than discarded:
+            # they are then deleted by the wipe below, which is what makes the
+            # erasure cover them. A drain that times out is reported, not ignored
+            # — see `_drain_episodic_for_erasure`.
+            drained = await self._drain_episodic_for_erasure()
+
             result = await self.admin_service.wipe_user_data(user_id)
+            # Verified, not asserted. `admin_service` reports what its own
+            # `delete_many` calls removed, which says nothing about a write from
+            # another replica that landed in between. This re-reads the
+            # collections and raises if anything is left, so `complete: true`
+            # means "checked and empty" rather than "no error was raised".
+            await self._verify_erased(user_id, result, drained)
         except Exception as e:
             duration_ms = int((time.time() - start) * 1000)
             fields = {"error": redact_error(e)}
@@ -861,6 +962,11 @@ class AsyncMemory:
                 duration_ms, **fields,
             )
             raise
+        finally:
+            # Released even when the wipe failed. A user permanently unable to
+            # write because an erasure errored once is a worse outcome than the
+            # incomplete deletion itself, and the caller has been told to retry.
+            self._erasing.discard(user_id)
 
         duration_ms = int((time.time() - start) * 1000)
         # `result` minus `user_id`: the counts describe the erasure without
@@ -874,6 +980,88 @@ class AsyncMemory:
         # buffer fills or its interval elapses.
         await self.audit_service.flush()
         return result
+
+    async def _drain_episodic_for_erasure(self) -> bool:
+        """Land every queued turn before the deletion runs. Returns success.
+
+        Called with the erasure barrier already up, so nothing new joins the queue
+        while this waits. The queue is not per-user and cannot be — one worker
+        writes turns for everybody — so this drains all of it. That is a short
+        wait shared with other tenants' turns, on an operation that runs rarely
+        and must be right.
+
+        A timeout is *not* swallowed. Undrained turns are pending writes for
+        someone, possibly this user, and they will land after the collections are
+        swept. The boolean reaches ``_verify_erased``, which turns it into a
+        refusal to claim completeness.
+        """
+        episodic = getattr(self, "episodic_service", None)
+        if episodic is None:
+            return True
+        try:
+            return bool(
+                await episodic.flush(self.config.episodic_shutdown_timeout_seconds)
+            )
+        except Exception as exc:
+            # The drain failing is not a reason to abandon the deletion — most of
+            # the user's data is in collections the queue never touches. It is a
+            # reason not to call the result complete.
+            logger.warning("Episodic drain before erasure failed: %s", exc)
+            return False
+
+    async def _verify_erased(self, user_id: str, result: dict, drained: bool) -> None:
+        """Re-read the collections and refuse to report an incomplete erasure.
+
+        ``admin_service.wipe_user_data`` reports what its own ``delete_many``
+        calls removed. That is not the same question as "is this user's data
+        gone": a turn that landed from another replica between the delete and now
+        is not in those counts, and neither is anything the drain above failed to
+        flush. So the claim is checked rather than inferred.
+
+        Raises :class:`PartialWipeError` on residue, which is the same channel a
+        failed delete already uses — callers, the audit record, and the demo's
+        ``/reset`` all handle it, and the operator instruction is identical: retry.
+
+        A ``count_documents`` failure is deliberately *not* treated as residue.
+        The wipe itself succeeded; a follow-up read erroring is a reason to say
+        "unverified", not to tell the operator their data is still there. It is
+        logged and recorded on the result instead.
+        """
+        from agent_memory.services.admin import PartialWipeError, erasure_targets
+
+        # `admin_service.db`, not a handle of our own: the check has to read the
+        # same database the deletion wrote to, and the facade holds only the
+        # manager.
+        db = self.admin_service.db
+        residue: dict = {}
+        unverified: list[str] = []
+        for _key, collection, query in erasure_targets(user_id):
+            try:
+                remaining = await db[collection].count_documents(query)
+            except Exception as exc:
+                unverified.append(collection)
+                logger.warning(
+                    "Could not verify erasure of %s: %s", collection,
+                    redact_error(exc),
+                )
+                continue
+            if remaining:
+                residue[collection] = f"{remaining} document(s) still present"
+
+        if not drained and not residue:
+            # The drain timed out but nothing is in the collections *yet* — the
+            # pending turns land next. Reported as residue because the caller's
+            # only useful action is the same one: retry, which will both drain
+            # again and delete whatever arrived.
+            residue["episodes"] = (
+                "queued turns did not drain before the deletion; they may still "
+                "be written"
+            )
+
+        if residue:
+            raise PartialWipeError(dict(result), residue)
+        if unverified:
+            result["unverified_collections"] = sorted(unverified)
 
 
 async def _ensure_search_indexes_bg(db, embedding_dimension: int = 1536, ensure=None) -> None:

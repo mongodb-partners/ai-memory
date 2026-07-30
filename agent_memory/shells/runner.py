@@ -85,29 +85,112 @@ def build_combined_app(config: MemoryConfig):
     return api
 
 
+#: Addresses that reach only this host. A shell bound to one of these is
+#: reachable by processes on the same machine and nothing else, which is the
+#: local-development posture where unauthenticated access is reasonable.
+#: ``::1`` and its IPv4-mapped form are listed because uvicorn accepts both.
+_LOOPBACK_HOSTS = frozenset(
+    {"127.0.0.1", "localhost", "::1", "[::1]", "::ffff:127.0.0.1"}
+)
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether ``host`` binds loopback only.
+
+    Anything in ``127.0.0.0/8`` counts, not just ``127.0.0.1`` — ``127.0.0.2`` is
+    as unroutable as its more famous sibling, and treating it as public would
+    refuse a working local setup for no gain. Everything else is treated as
+    routable, including the empty string and ``0.0.0.0``: when the address is not
+    recognizably local, the safe reading is that it is reachable.
+    """
+    normalized = (host or "").strip().strip("[]").lower()
+    if normalized in {h.strip("[]") for h in _LOOPBACK_HOSTS}:
+        return True
+    return normalized.startswith("127.")
+
+
+def _refuse_to_serve_open(config: MemoryConfig, host: str) -> None:
+    """Refuse to bind a routable address with authentication disabled.
+
+    With ``auth_enabled`` off, ``resolve_caller`` takes the identity from the
+    request — every caller names the ``user_id`` it acts as. In-process that is
+    the documented single-tenant posture and it is correct: the calling app has
+    already authenticated its user. On a published port it means any client that
+    can route to the process may read any tenant's memories or invoke the
+    permanent-erasure path against them, and there is no record of who did.
+
+    The default was to serve exactly that: ``AUTH_ENABLED`` off, ``0.0.0.0``
+    hardcoded at every bind, and ``docker-compose.yml`` publishing 8000.
+
+    This cannot be a validator on ``MCPConfig``. The same class configures the
+    library used in-process, where auth-off is right and no socket is involved;
+    a model-level refusal would reject the majority of correct uses. ``run()`` is
+    the narrowest place that knows a listening socket is about to exist.
+
+    ``require_auth_for_multi_tenant`` does not cover this. It is the inverse
+    assertion — "refuse to start without auth" — which an operator sets *having
+    already thought about it*. This is the case where they have not.
+    """
+    if config.auth_enabled or _is_loopback(host):
+        return
+    if config.allow_unauthenticated_network_access:
+        # Deliberate: an internal-only deployment behind its own gateway is a
+        # real configuration. Logged at warning on every start, because "we set
+        # that flag for a spike" is how it survives into production unnoticed.
+        logger.warning(
+            "Serving UNAUTHENTICATED on %s:%s — every request names the user_id "
+            "it acts as, so any client that can reach this port can read or "
+            "erase any tenant's memories. Permitted by "
+            "ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true.",
+            host,
+            config.port,
+        )
+        return
+    raise RuntimeError(
+        f"Refusing to serve {host}:{config.port} with authentication disabled. "
+        "Any client that can reach this port could read or permanently erase "
+        "any user's memories, because with AUTH_ENABLED=false the caller "
+        "supplies its own user_id.\n"
+        "  • To secure it: set AUTH_ENABLED=true and AUTH_SECRET.\n"
+        f"  • For local development: HOST=127.0.0.1 (the default; {host} was "
+        "requested).\n"
+        "  • To accept the risk on a trusted network: "
+        "ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true."
+    )
+
+
 def run(config: MemoryConfig | None = None) -> None:
     """Blocking entrypoint used by ``python -m agent_memory``.
 
     For a single shell, runs it directly. For ``both``, mounts the REST app and
     the MCP ASGI app under one uvicorn server so both share the process and the
     one facade created in the MCP lifespan.
+
+    Binds ``config.host`` — loopback unless asked otherwise — and refuses to
+    bind a routable address without authentication. See
+    ``_refuse_to_serve_open``.
     """
     import uvicorn
 
     config = config or MemoryConfig.from_env()
     transport = (config.transport or "mcp").lower()
+    host = config.host
+    # Checked before dispatch so it holds for every transport. Previously each
+    # branch passed its own hardcoded "0.0.0.0", so a guard added to one of them
+    # would have left the other two open.
+    _refuse_to_serve_open(config, host)
     if transport in ("streamable-http", "stdio", "mcp"):
         create_mcp(config).run(
-            transport="streamable-http", host="0.0.0.0", port=config.port
+            transport="streamable-http", host=host, port=config.port
         )
         return
     if transport == "rest":
         # REST shell owns the facade lifecycle via FastAPI lifespan.
         from agent_memory.shells.rest.app import create_managed_app
 
-        uvicorn.run(create_managed_app(config), host="0.0.0.0", port=config.port)
+        uvicorn.run(create_managed_app(config), host=host, port=config.port)
         return
     if transport == "both":
-        uvicorn.run(build_combined_app(config), host="0.0.0.0", port=config.port)
+        uvicorn.run(build_combined_app(config), host=host, port=config.port)
         return
     raise ValueError(f"Unknown TRANSPORT: {config.transport!r}")

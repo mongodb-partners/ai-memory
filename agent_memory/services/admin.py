@@ -35,6 +35,40 @@ class PartialWipeError(MemoryLibError):
         )
 
 
+def erasure_targets(user_id: str) -> list[tuple[str, str, dict]]:
+    """Every user-scoped collection, as ``(result key, collection, filter)``.
+
+    Module-level and shared rather than inlined in ``wipe_user_data``, because the
+    facade's post-wipe residue check has to look in *exactly* these places. Two
+    copies of this list would drift, and the failure mode of a residue check that
+    is missing a collection is the one this whole path exists to prevent: a
+    confident ``complete: true`` over data that is still there.
+
+    ``episodes_counters`` is keyed by a composite ``_id`` rather than a top-level
+    ``user_id``, so it carries its own filter — the one collection where the
+    obvious query silently matches nothing.
+    """
+    from agent_memory.core.collections import (
+        AUDIT_LOG,
+        DECISIONS,
+        EPISODES,
+        EPISODES_COUNTERS,
+        MEMORIES,
+        RATE_LIMITS,
+        SEMANTIC_CACHE,
+    )
+
+    return [
+        ("memories_deleted", MEMORIES, {"user_id": user_id}),
+        ("cache_deleted", SEMANTIC_CACHE, {"user_id": user_id}),
+        ("audit_deleted", AUDIT_LOG, {"user_id": user_id}),
+        ("episodes_deleted", EPISODES, {"user_id": user_id}),
+        ("decisions_deleted", DECISIONS, {"user_id": user_id}),
+        ("rate_limits_deleted", RATE_LIMITS, {"user_id": user_id}),
+        ("episode_counters_deleted", EPISODES_COUNTERS, {"_id.user_id": user_id}),
+    ]
+
+
 class AdminService:
     """Cross-collection administrative operations for a single user."""
 
@@ -89,11 +123,13 @@ class AdminService:
         so a user who asked to be forgotten still had their activity log, and the
         answer to a deletion request was wrong rather than merely incomplete.
 
-        Every user-scoped collection is now enumerated in one place, and each
-        appears in the result with its own count so the caller can see exactly
-        what was removed. A new user-scoped collection has to be added here; the
-        test asserts this list against the collection names module, which is what
-        makes that a failure rather than a silent omission.
+        Every user-scoped collection is now enumerated in one place —
+        :func:`erasure_targets` — and each appears in the result with its own
+        count so the caller can see exactly what was removed. A new user-scoped
+        collection has to be added there; the test asserts that list against the
+        collection names module, which is what makes an omission a failure rather
+        than silent. The facade's post-wipe residue check reads the same function,
+        so it cannot check fewer places than the deletion touched.
 
         Raises :class:`PartialWipeError` if any collection fails, so an incomplete
         erasure is audited as an error instead of a success.
@@ -111,33 +147,7 @@ class AdminService:
                 "not a user, and cannot be wiped"
             )
 
-        from agent_memory.core.collections import (
-            AUDIT_LOG,
-            DECISIONS,
-            EPISODES,
-            EPISODES_COUNTERS,
-            MEMORIES,
-            RATE_LIMITS,
-            SEMANTIC_CACHE,
-        )
-
-        # (result key, collection, filter). `episodes_counters` is keyed by a
-        # composite `_id`, not a top-level `user_id`, so it needs its own filter
-        # — it is the one collection where the obvious query silently matches
-        # nothing.
-        targets = [
-            ("memories_deleted", MEMORIES, {"user_id": user_id}),
-            ("cache_deleted", SEMANTIC_CACHE, {"user_id": user_id}),
-            ("audit_deleted", AUDIT_LOG, {"user_id": user_id}),
-            ("episodes_deleted", EPISODES, {"user_id": user_id}),
-            ("decisions_deleted", DECISIONS, {"user_id": user_id}),
-            ("rate_limits_deleted", RATE_LIMITS, {"user_id": user_id}),
-            (
-                "episode_counters_deleted",
-                EPISODES_COUNTERS,
-                {"_id.user_id": user_id},
-            ),
-        ]
+        targets = erasure_targets(user_id)
 
         out: dict = {"user_id": user_id}
         errors: dict = {}

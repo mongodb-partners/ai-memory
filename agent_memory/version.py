@@ -9,7 +9,13 @@ where ``importlib.metadata`` has nothing to find.
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 
-_FALLBACK = "4.1.0"
+# Must equal `version` in pyproject.toml. It went stale at 4.1.0 while the
+# project moved to 4.2.0, and nothing failed: the fallback only fires in an
+# uninstalled source tree, which is precisely where nobody checks the number —
+# so `/health` and every audit record served a version that had not existed for
+# a release. `tests/unit/test_packaging_claims.py` asserts the two agree, which
+# is the only thing that makes a second copy of a version safe to keep.
+_FALLBACK = "4.2.0"
 
 try:
     __version__: str = _dist_version("agent-memory")

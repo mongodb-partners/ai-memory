@@ -22,8 +22,17 @@ class MCPConfig(BaseSettings):
     # version is a copy that goes stale.
     app_version: str = __version__
     port: int = 8000
+    # The address the deployed shells bind. Loopback by default: a process that
+    # binds every interface is reachable by anything that can route to the host,
+    # and that is a deployment decision rather than a default. `0.0.0.0` was
+    # hardcoded at every `uvicorn.run` call, so there was no way to ask for less.
+    host: str = "127.0.0.1"
     transport: str = "streamable-http"
     debug: bool = False
+    # The operator's assertion that serving unauthenticated on a routable
+    # address is intended. Read only by `shells.runner.run` — see
+    # `_refuse_to_serve_open` there for why the check cannot live in this model.
+    allow_unauthenticated_network_access: bool = False
 
     # MongoDB
     mongodb_connection_string: str

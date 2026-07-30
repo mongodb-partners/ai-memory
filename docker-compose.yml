@@ -3,8 +3,19 @@ services:
     build: .
     image: memory-mcp:latest
     env_file: .env
+    environment:
+      # Required inside a container: the published port reaches the process only
+      # if it binds every container interface. The library's own default is
+      # 127.0.0.1, which is right for a bare `agent-memory` process and useless
+      # here. Because this address is routable, the runner refuses to start with
+      # AUTH_ENABLED=false unless you also assert the risk — see the note below.
+      HOST: 0.0.0.0
     ports:
-      - "8000:8000"
+      # Bound to the host's loopback, not every host interface. `"8000:8000"`
+      # publishes on 0.0.0.0 of the *host*, which on a laptop on shared wifi or
+      # any cloud VM with a public IP means the memory store is reachable from
+      # off-box. Change the left side to `0.0.0.0:8000` only alongside auth.
+      - "127.0.0.1:8000:8000"
     networks:
       - memory-mcp-network
     restart: unless-stopped
@@ -18,6 +29,19 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+# ── Before exposing this beyond the host ─────────────────────────────────────
+# With AUTH_ENABLED=false every request names the `user_id` it acts as, so any
+# client that can reach the port can read or permanently erase any user's
+# memories. The runner refuses to bind a routable address in that state; to
+# serve one, set in .env:
+#
+#   AUTH_ENABLED=true
+#   AUTH_SECRET=<at least 32 bytes>
+#
+# and only then widen the `ports` mapping above. If you need an unauthenticated
+# listener on a trusted network, ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true says
+# so explicitly and logs a warning on every start.
 
 networks:
   memory-mcp-network:
