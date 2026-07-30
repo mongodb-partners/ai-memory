@@ -170,7 +170,7 @@ def artifact_dir() -> Path:
 
 
 def bundled_artifact_path(name: str) -> Path:
-    """Path to a bundled artifact by bare name, e.g. ``"titan-1536"``."""
+    """Path to a bundled artifact by bare name, e.g. ``"lexical"``."""
     return artifact_dir() / f"{name}.json"
 
 

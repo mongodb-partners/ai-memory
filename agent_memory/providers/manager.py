@@ -82,28 +82,46 @@ def known_embedding_dimension(config: MCPConfig) -> int | None:
             return None
 
 
-# Bundled artifacts, keyed by the (provider, model, dimension) triple they were
-# trained on. Keyed on the triple rather than the provider because dimension is
-# the part that silently breaks: voyage-3 is 1024 and voyage-3-lite is 512, and
+# Embedding-head artifacts, keyed by the (provider, model, dimension) triple they
+# were trained on. Keyed on the triple rather than the provider because dimension
+# is the part that silently breaks: voyage-4 is 1024 and voyage-3-lite is 512, and
 # loading 1024 coefficients against a 512-vector is the mismatch `LocalScorer`
 # exists to refuse. Better to refuse here, by name, than per-call.
-_BUNDLED_ARTIFACTS = {
-    ("bedrock", "amazon.titan-embed-text-v1", 1536): "titan-1536",
-    ("voyage", "voyage-3", 1024): "voyage-3-1024",
-}
+#
+# Deliberately empty: we ship no trained embedding head. Two placeholders used to
+# live here, and both scored every memory an identical 0.5 — which reads as
+# working (no error, a plausible number) while disabling promotion entirely, since
+# consolidation promotes at >= 0.6. Measurement said training them was not worth
+# it either: held-out Spearman for an embedding head tops out around 0.45, the
+# in-sample ceiling is 0.70, and `assess_importance` emits only 9 distinct values
+# for a 1024-coefficient fit to aim at. So every deployment gets `lexical`, which
+# is trained, until a head beats it on held-out calibration.
+#
+# To add one: train it against your embedder (`scripts/train_importance.py
+# --space embedding --out agent_memory/data/importance/<name>.json`), then add its
+# triple here.
+_BUNDLED_ARTIFACTS: dict[tuple[str, str, int], str] = {}
 
-# Provider-independent fallback. Weaker than a trained embedding head, and much
-# better than returning a constant for every memory.
+# Provider-independent fallback, and currently the only artifact we ship. Weaker
+# than a *trained* embedding head would be, and much better than the constant an
+# untrained one returns.
 _FALLBACK_ARTIFACT = "lexical"
 
 
 def select_artifact_name(config: MCPConfig) -> str:
     """The bundled artifact matching this config's embedder, or the fallback.
 
-    Must be called *after* the embedding provider is constructed: the Voyage arm
-    of ``_create_embedding_provider`` rewrites ``embedding_model`` and
+    Returns ``"lexical"`` for every config today, because `_BUNDLED_ARTIFACTS` is
+    empty — see the note there. That is by design, not a lookup miss: a lexical
+    model trained on real labels beats an untrained embedding head, whatever the
+    embedder.
+
+    Must still be called *after* the embedding provider is constructed: the Voyage
+    arm of ``_create_embedding_provider`` rewrites ``embedding_model`` and
     ``embedding_dimension`` on the config object, and reading them before that
-    yields Titan's defaults on a Voyage deployment.
+    yields Titan's defaults on a Voyage deployment. That ordering is load-bearing
+    the moment any triple is added back, so it is tested independently of whether
+    the map has entries.
     """
     key = (
         config.embedding_provider,

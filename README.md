@@ -287,30 +287,35 @@ Which artifact loads, when `importance_model_path` is unset:
 
 | `embedding_provider` / model / dimension | Artifact | State |
 |---|---|---|
-| `bedrock` / `amazon.titan-embed-text-v1` / 1536 | `titan-1536` | **untrained placeholder** |
-| `voyage` / `voyage-3` / 1024 | `voyage-3-1024` | **untrained placeholder** |
-| anything else | `lexical` | trained |
+| any — Titan, Voyage, OpenAI alike | `lexical` | trained |
 
-Selection is on the whole triple, not the provider: `voyage-3` emits 1024
-dimensions and `voyage-3-lite` emits 512, and coefficients are positional. The
-`lexical` fallback scores seven bounded text features instead of the embedding —
-weaker than a trained embedding head, and much better than a constant.
+**One artifact ships, and it is trained.** `lexical` scores seven bounded text
+features rather than the embedding, so it is provider-independent and applies to
+every deployment. Earlier versions shipped `titan-1536` and `voyage-3-1024`
+alongside it; both were zero-coefficient placeholders that scored every memory
+0.5 — above the forgetting threshold, below the promotion threshold — so
+`IMPORTANCE_SCORER=local` on those embedders did not approximate the LLM, it
+quietly turned importance-based promotion off while looking healthy. They have been
+deleted rather than trained, and selection now resolves to `lexical` **by design
+rather than by fallthrough**.
 
-**Only `lexical` ships trained.** Both embedding artifacts are zero-coefficient
-placeholders: they score every memory 0.5, which sits above the forgetting
-threshold and below the promotion threshold, so `IMPORTANCE_SCORER=local` on Titan
-1536 or Voyage-3 1024 does not approximate the LLM — it quietly turns
-importance-based promotion off. They are untrained on purpose. The embedding head
-has 1024 coefficients and the available label volume is ~900 usable rows, where the
-learning curve is still climbing with no plateau; a trained-looking artifact at that
-ratio would be less honest than an obvious placeholder. Train one with
-`--space embedding` against your own embedder before relying on it, or stay on the
-LLM scorer for those two triples.
+Skipping the embedding head is a measurement, not a shortcut. Its held-out Spearman
+tops out near 0.45 and its *in-sample* ceiling — fitted and scored on the same
+1,234 rows — is only 0.70, so more labels buy at most part of that gap on a
+mediocre maximum. `assess_importance` returns a 1–10 integer, which is 9 distinct
+label values for a 1024-coefficient fit to aim at. Regularization does not rescue
+it either (alpha 1 → 100,000 moves Spearman 0.45 → 0.34, shrinking toward the
+constant). A trained lexical model beats an untrained embedding head at any
+embedder, which is why the table is uniform.
 
-Because selection is on the whole triple, an embedder that is not in the table —
-`voyage-4` at 1024, for instance — falls through to `lexical`, which is the trained
-artifact. That fallback is the better outcome today, but it is a fallthrough rather
-than a decision, so check the log line at startup to see which artifact loaded.
+If you want an embedding head for your own embedder, train one with
+`--space embedding`, commit the JSON under `agent_memory/data/importance/`, and add
+its `(provider, model, dimension)` triple to `_BUNDLED_ARTIFACTS` in
+`agent_memory/providers/manager.py`. Selection is on the whole triple, not the
+provider, because coefficients are positional: `voyage-3` emits 1024 dimensions and
+`voyage-3-lite` emits 512, and loading 1024 coefficients against a 512-vector is
+the mismatch selection exists to refuse. Either way, the startup log line names the
+artifact that actually loaded.
 
 The lexical artifact is trained on LLM-distilled labels only. The two long-term
 memory benchmarks (locomo, longmemeval) are collected by the trainer but carry zero

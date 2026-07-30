@@ -10,6 +10,21 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-30-ml-importance-scoring-design.md` (commit `d1ecbf4`)
 
+> **Implemented — one deliverable changed on measurement.** This plan is kept as
+> written for the record; the shipped code differs in one respect. The plan calls
+> for three bundled artifacts (`lexical`, `titan-1536`, `voyage-3-1024`). Only
+> `lexical` ships. The two embedding artifacts were created as zero-coefficient
+> placeholders, found to score every memory an identical 0.5 — which disables
+> promotion while looking healthy — and then **deleted rather than trained**: an
+> embedding head's held-out Spearman tops out near 0.45 against an in-sample
+> ceiling of 0.70, and `assess_importance` emits only 9 distinct label values for a
+> 1024-coefficient fit to aim at. `_BUNDLED_ARTIFACTS` is therefore empty and every
+> embedder selects `lexical` by design. Where the sections below name those two
+> artifacts or assert on their names — notably the selection and construction-order
+> tests — read the shipped versions in `tests/unit/test_importance_selection.py`
+> and `tests/unit/test_importance_artifact.py` instead; they assert the same
+> properties without depending on a populated map. See the 4.2.0 CHANGELOG entry.
+
 ## Global Constraints
 
 - **No new runtime dependencies.** `agent_memory/` must not import numpy, scikit-learn, pandas, or torch. The runtime dependency list in `pyproject.toml` stays at its current 8 entries. Training deps go in a new `training` optional-dependency group.

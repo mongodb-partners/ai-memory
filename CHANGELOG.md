@@ -31,10 +31,12 @@ imports the scientific stack.
   `LLMScorer` (today's behaviour, wrapped) and `LocalScorer`.
 - Bundled artifacts under `agent_memory/data/importance/`, selected on the
   `(provider, model, dimension)` triple — not the provider alone, because
-  `voyage-3` emits 1024 dimensions and `voyage-3-lite` emits 512.
-- A `lexical` fallback artifact (seven bounded, interpretable text features) for
-  deployments whose embedder has no trained artifact. Weaker than a trained
-  embedding head, and much better than returning a constant.
+  coefficients are positional and `voyage-3` emits 1024 dimensions where
+  `voyage-3-lite` emits 512.
+- A trained `lexical` artifact (seven bounded, interpretable text features),
+  currently the only one bundled and therefore what every deployment loads. Weaker
+  than a trained embedding head would be, and much better than the constant an
+  untrained one returns.
 - `training` optional-dependency group for the offline trainer. Deliberately not
   part of `all`.
 - `scripts/train_importance.py` — the offline trainer, with four label sources that
@@ -46,14 +48,24 @@ imports the scientific stack.
   — the library's own `logistic` and clamp, not sklearn's `predict` — so a printed
   number is one the served scorer reproduces.
 
-**Only the `lexical` artifact ships trained.** `titan-1536` and `voyage-3-1024` are
-zero-coefficient placeholders that score every memory 0.5 — above the forgetting
-threshold, below the promotion threshold — so enabling `IMPORTANCE_SCORER=local` on
-those two triples does not approximate the LLM, it turns importance-based promotion
-off. Untrained on purpose: 1024 coefficients against ~900 usable labeled rows, with
-the learning curve still climbing and no plateau in sight. A trained-looking artifact
-at that ratio would be less honest than an obvious placeholder. Each file says so in
-its `training.note`, and the README says which triples are affected.
+**Exactly one artifact ships, and it is trained.** `lexical` is provider-independent,
+so every deployment gets a model fitted on real labels. `_BUNDLED_ARTIFACTS` is
+empty by design and `select_artifact_name` returns `lexical` for every embedder —
+that is the decision, not a lookup miss.
+
+`titan-1536` and `voyage-3-1024` were briefly bundled as zero-coefficient
+placeholders and have been **deleted rather than trained**. They scored every memory
+0.5 — above the forgetting threshold, below the promotion threshold — so
+`IMPORTANCE_SCORER=local` on those triples did not approximate the LLM, it silently
+turned importance-based promotion off while reporting healthy. Deleting beat
+training on measurement: an embedding head's held-out Spearman tops out near 0.45,
+its in-sample ceiling on the same 1,234 rows is only 0.70, regularization only
+shrinks it toward the constant (alpha 1 → 100,000 gives 0.45 → 0.34), and
+`assess_importance` emits a 1–10 integer — 9 distinct values for a 1024-coefficient
+fit to aim at. Paid labels would buy resolution the teacher does not have.
+`test_no_bundled_artifact_is_a_constant` now rejects an all-zero artifact at commit
+time, and the artifact invariants are keyed off directory discovery so they arm
+automatically on any head added later.
 
 **The benchmarks are collected but carry zero weight by default**, and that default
 is a measurement rather than a preference. Their labels mark a turn positive when a

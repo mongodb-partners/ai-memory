@@ -129,13 +129,20 @@ pass the result in explicitly.
 ```text
 agent_memory/services/importance.py      # protocol + both scorers + artifact loader
 agent_memory/data/importance/
-    titan-1536.json                      # bedrock amazon.titan-embed-text-v1
-    voyage-3-1024.json                   # voyage-3 (public API + Atlas gateway)
-    lexical.json                         # provider-independent fallback
+    lexical.json                         # provider-independent, and the only one shipped
 scripts/train_importance.py              # offline trainer, never imported by the library
 tests/unit/test_importance_scorer.py
 tests/unit/test_importance_artifact.py
 ```
+
+> **As designed, this listed `titan-1536.json` and `voyage-3-1024.json` too.** Both
+> were built as zero-coefficient placeholders, which score every memory 0.5 and so
+> silently disable promotion, and both were deleted rather than trained once the
+> embedding head's ceiling was measured (held-out Spearman ~0.45, in-sample 0.70,
+> and only 9 distinct label values available from `assess_importance`).
+> `_BUNDLED_ARTIFACTS` ships empty; every embedder selects `lexical` by design. The
+> triple-keyed selection design below is unchanged and still correct — it is what a
+> future head would register through.
 
 ### Modified files
 

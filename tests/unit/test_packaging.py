@@ -97,7 +97,9 @@ class TestImportanceArtifactsShip:
     where the files are on disk regardless. Hence a real build.
     """
 
-    EXPECTED = {"lexical.json", "titan-1536.json", "voyage-3-1024.json"}
+    # Only `lexical` ships: it is the one artifact that is trained, and
+    # `_BUNDLED_ARTIFACTS` is empty so every deployment selects it.
+    EXPECTED = {"lexical.json"}
 
     def test_artifacts_exist_in_the_source_tree(self):
         found = {

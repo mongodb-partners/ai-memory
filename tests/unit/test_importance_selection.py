@@ -36,41 +36,58 @@ def _config(**overrides) -> MCPConfig:
 
 
 class TestSelectArtifactName:
-    def test_bedrock_titan_1536(self):
-        assert select_artifact_name(_config()) == "titan-1536"
+    """We ship no trained embedding head, so `_BUNDLED_ARTIFACTS` is empty and
+    every config resolves to `lexical`. That is the intended answer rather than a
+    lookup miss — a lexical model trained on real labels beats the constant an
+    untrained embedding head returns."""
 
-    def test_voyage_3_1024(self):
-        config = _config(
-            embedding_provider="voyage",
-            embedding_model="voyage-3",
-            embedding_dimension=1024,
-        )
-        assert select_artifact_name(config) == "voyage-3-1024"
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {},  # bedrock/titan defaults
+            {"embedding_provider": "voyage", "embedding_model": "voyage-4",
+             "embedding_dimension": 1024},
+            {"embedding_provider": "voyage", "embedding_model": "voyage-3",
+             "embedding_dimension": 1024},
+            {"embedding_provider": "openai",
+             "embedding_model": "text-embedding-3-small"},
+            {"embedding_model": "some-new-embedder"},
+        ],
+        ids=["titan", "voyage-4", "voyage-3", "openai", "unknown"],
+    )
+    def test_every_embedder_selects_lexical(self, overrides):
+        assert select_artifact_name(_config(**overrides)) == "lexical"
 
-    def test_unknown_model_falls_back_to_lexical(self):
-        config = _config(embedding_model="some-new-embedder")
-        assert select_artifact_name(config) == "lexical"
+    def test_no_embedding_head_is_bundled(self):
+        """Pins the reason the parametrize above is uniform, so a future entry
+        makes this fail and forces those expectations to be revisited rather than
+        passing on a stale assumption."""
+        from agent_memory.providers.manager import _BUNDLED_ARTIFACTS
 
-    def test_right_model_wrong_dimension_falls_back_to_lexical(self):
-        """A 512-dim voyage-3-lite must not load 1024 coefficients."""
-        config = _config(
-            embedding_provider="voyage",
-            embedding_model="voyage-3-lite",
-            embedding_dimension=512,
-        )
-        assert select_artifact_name(config) == "lexical"
+        assert _BUNDLED_ARTIFACTS == {}
 
-    def test_titan_at_wrong_dimension_falls_back(self):
-        config = _config(embedding_dimension=1024)
-        assert select_artifact_name(config) == "lexical"
+    def test_dimension_is_part_of_the_key(self):
+        """The mismatch guard, kept live against a stand-in map: voyage-3 is 1024
+        and voyage-3-lite is 512, and loading 1024 coefficients against a
+        512-vector is what selection exists to prevent. Patched rather than
+        deleted so the lookup keeps being exercised while the real map is empty."""
+        from agent_memory.providers import manager as manager_mod
 
-    def test_openai_falls_back_to_lexical(self):
-        """No artifact shipped for OpenAI yet. Lexical is worse than a trained
-        head and better than a constant."""
-        config = _config(
-            embedding_provider="openai", embedding_model="text-embedding-3-small"
-        )
-        assert select_artifact_name(config) == "lexical"
+        stand_in = {("voyage", "voyage-3", 1024): "voyage-3-1024"}
+        with patch.object(manager_mod, "_BUNDLED_ARTIFACTS", stand_in):
+            matched = _config(
+                embedding_provider="voyage",
+                embedding_model="voyage-3",
+                embedding_dimension=1024,
+            )
+            assert select_artifact_name(matched) == "voyage-3-1024"
+
+            wrong_dimension = _config(
+                embedding_provider="voyage",
+                embedding_model="voyage-3",
+                embedding_dimension=512,
+            )
+            assert select_artifact_name(wrong_dimension) == "lexical"
 
 
 class TestProviderManagerSelection:
@@ -99,8 +116,12 @@ class TestProviderManagerSelection:
         assert isinstance(manager.scorer, LocalScorer)
 
     def test_local_scorer_loads_the_selected_bundled_artifact(self):
+        """`lexical` for every embedder, and it must be the *trained* file — an
+        all-zero artifact would load fine and score every memory alike."""
         manager = ProviderManager(_config(importance_scorer="local"))
-        assert manager.scorer.artifact.model == "amazon.titan-embed-text-v1"
+        artifact = manager.scorer.artifact
+        assert artifact.kind == "lexical"
+        assert any(c != 0.0 for c in artifact.coefficients)
 
     def test_local_scorer_honors_explicit_path(self, tmp_path):
         import json
@@ -141,39 +162,63 @@ class TestProviderManagerSelection:
 
 
 class TestConstructionOrder:
-    def test_scorer_built_after_embedding_provider(self):
-        """`_create_embedding_provider` rewrites `embedding_model` and
-        `embedding_dimension` for Voyage. A scorer built first reads Titan's
-        defaults and silently selects the lexical artifact."""
+    """The ordering `select_artifact_name` depends on, asserted without depending
+    on `_BUNDLED_ARTIFACTS` having entries.
+
+    These used to assert the selected *name* (`"voyage-3-1024"`), which only fails
+    on a wrong order while some triple is registered. With the map empty every
+    order returns `"lexical"` and that assertion would pass vacuously — so they now
+    check the config state selection actually observed, which is the property that
+    matters and is what breaks the moment a head is added back.
+    """
+
+    def _observed_config_at_selection(self, config) -> dict:
+        """Run construction, capturing the (provider, model, dimension) triple
+        `select_artifact_name` saw."""
         from agent_memory.providers import manager as manager_mod
 
         real_select = manager_mod.select_artifact_name
-        seen = {}
+        seen: dict = {}
 
+        def record(cfg):
+            seen["triple"] = (
+                cfg.embedding_provider,
+                cfg.embedding_model,
+                cfg.embedding_dimension,
+            )
+            seen["name"] = real_select(cfg)
+            return seen["name"]
+
+        with patch.object(manager_mod, "select_artifact_name", record):
+            ProviderManager(config)
+        return seen
+
+    def test_scorer_built_after_embedding_provider(self):
+        """`_create_embedding_provider` rewrites `embedding_model` and
+        `embedding_dimension` for Voyage. A scorer built first reads Titan's
+        defaults — so if any Voyage triple is ever registered, it would match
+        nothing and silently downgrade to lexical."""
         def fake_embedding(self, config):
-            config.embedding_model = "voyage-3"
+            config.embedding_model = "voyage-4"
             config.embedding_dimension = 1024
             return object()
-
-        def record(config):
-            seen["name"] = real_select(config)
-            return seen["name"]
 
         with patch.object(
             ProviderManager, "_create_embedding_provider", fake_embedding
         ), patch.object(
             ProviderManager, "_create_llm_provider", lambda self, c: object()
-        ), patch.object(manager_mod, "select_artifact_name", record):
-            ProviderManager(_config(
-                embedding_provider="voyage", importance_scorer="local"
-            ))
+        ):
+            seen = self._observed_config_at_selection(
+                _config(embedding_provider="voyage", importance_scorer="local")
+            )
 
-        assert seen["name"] == "voyage-3-1024", (
+        assert seen["triple"] == ("voyage", "voyage-4", 1024), (
             "scorer selection ran before the embedding provider rewrote the "
-            "config — a Voyage deployment would silently get lexical scoring"
+            "config — it saw Titan's defaults, so a Voyage deployment would "
+            "silently get lexical scoring once a Voyage artifact is bundled"
         )
 
-    def test_voyage_end_to_end_selects_voyage_artifact(self):
+    def test_voyage_end_to_end_reaches_selection_with_voyage_config(self):
         """The real integration, with only the network-touching provider stubbed.
         Config defaults are Titan's; only `_create_embedding_provider` knows
         otherwise."""
@@ -184,10 +229,34 @@ class TestConstructionOrder:
         ), patch.object(
             ProviderManager, "_create_llm_provider", lambda self, c: object()
         ):
-            manager = ProviderManager(_config(
+            seen = self._observed_config_at_selection(_config(
                 embedding_provider="voyage",
                 voyage_api_key="test-key",
                 importance_scorer="local",
             ))
-        assert manager.scorer.artifact.model == "voyage-3"
-        assert manager.scorer.artifact.dimension == 1024
+
+        provider, _, dimension = seen["triple"]
+        assert (provider, dimension) == ("voyage", 1024)
+        assert seen["name"] == "lexical"
+
+    def test_a_registered_voyage_artifact_would_be_selected(self):
+        """The end-to-end path with a stand-in registration, so the wiring from
+        `_create_embedding_provider`'s config rewrite through to a *matched*
+        artifact stays covered while we bundle no embedding head."""
+        from agent_memory.providers import manager as manager_mod
+        from agent_memory.providers.voyage import VoyageEmbeddingProvider
+
+        with patch.object(
+            VoyageEmbeddingProvider, "__init__", lambda self, c: None
+        ), patch.object(
+            ProviderManager, "_create_llm_provider", lambda self, c: object()
+        ):
+            config = _config(
+                embedding_provider="voyage",
+                voyage_api_key="test-key",
+                importance_scorer="local",
+            )
+            seen = self._observed_config_at_selection(config)
+            stand_in = {seen["triple"]: "voyage-stand-in"}
+            with patch.object(manager_mod, "_BUNDLED_ARTIFACTS", stand_in):
+                assert select_artifact_name(config) == "voyage-stand-in"

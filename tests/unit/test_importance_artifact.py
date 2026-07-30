@@ -164,28 +164,49 @@ class TestBundledArtifacts:
     def test_artifact_dir_exists(self):
         assert artifact_dir().is_dir()
 
-    @pytest.mark.parametrize("name", ["lexical", "titan-1536", "voyage-3-1024"])
-    def test_bundled_artifact_loads(self, name):
-        art = load_artifact(bundled_artifact_path(name))
-        assert art.kind in ("embedding_linear", "lexical")
+    def _bundled_names(self) -> list[str]:
+        """Discovered rather than listed, so adding an artifact arms these checks
+        on it without anyone remembering to extend a parametrize list."""
+        return sorted(p.stem for p in artifact_dir().glob("*.json"))
 
-    @pytest.mark.parametrize("name", ["titan-1536", "voyage-3-1024"])
-    def test_bundled_dimension_matches_coefficient_count(self, name):
-        art = load_artifact(bundled_artifact_path(name))
-        assert art.dimension == len(art.coefficients)
+    def test_every_bundled_artifact_loads(self):
+        names = self._bundled_names()
+        assert names, "no bundled artifacts found"
+        for name in names:
+            art = load_artifact(bundled_artifact_path(name))
+            assert art.kind in ("embedding_linear", "lexical"), name
+
+    def test_embedding_artifacts_declare_a_matching_dimension(self):
+        """Vacuous while we ship no embedding head — and that is the point of
+        discovering names instead of listing them. Commit one whose declared
+        dimension disagrees with its coefficient count and this fails."""
+        for name in self._bundled_names():
+            art = load_artifact(bundled_artifact_path(name))
+            if art.kind == "embedding_linear":
+                assert art.dimension == len(art.coefficients), name
+                assert art.provider, name
+                assert art.model, name
+
+    def test_no_bundled_artifact_is_a_constant(self):
+        """All-zero coefficients score every memory the intercept, which reads as
+        working — no error, a plausible number — while pinning every memory below
+        the 0.6 promotion threshold or above it. Two shipped placeholders had
+        exactly this shape; they were deleted rather than trained, and this keeps
+        an untrained stand-in from being committed as if it scored anything."""
+        for name in self._bundled_names():
+            art = load_artifact(bundled_artifact_path(name))
+            assert any(c != 0.0 for c in art.coefficients), (
+                f"{name} has all-zero coefficients: it ignores its input and "
+                "returns a constant for every memory"
+            )
 
     def test_bundled_lexical_has_seven_features(self):
         art = load_artifact(bundled_artifact_path("lexical"))
         assert len(art.coefficients) == LEXICAL_FEATURE_COUNT
 
-    def test_titan_artifact_declares_titan(self):
-        art = load_artifact(bundled_artifact_path("titan-1536"))
-        assert art.provider == "bedrock"
-        assert art.model == "amazon.titan-embed-text-v1"
-        assert art.dimension == 1536
-
-    def test_voyage_artifact_declares_voyage_3(self):
-        art = load_artifact(bundled_artifact_path("voyage-3-1024"))
-        assert art.provider == "voyage"
-        assert art.model == "voyage-3"
-        assert art.dimension == 1024
+    def test_lexical_records_what_it_was_trained_on(self):
+        """`lexical` is the artifact every deployment now gets, so an operator has
+        to be able to read its provenance off the file."""
+        art = load_artifact(bundled_artifact_path("lexical"))
+        assert art.training.get("labels")
+        assert art.training.get("metrics", {}).get("forget_agreement") is not None
