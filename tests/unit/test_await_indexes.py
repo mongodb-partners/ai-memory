@@ -56,3 +56,74 @@ class TestCreateAwaitsIndexes:
         assert self._search_index_task is not None
         await self._search_index_task  # let it finish
         ensure_search.assert_awaited_once()
+
+
+class TestTheIndexIsBuiltForTheVectorsThatWillGoIntoIt:
+    """`numDimensions` must match what the embedder emits, not what config declares.
+
+    On a Voyage deployment those differ: `embedding_dimension` inherits Titan's
+    1536 while the Atlas gateway's models emit 1024. Provisioning from the declared
+    value builds a 1536-dim index, and Atlas then accepts every 1024-dim vector
+    written into it and returns none of them from `$vectorSearch`. Nothing raises —
+    recall simply goes empty, and every memory stored until someone notices has to
+    be re-embedded.
+
+    This used to work only by accident of ordering: `_create_embedding_provider`
+    overwrote `config.embedding_dimension` in place, so a later read of it happened
+    to be right. Once that write-back was removed the read became silently wrong,
+    and nothing in the suite noticed — these tests are what noticed.
+    """
+
+    def _facade(self, dimension: int):
+        """A facade wired the way `create()` leaves it, for one dimension."""
+        import agent_memory.memory as mem
+
+        self_ = mem.AsyncMemory.__new__(mem.AsyncMemory)
+        self_._embedding_dimension = dimension
+        return self_
+
+    async def test_the_awaited_path_uses_the_resolved_dimension(self):
+        ensure = AsyncMock()
+        facade = self._facade(1024)
+        config = _config(await_search_indexes=True)
+        assert config.embedding_dimension == 1536, "precondition: declared != resolved"
+
+        await facade._provision_search_indexes(MagicMock(), config, ensure)
+
+        assert ensure.await_args.kwargs["embedding_dimension"] == 1024, (
+            "the index was provisioned at the declared dimension; a 1024-dim "
+            "embedder's vectors would be accepted into it and never returned"
+        )
+
+    async def test_the_backgrounded_path_uses_the_resolved_dimension(self):
+        """Asserted separately because it is a different call site.
+
+        The two paths pass the dimension differently — one by keyword, one
+        positionally — so a fix applied to only one of them is a real possibility.
+        """
+        ensure = AsyncMock()
+        facade = self._facade(1024)
+
+        await facade._provision_search_indexes(
+            MagicMock(), _config(await_search_indexes=False), ensure
+        )
+        await facade._search_index_task
+
+        assert ensure.await_args.kwargs["embedding_dimension"] == 1024
+
+    async def test_a_hand_built_facade_falls_back_to_the_declared_value(self):
+        """`create()` always sets `_embedding_dimension`; a facade built directly
+        by a test or an embedder does not. The declared value is the best answer
+        available there, and an AttributeError on the provisioning path would be a
+        worse one."""
+        import agent_memory.memory as mem
+
+        ensure = AsyncMock()
+        facade = mem.AsyncMemory.__new__(mem.AsyncMemory)
+
+        await facade._provision_search_indexes(
+            MagicMock(), _config(await_search_indexes=True, embedding_dimension=768),
+            ensure,
+        )
+
+        assert ensure.await_args.kwargs["embedding_dimension"] == 768

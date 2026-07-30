@@ -7,6 +7,7 @@ Anthropic) ship as opt-in SDK extras; if the SDK is missing, the provider raises
 """
 
 import logging
+from dataclasses import dataclass
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import EmbeddingProvider, LLMProvider
@@ -37,9 +38,13 @@ _VOYAGE_MODEL_DIMS = {
     "voyage-2": 1024,
 }
 
-# Default embedding_dimension inherited from MCPConfig — lets us detect whether
-# the operator explicitly pinned a dimension (never overridden) vs left default.
-_DEFAULT_EMBEDDING_DIMENSION = 1536
+# `_DEFAULT_EMBEDDING_DIMENSION = 1536` used to live here, as the way to tell a
+# pinned dimension from an untouched one: anything != 1536 was assumed deliberate.
+# That could not distinguish "left alone" from "set to 1536 on purpose", so an
+# operator who pinned the default on a Voyage deployment had it silently rewritten
+# to 1024 — and they are the operator most likely to already have a 1536-dim index
+# with vectors in it. `resolve_embedding` reads `model_fields_set` instead, which
+# records what was actually supplied.
 
 # Native output dimensions for the other providers' embedding models. Same purpose
 # as `_VOYAGE_MODEL_DIMS`, but these are *not* auto-applied to config — Voyage is
@@ -60,6 +65,79 @@ _OPENAI_MODEL_DIMS = {
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
 }
+
+
+@dataclass(frozen=True)
+class ResolvedEmbedding:
+    """The embedding model and dimension actually in force.
+
+    Two of the config's declared values are *derived* rather than authoritative:
+    on a Voyage or OpenAI deployment the canonical ``embedding_model`` comes from
+    the provider-specific field, and Voyage's native dimension supersedes the
+    inherited Titan default. That resolution used to be performed by writing back
+    onto the config object inside ``_create_embedding_provider``, which made the
+    correctness of migrations, the dimension guard, and artifact selection depend
+    on all three running *after* the factory — an ordering nothing could enforce
+    and that a reader had no way to see.
+
+    Returning it instead makes the derived values a value: computable without
+    constructing a provider, safe to compute twice, and impossible to read too
+    early, because there is nothing to read until it has been computed.
+    """
+
+    model: str
+    dimension: int
+
+
+def resolve_embedding(config: MCPConfig) -> ResolvedEmbedding:
+    """The canonical model name and vector dimension for this config.
+
+    Pure: touches no network and mutates nothing, so the dimension guard can use
+    it when the embedder is unreachable and a caller can ask twice without the
+    second answer differing from the first.
+
+    Voyage is the case that needs the dimension rule. The MongoDB-issued key
+    targets a gateway whose models emit 1024 while ``embedding_dimension``
+    inherits Titan's 1536 default, so a correct Voyage setup would be rejected by
+    the startup guard — or worse, provision a 1536-dim index and write 1024-dim
+    vectors that ``$vectorSearch`` silently never returns.
+
+    An operator who *pinned* a dimension keeps it. Pinning is read from
+    ``model_fields_set`` — pydantic's record of which fields the caller or the
+    environment actually supplied — rather than by comparing against the default.
+    The comparison version could not tell "left alone" from "deliberately set to
+    1536", so an operator who pinned the default value on a Voyage deployment had
+    it silently overwritten with 1024: exactly the operator most likely to have
+    an existing 1536-dim index and existing vectors in it.
+    """
+    match config.embedding_provider:
+        case "voyage":
+            known = _VOYAGE_MODEL_DIMS.get(config.voyage_model)
+            pinned = "embedding_dimension" in config.model_fields_set
+            dimension = (
+                config.embedding_dimension
+                if known is None or pinned
+                else known
+            )
+            return ResolvedEmbedding(model=config.voyage_model, dimension=dimension)
+        case "openai":
+            # `getattr`, because `openai_embedding_model` is declared on
+            # `MemoryConfig` and not on the `MCPConfig` base this function accepts.
+            # A bare `MCPConfig` naming the OpenAI provider cannot construct one
+            # anyway — `OpenAIEmbeddingProvider` reads the same field — but a pure
+            # resolver should answer rather than raise, so it falls back to the
+            # generic name.
+            return ResolvedEmbedding(
+                model=getattr(
+                    config, "openai_embedding_model", config.embedding_model
+                ),
+                dimension=config.embedding_dimension,
+            )
+        case _:
+            return ResolvedEmbedding(
+                model=config.embedding_model,
+                dimension=config.embedding_dimension,
+            )
 
 
 def known_embedding_dimension(config: MCPConfig) -> int | None:
@@ -116,18 +194,14 @@ def select_artifact_name(config: MCPConfig) -> str:
     model trained on real labels beats an untrained embedding head, whatever the
     embedder.
 
-    Must still be called *after* the embedding provider is constructed: the Voyage
-    arm of ``_create_embedding_provider`` rewrites ``embedding_model`` and
-    ``embedding_dimension`` on the config object, and reading them before that
-    yields Titan's defaults on a Voyage deployment. That ordering is load-bearing
-    the moment any triple is added back, so it is tested independently of whether
-    the map has entries.
+    Reads the *resolved* model and dimension rather than the config's declared
+    ones. It used to read the declared fields and therefore had to run after
+    ``_create_embedding_provider`` had rewritten them — an ordering constraint on
+    a lookup, enforced by a comment. Resolving here removes the constraint: this
+    is now correct whenever it is called.
     """
-    key = (
-        config.embedding_provider,
-        config.embedding_model,
-        config.embedding_dimension,
-    )
+    resolved = resolve_embedding(config)
+    key = (config.embedding_provider, resolved.model, resolved.dimension)
     return _BUNDLED_ARTIFACTS.get(key, _FALLBACK_ARTIFACT)
 
 
@@ -135,14 +209,18 @@ class ProviderManager:
     """Initialized once at startup. No lazy initialization."""
 
     def __init__(self, config: MCPConfig) -> None:
+        # The derived model/dimension, computed once and published. Callers that
+        # need the dimension actually in force — the startup guard, index
+        # provisioning — read this rather than `config.embedding_dimension`, which
+        # is the *declared* value and is Titan's default on a Voyage deployment.
+        self.embedding_spec: ResolvedEmbedding = resolve_embedding(config)
         self.embedding: EmbeddingProvider = self._create_embedding_provider(config)
         self.llm: LLMProvider = self._create_llm_provider(config)
-        # Last, and not by accident. The Voyage arm of
-        # `_create_embedding_provider` mutates `config.embedding_model` and
-        # `config.embedding_dimension`; selecting an artifact before that runs
-        # reads Titan's defaults, matches nothing, and quietly downgrades a Voyage
-        # deployment to lexical scoring. See
-        # `test_scorer_built_after_embedding_provider`.
+        # Construction order no longer carries meaning. It used to: the Voyage arm
+        # of `_create_embedding_provider` rewrote two config fields, so a scorer
+        # built before it read Titan's defaults and silently downgraded a Voyage
+        # deployment to lexical scoring. Now every one of these reads a resolved
+        # value, so any order gives the same answer.
         self.scorer: ImportanceScorer = self._create_scorer(config)
 
     def _create_scorer(self, config: MCPConfig) -> ImportanceScorer:
@@ -191,18 +269,12 @@ class ProviderManager:
                 return BedrockEmbeddingProvider(config)
             case "voyage":
                 from agent_memory.providers.voyage import VoyageEmbeddingProvider
-                # Sync the canonical embedding_model from the Voyage-specific
-                # config so documents record the correct model name.
-                config.embedding_model = config.voyage_model
-                # Align embedding_dimension to the model's native dimension,
-                # unless the operator explicitly pinned a non-default value.
-                known_dim = _VOYAGE_MODEL_DIMS.get(config.voyage_model)
-                if known_dim is not None and config.embedding_dimension == _DEFAULT_EMBEDDING_DIMENSION:
-                    config.embedding_dimension = known_dim
+                # No write-back onto `config`. The canonical model name and the
+                # native dimension are derived values, and they are derived by
+                # `resolve_embedding`; the provider reads `voyage_model` directly.
                 return VoyageEmbeddingProvider(config)
             case "openai":
                 from agent_memory.providers.openai import OpenAIEmbeddingProvider
-                config.embedding_model = config.openai_embedding_model
                 return OpenAIEmbeddingProvider(config)
             case _:
                 raise ValueError(f"Unknown embedding provider: {config.embedding_provider}")

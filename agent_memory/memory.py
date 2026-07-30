@@ -108,12 +108,17 @@ class AsyncMemory:
 
         # 3. Providers + embedding-dimension guard (before any vector write)
         self.providers = ProviderManager(config)
-        # `config` is passed so the guard can use the model table, which works when
-        # the embedding endpoint does not. ProviderManager has already aligned
-        # `embedding_dimension` to the Voyage model above, so this compares the
-        # post-alignment value.
+        # `expected` is the *resolved* dimension, not `config.embedding_dimension`
+        # — on a Voyage deployment the declared value is Titan's inherited 1536
+        # while the embedder emits 1024. This used to read the config field and
+        # work only because the factory had just overwritten it in place; the
+        # resolution is now a value the manager publishes.
+        #
+        # `config` is passed as well so the guard can consult the model table,
+        # which answers when the embedding endpoint does not.
+        self._embedding_dimension = self.providers.embedding_spec.dimension
         await self._validate_embedding_dimension(
-            self.providers, expected=config.embedding_dimension, config=config
+            self.providers, expected=self._embedding_dimension, config=config
         )
 
         # 4. Services
@@ -163,18 +168,29 @@ class AsyncMemory:
         before background creation finishes and see empty search/recall).
         ``False`` (default) schedules a non-blocking background task for
         long-running servers. ``ensure`` is injectable for testing.
+
+        The dimension comes from the resolved embedding spec, which is what makes
+        the ``numDimensions`` in the index agree with the vectors that will be
+        written into it. Reading ``config.embedding_dimension`` here would build a
+        1536-dim index for a 1024-dim Voyage embedder — a mismatch Atlas accepts
+        without complaint and then answers every ``$vectorSearch`` with nothing.
         """
         from agent_memory.core.migrations import ensure_search_indexes
 
         ensure = ensure or ensure_search_indexes
+        # `create()` sets `_embedding_dimension` before calling this. The fallback
+        # is for a facade built by hand (tests call this method directly), where
+        # the declared value is the best available answer and an AttributeError
+        # would be a worse one.
+        dimension = getattr(
+            self, "_embedding_dimension", config.embedding_dimension
+        )
         self._search_index_task = None
         if config.await_search_indexes:
-            await ensure(db, embedding_dimension=config.embedding_dimension)
+            await ensure(db, embedding_dimension=dimension)
         else:
             self._search_index_task = asyncio.create_task(
-                _ensure_search_indexes_bg(
-                    db, config.embedding_dimension, ensure=ensure
-                )
+                _ensure_search_indexes_bg(db, dimension, ensure=ensure)
             )
 
     async def _seed_defaults(self) -> None:
@@ -300,14 +316,22 @@ class AsyncMemory:
         case it is a warning, not a debug line, because the guard did not run.
         """
         if config is not None:
-            from agent_memory.providers.manager import known_embedding_dimension
+            from agent_memory.providers.manager import (
+                known_embedding_dimension,
+                resolve_embedding,
+            )
 
             known = known_embedding_dimension(config)
             if known is not None:
                 if known != expected:
+                    # The resolved model name, not `config.embedding_model` — that
+                    # field is Titan's default on a Voyage deployment, so the
+                    # message used to name a model the operator is not using and
+                    # send them to check the wrong setting.
+                    model = resolve_embedding(config).model
                     raise ConfigError(
                         f"embedding_dimension mismatch: config declares {expected} "
-                        f"but {config.embedding_model!r} emits {known}. Set "
+                        f"but {model!r} emits {known}. Set "
                         f"embedding_dimension={known} and re-provision the Atlas "
                         f"vector index numDimensions to match."
                     )

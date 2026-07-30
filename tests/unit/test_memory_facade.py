@@ -442,6 +442,134 @@ class TestDimensionGuardOffline:
 
         assert any("could not be verified" in r.message for r in caplog.records)
 
+
+class TestTheGuardChecksTheDimensionInForce:
+    """What `create()` passes as ``expected``, not just what the guard does with it.
+
+    Every test above calls ``_validate_embedding_dimension`` directly with an
+    explicit ``expected``, so all of them pass whatever ``create()`` chooses. The
+    choice was the defect: it read ``config.embedding_dimension``, which is Titan's
+    inherited 1536 on a Voyage deployment, and worked only because
+    ``_create_embedding_provider`` had overwritten that field in place moments
+    earlier. Remove the write-back and a correct Voyage setup is rejected at
+    startup with a message telling the operator to change the one thing that was
+    already right.
+
+    Note how the sibling tests encode the old behaviour: they assign
+    ``config.embedding_dimension = 1024`` by hand, standing in for the rewrite. That
+    is fine for testing the guard's logic and is exactly why none of them could
+    catch this.
+    """
+
+    def _providers(self, dimension: int):
+        """A stand-in manager publishing a resolved spec, as the real one does."""
+        from agent_memory.providers.manager import ResolvedEmbedding
+
+        providers = MagicMock()
+        providers.embedding = AsyncMock()
+        providers.embedding.generate_embedding = AsyncMock(
+            return_value=[0.0] * dimension
+        )
+        providers.embedding_spec = ResolvedEmbedding(
+            model="voyage-4", dimension=dimension
+        )
+        return providers
+
+    async def test_a_correct_voyage_config_is_not_rejected(self, monkeypatch):
+        """The regression: 1024-dim embedder, 1536 declared, must still boot.
+
+        Asserted through `create()` rather than the guard, because the bug is in
+        which value `create()` hands over.
+        """
+        import agent_memory.core.database as dbmod
+        import agent_memory.core.migrations as mig
+        import agent_memory.memory as mem
+        import agent_memory.providers.manager as pm
+
+        db_manager = MagicMock()
+        db_manager.db = MagicMock()
+        db_manager.close = AsyncMock()
+        monkeypatch.setattr(
+            dbmod.DatabaseManager, "initialize", AsyncMock(return_value=db_manager)
+        )
+        monkeypatch.setattr(mig, "ensure_indexes", AsyncMock())
+        monkeypatch.setattr(
+            pm, "ProviderManager", lambda config: self._providers(1024)
+        )
+
+        cfg = _config(
+            embedding_provider="voyage", voyage_model="voyage-4", voyage_api_key="k",
+            governance_enabled=False, rate_limit_enabled=False,
+            workers_in_process=False,
+        )
+        assert cfg.embedding_dimension == 1536, "precondition: declared != resolved"
+
+        m = await mem.AsyncMemory.create(cfg)
+        try:
+            assert m._embedding_dimension == 1024
+        finally:
+            await m.close()
+
+    async def test_a_genuinely_wrong_dimension_is_still_refused(self, monkeypatch):
+        """The paired case, so "boots" cannot be achieved by skipping the guard.
+
+        Here the embedder emits 768 while the resolved spec says 1024 — a real
+        mismatch, and the silent index corruption the guard exists to prevent.
+        """
+        import agent_memory.core.database as dbmod
+        import agent_memory.core.migrations as mig
+        import agent_memory.memory as mem
+        import agent_memory.providers.manager as pm
+
+        db_manager = MagicMock()
+        db_manager.db = MagicMock()
+        db_manager.close = AsyncMock()
+        monkeypatch.setattr(
+            dbmod.DatabaseManager, "initialize", AsyncMock(return_value=db_manager)
+        )
+        monkeypatch.setattr(mig, "ensure_indexes", AsyncMock())
+
+        def _mismatched(config):
+            providers = self._providers(1024)
+            # The spec says 1024; the embedder actually emits 768.
+            providers.embedding.generate_embedding = AsyncMock(
+                return_value=[0.0] * 768
+            )
+            return providers
+
+        monkeypatch.setattr(pm, "ProviderManager", _mismatched)
+
+        cfg = _config(
+            embedding_provider="voyage", voyage_model="voyage-experimental",
+            voyage_api_key="k", governance_enabled=False, rate_limit_enabled=False,
+            workers_in_process=False,
+        )
+
+        with pytest.raises(ConfigError, match="768"):
+            await mem.AsyncMemory.create(cfg)
+
+    async def test_the_message_names_the_model_actually_configured(self):
+        """A Voyage operator sent to check `embedding_model` finds Titan's name.
+
+        The message interpolated `config.embedding_model`, which on a Voyage
+        deployment is the untouched default — so the guard reported a mismatch for
+        a model the operator is not using, and the one field they would think to
+        edit is not the one that matters.
+        """
+        providers = MagicMock()
+        providers.embedding = AsyncMock()
+        providers.embedding.generate_embedding = AsyncMock(
+            side_effect=RuntimeError("connection refused")
+        )
+        config = _config(
+            embedding_provider="voyage", voyage_model="voyage-4", voyage_api_key="k",
+        )
+
+        with pytest.raises(ConfigError, match="voyage-4"):
+            await AsyncMemory._validate_embedding_dimension(
+                providers, expected=1536, config=config,
+            )
+
     async def test_bedrock_titan_v2_is_in_the_table(self):
         """The 1024-vs-1536 Titan pair is the trap this table exists for.
 
@@ -511,9 +639,19 @@ class TestCreateAndClose:
         import agent_memory.providers.manager as pm
 
         def _fake_provider_manager(config):
+            from agent_memory.providers.manager import resolve_embedding
+
             p = MagicMock()
             p.embedding = AsyncMock()
-            p.embedding.generate_embedding = AsyncMock(return_value=[0.0] * config.embedding_dimension)
+            # `embedding_spec` is what `create()` reads for the dimension now, so
+            # the stub has to publish it — a bare MagicMock hands back a Mock,
+            # which then fails the guard's comparison against an int. Resolved
+            # from the config rather than hardcoded, so this stub agrees with the
+            # real manager for whatever provider the test configures.
+            p.embedding_spec = resolve_embedding(config)
+            p.embedding.generate_embedding = AsyncMock(
+                return_value=[0.0] * p.embedding_spec.dimension
+            )
             return p
 
         monkeypatch.setattr(pm, "ProviderManager", _fake_provider_manager)

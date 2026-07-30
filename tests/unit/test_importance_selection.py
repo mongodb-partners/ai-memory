@@ -1,10 +1,13 @@
 """Scorer selection and injection. REQ-E-162, REQ-E-164, REQ-E-171.
 
-The test that matters most here is `test_scorer_built_after_embedding_provider`.
-`_create_embedding_provider` mutates the config for Voyage — overwriting
-`embedding_model` and `embedding_dimension` — so a scorer constructed before it
-would read Titan's defaults on a Voyage deployment, match no artifact, and fall
-back to lexical. Nothing errors; the scores just get worse.
+The class that matters most here is
+`TestSelectionDoesNotDependOnConstructionOrder`. Selection reads the embedder's
+model and dimension, and those two values used to be *installed* on the config by
+`_create_embedding_provider` for Voyage, so a scorer constructed before it read
+Titan's defaults, matched no artifact, and fell back to lexical. Nothing errored;
+the scores just got worse. `select_artifact_name` now resolves them itself, and
+those tests assert the resulting stronger property: the answer is the same
+whether or not any provider has been built.
 """
 
 import os
@@ -161,67 +164,90 @@ class TestProviderManagerSelection:
         assert isinstance(manager.scorer, ImportanceScorer)
 
 
-class TestConstructionOrder:
-    """The ordering `select_artifact_name` depends on, asserted without depending
-    on `_BUNDLED_ARTIFACTS` having entries.
+class TestSelectionDoesNotDependOnConstructionOrder:
+    """Selection is correct whenever it runs — the stronger claim.
 
-    These used to assert the selected *name* (`"voyage-3-1024"`), which only fails
-    on a wrong order while some triple is registered. With the map empty every
-    order returns `"lexical"` and that assertion would pass vacuously — so they now
-    check the config state selection actually observed, which is the property that
-    matters and is what breaks the moment a head is added back.
+    This class used to assert the opposite shape: that the scorer was built *after*
+    the embedding provider, because the Voyage arm of `_create_embedding_provider`
+    rewrote `embedding_model` and `embedding_dimension` on the config and selection
+    read those fields. Order was load-bearing, enforced by a comment, and getting
+    it wrong silently downgraded a Voyage deployment to lexical scoring.
+
+    `select_artifact_name` now resolves the model and dimension itself, so there is
+    no order to get wrong. The tests assert that: selection sees Voyage's values
+    whether or not any provider has been constructed.
     """
 
-    def _observed_config_at_selection(self, config) -> dict:
-        """Run construction, capturing the (provider, model, dimension) triple
-        `select_artifact_name` saw."""
-        from agent_memory.providers import manager as manager_mod
+    def _resolved_triple(self, config) -> tuple:
+        from agent_memory.providers.manager import resolve_embedding
 
-        real_select = manager_mod.select_artifact_name
-        seen: dict = {}
+        resolved = resolve_embedding(config)
+        return (config.embedding_provider, resolved.model, resolved.dimension)
 
-        def record(cfg):
-            seen["triple"] = (
-                cfg.embedding_provider,
-                cfg.embedding_model,
-                cfg.embedding_dimension,
-            )
-            seen["name"] = real_select(cfg)
-            return seen["name"]
+    def test_selection_sees_voyage_before_any_provider_is_built(self):
+        """The case the old ordering rule existed to prevent, now simply correct.
 
-        with patch.object(manager_mod, "select_artifact_name", record):
-            ProviderManager(config)
-        return seen
+        No `ProviderManager` at all: nothing has had a chance to rewrite anything,
+        and selection still resolves voyage-4 at 1024 rather than Titan's defaults.
+        """
+        config = _config(
+            embedding_provider="voyage",
+            voyage_api_key="test-key",
+            importance_scorer="local",
+        )
 
-    def test_scorer_built_after_embedding_provider(self):
-        """`_create_embedding_provider` rewrites `embedding_model` and
-        `embedding_dimension` for Voyage. A scorer built first reads Titan's
-        defaults — so if any Voyage triple is ever registered, it would match
-        nothing and silently downgrade to lexical."""
-        def fake_embedding(self, config):
-            config.embedding_model = "voyage-4"
-            config.embedding_dimension = 1024
-            return object()
+        assert self._resolved_triple(config) == ("voyage", "voyage-3", 1024), (
+            "selection read the config's declared fields — Titan's defaults on a "
+            "Voyage deployment — so it would match nothing and silently downgrade "
+            "to lexical once a Voyage artifact is bundled"
+        )
+
+    def test_the_answer_is_the_same_after_construction(self):
+        """Constructing providers changes nothing, which is the point.
+
+        With the write-back, before-vs-after differed and only "after" was right.
+        """
+        from agent_memory.providers.voyage import VoyageEmbeddingProvider
+
+        config = _config(
+            embedding_provider="voyage",
+            voyage_api_key="test-key",
+            importance_scorer="local",
+        )
+        before = self._resolved_triple(config)
 
         with patch.object(
-            ProviderManager, "_create_embedding_provider", fake_embedding
+            VoyageEmbeddingProvider, "__init__", lambda self, c: None
         ), patch.object(
             ProviderManager, "_create_llm_provider", lambda self, c: object()
         ):
-            seen = self._observed_config_at_selection(
-                _config(embedding_provider="voyage", importance_scorer="local")
-            )
+            ProviderManager(config)
 
-        assert seen["triple"] == ("voyage", "voyage-4", 1024), (
-            "scorer selection ran before the embedding provider rewrote the "
-            "config — it saw Titan's defaults, so a Voyage deployment would "
-            "silently get lexical scoring once a Voyage artifact is bundled"
+        assert self._resolved_triple(config) == before
+
+    def test_a_registered_voyage_artifact_would_be_selected(self):
+        """A stand-in registration, so the path from a Voyage config through to a
+        *matched* artifact stays covered while we bundle no embedding head.
+
+        Without this the parametrized "everything selects lexical" tests would be
+        the only coverage, and they pass whether resolution works or not.
+        """
+        from agent_memory.providers import manager as manager_mod
+
+        config = _config(
+            embedding_provider="voyage",
+            voyage_api_key="test-key",
+            importance_scorer="local",
         )
+        stand_in = {self._resolved_triple(config): "voyage-stand-in"}
 
-    def test_voyage_end_to_end_reaches_selection_with_voyage_config(self):
-        """The real integration, with only the network-touching provider stubbed.
-        Config defaults are Titan's; only `_create_embedding_provider` knows
-        otherwise."""
+        with patch.object(manager_mod, "_BUNDLED_ARTIFACTS", stand_in):
+            assert select_artifact_name(config) == "voyage-stand-in"
+
+    def test_the_scorer_still_builds_from_a_voyage_config(self):
+        """The integration the old end-to-end test also covered: real
+        `_create_embedding_provider`, only the network-touching constructor
+        stubbed, and a `local` scorer that has to load an artifact."""
         from agent_memory.providers.voyage import VoyageEmbeddingProvider
 
         with patch.object(
@@ -229,34 +255,11 @@ class TestConstructionOrder:
         ), patch.object(
             ProviderManager, "_create_llm_provider", lambda self, c: object()
         ):
-            seen = self._observed_config_at_selection(_config(
+            manager = ProviderManager(_config(
                 embedding_provider="voyage",
                 voyage_api_key="test-key",
                 importance_scorer="local",
             ))
 
-        provider, _, dimension = seen["triple"]
-        assert (provider, dimension) == ("voyage", 1024)
-        assert seen["name"] == "lexical"
-
-    def test_a_registered_voyage_artifact_would_be_selected(self):
-        """The end-to-end path with a stand-in registration, so the wiring from
-        `_create_embedding_provider`'s config rewrite through to a *matched*
-        artifact stays covered while we bundle no embedding head."""
-        from agent_memory.providers import manager as manager_mod
-        from agent_memory.providers.voyage import VoyageEmbeddingProvider
-
-        with patch.object(
-            VoyageEmbeddingProvider, "__init__", lambda self, c: None
-        ), patch.object(
-            ProviderManager, "_create_llm_provider", lambda self, c: object()
-        ):
-            config = _config(
-                embedding_provider="voyage",
-                voyage_api_key="test-key",
-                importance_scorer="local",
-            )
-            seen = self._observed_config_at_selection(config)
-            stand_in = {seen["triple"]: "voyage-stand-in"}
-            with patch.object(manager_mod, "_BUNDLED_ARTIFACTS", stand_in):
-                assert select_artifact_name(config) == "voyage-stand-in"
+        assert isinstance(manager.scorer, ImportanceScorer)
+        assert manager.embedding_spec.dimension == 1024
