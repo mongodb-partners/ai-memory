@@ -20,8 +20,10 @@ import json
 import logging
 import math
 import re
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from agent_memory.exceptions import ConfigError
 
@@ -275,3 +277,161 @@ def load_artifact(path: str | Path) -> Artifact:
         # block would otherwise raise AttributeError at startup.
         training=raw.get("training") or {},
     )
+
+
+# --------------------------------------------------------------------------
+# Scoring
+# --------------------------------------------------------------------------
+
+
+def logistic(x: float) -> float:
+    """Numerically stable logistic squash.
+
+    The naive ``1 / (1 + exp(-x))`` raises ``OverflowError`` for ``x < -710``,
+    which a trained model on an outlier embedding can reach. A crash here is not
+    cosmetic: it propagates out of ``_enrich_memory`` and the memory ends up
+    ``enrichment_status: "failed"``. So the branch is on the sign, keeping the
+    exponent negative either way.
+    """
+    if x >= 0.0:
+        return 1.0 / (1.0 + math.exp(-x))
+    e = math.exp(x)
+    return e / (1.0 + e)
+
+
+def _clamp(value: float) -> float:
+    """Confine a score to ``[MIN_IMPORTANCE, MAX_IMPORTANCE]``.
+
+    Applied outside the model arithmetic on purpose. ``logistic`` already lands in
+    ``(0, 1)``, so this looks redundant — but it is the only thing standing between
+    a badly trained artifact and ``importance: 0.0``, which
+    ``ConsolidationWorker._forget_low_importance`` reads as "delete this". Cheap
+    insurance against a silent, irreversible failure.
+    """
+    return max(MIN_IMPORTANCE, min(MAX_IMPORTANCE, value))
+
+
+@runtime_checkable
+class ImportanceScorer(Protocol):
+    """The seam. One method, called once per long-term memory during enrichment.
+
+    The signature is the union of what both implementations need, not the
+    intersection: ``LLMScorer`` uses ``content`` alone and ignores the rest,
+    ``LocalScorer``'s embedding kind uses ``embedding`` alone. Passing everything
+    the caller has means adding a feature to the local model later does not change
+    the call site. ``tags`` and ``message_type`` are unused by both today and are
+    reserved for exactly that.
+    """
+
+    async def score(
+        self,
+        content: str,
+        embedding: Sequence[float] | None = None,
+        *,
+        tags: Sequence[str] | None = None,
+        message_type: str | None = None,
+    ) -> float:
+        """Return importance in ``[0.1, 1.0]``."""
+        ...
+
+
+class LLMScorer:
+    """Today's behaviour, unchanged, behind the protocol.
+
+    Wrapping rather than rewriting is the point: this is what makes the default
+    path a no-op refactor. The prompt handling reproduces
+    ``EnrichmentWorker._process_standard_enrichment`` exactly, including omitting
+    the ``prompt`` kwarg entirely when no custom prompt is configured — passing
+    ``prompt=None`` would be a different call, and the providers' defaults are
+    keyed on the kwarg's absence.
+    """
+
+    def __init__(
+        self,
+        llm,
+        prompt_getter: Callable[[str], Awaitable[str | None]] | None = None,
+    ) -> None:
+        self._llm = llm
+        self._prompt_getter = prompt_getter
+
+    async def score(
+        self,
+        content: str,
+        embedding: Sequence[float] | None = None,
+        *,
+        tags: Sequence[str] | None = None,
+        message_type: str | None = None,
+    ) -> float:
+        prompt = None
+        if self._prompt_getter is not None:
+            prompt = await self._prompt_getter("importance_assessment")
+        if prompt:
+            return await self._llm.assess_importance(content, prompt=prompt)
+        return await self._llm.assess_importance(content)
+
+
+class LocalScorer:
+    """A pre-trained linear model evaluated in-process.
+
+    No network call, no tokens, microseconds instead of a round trip. Viable only
+    because the embedding is already computed by the time enrichment runs, so the
+    "inference" is a dot product over a vector we were holding anyway.
+    """
+
+    def __init__(self, artifact: Artifact) -> None:
+        self._artifact = artifact
+
+    def _validated_embedding(self, embedding: Sequence[float] | None) -> Sequence[float]:
+        """Reject a vector this artifact cannot score. REQ-E-165.
+
+        Raising is the deliberate choice over degrading. A silent fallback to the
+        intercept would return *the same plausible number* for every memory in the
+        store, and the only symptom would be recall quality drifting weeks later.
+        Raising lands in ``_enrich_memory``'s retry path, which parks the affected
+        memories in ``enrichment_status: "failed"`` — countable, queryable, fixable.
+        """
+        expected = self._artifact.dimension or len(self._artifact.coefficients)
+        if not embedding:
+            raise ConfigError(
+                "Local importance model of kind 'embedding_linear' requires an "
+                f"embedding of dimension {expected}, but none was provided. "
+                "Set IMPORTANCE_SCORER=llm or configure a matching embedder."
+            )
+        if len(embedding) != expected:
+            raise ConfigError(
+                f"Embedding dimension {len(embedding)} does not match importance "
+                f"model dimension {expected} "
+                f"(model trained for {self._artifact.provider}/{self._artifact.model}). "
+                "Scoring a truncated vector would return a plausible wrong number, "
+                "so this refuses instead."
+            )
+        for i, v in enumerate(embedding):
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise ConfigError(
+                    f"Embedding value at index {i} is not numeric: {v!r}"
+                )
+        return embedding
+
+    async def score(
+        self,
+        content: str,
+        embedding: Sequence[float] | None = None,
+        *,
+        tags: Sequence[str] | None = None,
+        message_type: str | None = None,
+    ) -> float:
+        coefficients = self._artifact.coefficients
+
+        if self._artifact.kind == "embedding_linear":
+            features: Sequence[float] = self._validated_embedding(embedding)
+        else:
+            # The lexical head never touches the embedding: its coefficients are
+            # indexed by feature position, so a 1536-vector would be scored against
+            # the wrong weights and return a plausible number.
+            features = lexical_features(content)
+
+        total = self._artifact.intercept
+        for weight, value in zip(coefficients, features):
+            total += weight * value
+
+        return _clamp(logistic(total))
