@@ -2,12 +2,13 @@
 
 import asyncio
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 from bson import ObjectId
 
 import pytest
 
 from agent_memory.core.config import MCPConfig
+from agent_memory.providers.base import LLMProvider
 from agent_memory.services.enrichment import EnrichmentWorker
 
 
@@ -18,10 +19,24 @@ def _make_config(**overrides) -> MCPConfig:
 
 
 def _make_providers():
+    """Mock providers whose LLM presents the real method set.
+
+    `spec=LLMProvider` catches a *renamed or removed* method: the mock raises
+    AttributeError for anything not on the ABC. It does **not** enforce
+    signatures — verified on 3.11.13 that `AsyncMock(spec=LLMProvider.assess_importance)`
+    accepts bogus keywords and extra positional arguments. Signature drift is
+    caught by `test_provider_prompt_contract.py`, which inspects the real
+    implementations; that is the test that would have caught the `prompt=`
+    TypeError on OpenAI and Anthropic.
+    """
     providers = MagicMock()
-    providers.llm = AsyncMock()
-    providers.llm.assess_importance = AsyncMock(return_value=0.7)
-    providers.llm.generate_summary = AsyncMock(return_value="A test summary")
+    providers.llm = AsyncMock(spec=LLMProvider)
+    providers.llm.assess_importance = AsyncMock(
+        spec=LLMProvider.assess_importance, return_value=0.7
+    )
+    providers.llm.generate_summary = AsyncMock(
+        spec=LLMProvider.generate_summary, return_value="A test summary"
+    )
     providers.embedding = AsyncMock()
     providers.embedding.generate_embedding = AsyncMock(return_value=[0.1] * 1536)
     return providers
@@ -152,10 +167,16 @@ class TestEnrichmentWorkerEvolution:
         worker = EnrichmentWorker(col, config, providers, memory_svc)
         await worker.process_batch()
 
+        # `exclude_id` is part of the contract, not an optional extra. The worker
+        # runs after the document is stored, so without it the evolution search's
+        # top hit is this memory itself at similarity ~1.0 — above
+        # reinforce_threshold by construction — and every enrichment pass
+        # "reinforced" its own document instead of finding real duplicates.
         memory_svc.evolve_memory.assert_called_once_with(
             "user1",
             memory["content"],
             memory["embedding"],
+            exclude_id=memory["_id"],
         )
 
 
@@ -445,3 +466,156 @@ class TestEnrichmentWorkerMergeTargetNotFound:
         update_call = col.update_one.call_args
         assert update_call[0][1]["$set"]["enrichment_status"] == "complete"
         providers.llm.chat.assert_not_called()
+
+
+class TestScorerInjection:
+    """REQ-E-160, REQ-E-172. The worker delegates importance to a scorer."""
+
+    def test_defaults_to_an_llm_scorer(self):
+        """Every existing call site omits `scorer`. Defaulting here is what makes
+        'an upgrade changes nothing' true without editing twenty constructions."""
+        from agent_memory.services.importance import LLMScorer
+
+        worker = EnrichmentWorker(
+            MagicMock(), _make_config(), _make_providers(), _make_memory_service()
+        )
+        assert isinstance(worker.scorer, LLMScorer)
+
+    def test_default_scorer_wraps_the_configured_llm(self):
+        providers = _make_providers()
+        worker = EnrichmentWorker(
+            MagicMock(), _make_config(), providers, _make_memory_service()
+        )
+        assert worker.scorer._llm is providers.llm
+
+    def test_default_scorer_uses_the_worker_prompt_getter(self):
+        """The prompt library moved behind the scorer. If it is not wired, a
+        deployment with a customized importance prompt silently reverts to the
+        provider's built-in template — same scores-look-fine failure mode."""
+        worker = EnrichmentWorker(
+            MagicMock(), _make_config(), _make_providers(), _make_memory_service()
+        )
+        assert worker.scorer._prompt_getter == worker._get_prompt
+
+    async def test_injected_scorer_is_used(self):
+        from agent_memory.services.importance import ImportanceScorer
+
+        scorer = create_autospec(ImportanceScorer, instance=True)
+        scorer.score.return_value = 0.42
+        col = MagicMock()
+        col.update_one = AsyncMock()
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service(),
+            scorer=scorer,
+        )
+        await worker._process_standard_enrichment(_make_pending_memory())
+        assert col.update_one.call_args[0][1]["$set"]["importance"] == 0.42
+
+    async def test_injected_scorer_receives_content_and_embedding(self):
+        from agent_memory.services.importance import ImportanceScorer
+
+        scorer = create_autospec(ImportanceScorer, instance=True)
+        scorer.score.return_value = 0.42
+        col = MagicMock()
+        col.update_one = AsyncMock()
+        memory = _make_pending_memory()
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service(),
+            scorer=scorer,
+        )
+        await worker._process_standard_enrichment(memory)
+        args, kwargs = scorer.score.call_args
+        assert args[0] == memory["content"]
+        assert args[1] == memory["embedding"]
+
+    async def test_injected_scorer_replaces_the_llm_importance_call(self):
+        """The reason the feature exists. If `assess_importance` still fires, the
+        local path costs a token round trip and saves nothing."""
+        from agent_memory.services.importance import ImportanceScorer
+
+        scorer = create_autospec(ImportanceScorer, instance=True)
+        scorer.score.return_value = 0.42
+        providers = _make_providers()
+        col = MagicMock()
+        col.update_one = AsyncMock()
+        worker = EnrichmentWorker(
+            col, _make_config(), providers, _make_memory_service(), scorer=scorer,
+        )
+        await worker._process_standard_enrichment(_make_pending_memory())
+        providers.llm.assess_importance.assert_not_awaited()
+
+    async def test_summary_still_uses_the_llm(self):
+        """Only scoring is swappable. Summarization is generation and stays on the
+        LLM — a linear model cannot write a summary."""
+        from agent_memory.services.importance import ImportanceScorer
+
+        scorer = create_autospec(ImportanceScorer, instance=True)
+        scorer.score.return_value = 0.42
+        providers = _make_providers()
+        col = MagicMock()
+        col.update_one = AsyncMock()
+        worker = EnrichmentWorker(
+            col, _make_config(), providers, _make_memory_service(), scorer=scorer,
+        )
+        await worker._process_standard_enrichment(_make_pending_memory())
+        providers.llm.generate_summary.assert_awaited()
+
+    async def test_scorer_failure_leaves_the_memory_retryable(self):
+        """A scorer that raises must go down the existing retry path rather than
+        writing a wrong importance."""
+        from agent_memory.services.importance import ImportanceScorer
+
+        scorer = create_autospec(ImportanceScorer, instance=True)
+        scorer.score.side_effect = RuntimeError("artifact went away")
+        col = MagicMock()
+        col.update_one = AsyncMock()
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service(),
+            scorer=scorer,
+        )
+        await worker._enrich_memory(_make_pending_memory())
+        update = col.update_one.call_args[0][1]["$set"]
+        assert update["enrichment_status"] == "pending"
+        assert update["enrichment_retries"] == 1
+
+
+class TestLLMPathUnchanged:
+    """The safety property, asserted against the default construction.
+
+    These read `await_args` rather than calling `assert_awaited_once_with`. The
+    fixture specs the mock on the *unbound* `LLMProvider.assess_importance`, whose
+    first parameter is `self`, so the matcher binds the content string to `self`
+    and reports a mismatch on calls that are in fact identical. Another way the
+    `spec=` in `_make_providers` is weaker than it looks — see its docstring.
+    """
+
+    async def test_still_calls_assess_importance_with_the_library_prompt(self):
+        col = MagicMock()
+        col.update_one = AsyncMock()
+        providers = _make_providers()
+        library = MagicMock()
+        library.get_prompt = AsyncMock(return_value="Rate: {content}")
+        worker = EnrichmentWorker(
+            col, _make_config(), providers, _make_memory_service(),
+            prompt_library=library,
+        )
+        await worker._process_standard_enrichment(_make_pending_memory())
+        assert providers.llm.assess_importance.await_count == 1
+        args, kwargs = providers.llm.assess_importance.await_args
+        assert args == (LONG_CONTENT,)
+        assert kwargs == {"prompt": "Rate: {content}"}
+
+    async def test_omits_prompt_when_the_library_has_none(self):
+        """No `prompt` kwarg at all, not `prompt=None`. The providers' default
+        templates are keyed on the kwarg being absent."""
+        col = MagicMock()
+        col.update_one = AsyncMock()
+        providers = _make_providers()
+        worker = EnrichmentWorker(
+            col, _make_config(), providers, _make_memory_service()
+        )
+        await worker._process_standard_enrichment(_make_pending_memory())
+        assert providers.llm.assess_importance.await_count == 1
+        args, kwargs = providers.llm.assess_importance.await_args
+        assert args == (LONG_CONTENT,)
+        assert kwargs == {}

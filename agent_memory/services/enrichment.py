@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import MIN_SUMMARIZABLE_CHARS, is_usable_summary
+from agent_memory.services.importance import LLMScorer
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +18,28 @@ class EnrichmentWorker:
     Uses a semaphore to limit concurrent LLM calls.
     """
 
-    def __init__(self, memories_collection, config: MCPConfig, providers, memory_service, prompt_library=None) -> None:
+    def __init__(
+        self,
+        memories_collection,
+        config: MCPConfig,
+        providers,
+        memory_service,
+        prompt_library=None,
+        scorer=None,
+    ) -> None:
         self.memories = memories_collection
         self.config = config
         self.providers = providers
         self.memory_service = memory_service
         self.prompt_library = prompt_library
+        # Default to the LLM path so every existing construction — including the
+        # twenty in the test suite that pass four positional arguments — keeps
+        # today's behaviour exactly. Those call sites are the regression suite for
+        # "an upgrade changes nothing"; rewriting them as part of this change would
+        # mean the property is only asserted by tests edited in the same commit.
+        self.scorer = scorer or LLMScorer(
+            providers.llm, prompt_getter=self._get_prompt
+        )
         self._semaphore = asyncio.Semaphore(config.enrichment_concurrency)
         self._running = False
 
@@ -109,21 +126,33 @@ class EnrichmentWorker:
         """Standard enrichment: importance, summary, evolution check."""
         memory_id = memory["_id"]
 
-        importance_prompt = await self._get_prompt("importance_assessment")
-        if importance_prompt:
-            importance = await self.providers.llm.assess_importance(
-                memory["content"], prompt=importance_prompt,
-            )
-        else:
-            importance = await self.providers.llm.assess_importance(memory["content"])
+        # One call, whichever scorer is configured. The prompt lookup that used to
+        # branch here now lives in `LLMScorer` — the branch could not stay, because
+        # the local scorer has no prompt.
+        #
+        # `.get("embedding")` rather than `["embedding"]`: the scorer must not be
+        # the thing that raises on a malformed document. The `evolve_memory` call
+        # below would raise anyway, but a KeyError originating here would look like
+        # a scorer fault.
+        importance = await self.scorer.score(
+            memory["content"],
+            memory.get("embedding"),
+            tags=memory.get("tags"),
+            message_type=memory.get("message_type"),
+        )
 
         summary = await self._summarize(memory["content"])
 
-        # Memory evolution check
+        # Memory evolution check. `exclude_id` is not optional in practice: this
+        # runs after the document is stored, so without it the search's top hit is
+        # this very memory at similarity ~1.0, and the reinforce branch fires
+        # against its own `_id` — inflating its own importance and never reaching
+        # the real duplicates ranked below it.
         await self.memory_service.evolve_memory(
             memory["user_id"],
             memory["content"],
             memory["embedding"],
+            exclude_id=memory_id,
         )
 
         update = {
@@ -169,8 +198,23 @@ class EnrichmentWorker:
         memory_id = memory["_id"]
         merge_target_id = memory.get("merge_target_id")
 
-        # Fetch the merge target
-        target = await self.memories.find_one({"_id": merge_target_id})
+        # The target fetch is scoped to the *same user*, and to a live document.
+        # `{"_id": merge_target_id}` alone trusted a stored id as proof of
+        # ownership: a `merge_target_id` pointing at another tenant's memory would
+        # have that memory's content read into this user's document and the victim's
+        # record soft-deleted. The id is written by `evolve_memory` from a
+        # user-filtered search today, so this is defence in depth — but it is one
+        # field's worth of corruption away from a cross-tenant read, and the
+        # correct filter costs nothing.
+        #
+        # `deleted_at: None` is part of the same fetch rather than a check after
+        # it: merging an already-deleted target resurrects its content into a live
+        # document, undoing a deletion the user asked for.
+        target = await self.memories.find_one({
+            "_id": merge_target_id,
+            "user_id": memory.get("user_id"),
+            "deleted_at": None,
+        })
         if target is None:
             # Target was already deleted — just mark as complete
             await self.memories.update_one(
@@ -203,6 +247,22 @@ class EnrichmentWorker:
         # the failure is swallowed by the caller's `except` into a log line.
         merged_content = await self.providers.llm.complete(merge_text)
 
+        # Re-embed, because the content just changed. Writing `content` and leaving
+        # the old `embedding` in place produced a document that *reads* as the merged
+        # memory and *searches* as its pre-merge half: the vector still encoded only
+        # what this document said before the target's content was folded in, so the
+        # information the merge existed to preserve became unretrievable. Worse, it
+        # fails silently — the document looks right in Compass and simply never comes
+        # back for the queries it should answer.
+        #
+        # Ordered before the write and allowed to raise: `_enrich_memory` catches,
+        # counts a retry, and leaves the status as `merge_pending`, so the merge is
+        # attempted again rather than committed half-done. A content/embedding pair
+        # that disagrees is worse than a merge that has not happened yet.
+        merged_embedding = await self.providers.embedding.generate_embedding(
+            merged_content
+        )
+
         now = datetime.now(timezone.utc)
 
         # Update the new memory with merged content
@@ -212,6 +272,7 @@ class EnrichmentWorker:
                 "$set": {
                     "enrichment_status": "complete",
                     "content": merged_content,
+                    "embedding": merged_embedding,
                     "importance": max(
                         target.get("importance", 0.5),
                         memory.get("importance", 0.5),
@@ -221,9 +282,26 @@ class EnrichmentWorker:
             },
         )
 
-        # Soft-delete the merge target
+        # Soft-delete the merge target — scoped to the same user and to a target that
+        # is still live, the same filter the fetch used. Between the fetch and here
+        # the user may have deleted it themselves; re-deleting is harmless, but
+        # matching on `deleted_at: None` keeps the original deletion timestamp rather
+        # than overwriting it with this one.
+        #
+        # These two writes are deliberately *not* in a transaction. Atlas
+        # multi-document transactions require a session threaded through from the
+        # client, which this worker does not hold, and the failure mode here is
+        # benign in a way that a rollback would not improve: if the second write is
+        # lost, the target remains live alongside a merged copy — duplicate content,
+        # which the next evolution pass is built to detect and merge again. The
+        # reverse order would be the dangerous one (target deleted, merge lost), and
+        # that is why the merged write goes first.
         await self.memories.update_one(
-            {"_id": merge_target_id},
+            {
+                "_id": merge_target_id,
+                "user_id": memory.get("user_id"),
+                "deleted_at": None,
+            },
             {
                 "$set": {
                     "deleted_at": now,

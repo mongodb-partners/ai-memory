@@ -319,6 +319,26 @@ class TestLifecycle:
         for t in m._workers:
             t.cancel()
 
+    async def test_enrichment_worker_receives_the_provider_scorer(self):
+        """`_maybe_start_workers` must pass `providers.scorer` through.
+
+        Without it the worker builds its own LLMScorer, and IMPORTANCE_SCORER=local
+        becomes a silent no-op: the config reads as applied, startup logs the
+        artifact it loaded, and every enrichment still bills a token. Nothing
+        anywhere reports the discrepancy.
+
+        Patched on the `enrichment` module rather than `agent_memory.memory`:
+        `_maybe_start_workers` imports the class inside the function body, so the
+        name does not exist on the facade's module until the call runs.
+        """
+        m = _build_for_lifecycle(workers_in_process=True)
+        with patch("agent_memory.services.enrichment.EnrichmentWorker") as worker_cls:
+            worker_cls.return_value.run = AsyncMock()
+            await m._maybe_start_workers()
+        assert worker_cls.call_args.kwargs["scorer"] is m.providers.scorer
+        for t in m._workers:
+            t.cancel()
+
     async def test_dimension_mismatch_raises_config_error(self):
         # TC-FAC-DIM-001 (REQ-E-031, premortem #3, boundary #6)
         providers = MagicMock()
@@ -335,6 +355,132 @@ class TestLifecycle:
         providers.embedding.generate_embedding = AsyncMock(return_value=[0.0] * 1536)
         # should not raise
         await AsyncMemory._validate_embedding_dimension(providers, expected=1536)
+
+
+class TestDimensionGuardOffline:
+    """The guard runs without the network — REQ-E-150.
+
+    The failure it prevents is silent: Atlas accepts a 1024-dim vector into a
+    1536-dim index and simply never returns the document from `$vectorSearch`, so
+    recall goes quietly empty and every write until someone notices has to be
+    re-embedded. The probe-only version returned successfully whenever the embedder
+    was unreachable — which is exactly the situation where a stale
+    `embedding_dimension` is most likely, since a provider or model was probably
+    just changed.
+    """
+
+    async def test_a_known_model_is_checked_without_probing(self):
+        providers = MagicMock()
+        providers.embedding = AsyncMock()
+        providers.embedding.generate_embedding = AsyncMock(
+            side_effect=AssertionError("must not probe when the table answers")
+        )
+        config = _config(
+            embedding_provider="voyage", voyage_model="voyage-4", voyage_api_key="k",
+        )
+        config.embedding_dimension = 1024
+
+        await AsyncMemory._validate_embedding_dimension(
+            providers, expected=1024, config=config,
+        )
+
+    async def test_a_known_model_with_a_wrong_declared_dimension_raises(self):
+        providers = MagicMock()
+        providers.embedding = AsyncMock()
+        # Unreachable, as it would be right after a provider switch.
+        providers.embedding.generate_embedding = AsyncMock(
+            side_effect=RuntimeError("connection refused")
+        )
+        config = _config(
+            embedding_provider="voyage", voyage_model="voyage-4", voyage_api_key="k",
+        )
+        config.embedding_dimension = 1536
+
+        with pytest.raises(ConfigError, match="1024"):
+            await AsyncMemory._validate_embedding_dimension(
+                providers, expected=1536, config=config,
+            )
+
+    async def test_an_unknown_model_falls_back_to_the_probe(self):
+        providers = MagicMock()
+        providers.embedding = AsyncMock()
+        providers.embedding.generate_embedding = AsyncMock(return_value=[0.0] * 999)
+        config = _config(
+            embedding_provider="voyage", voyage_model="voyage-experimental",
+            voyage_api_key="k",
+        )
+        config.embedding_dimension = 1536
+
+        with pytest.raises(ConfigError, match="999"):
+            await AsyncMemory._validate_embedding_dimension(
+                providers, expected=1536, config=config,
+            )
+
+    async def test_an_unverifiable_dimension_warns_rather_than_passing_quietly(
+        self, caplog
+    ):
+        """Neither source could answer. Startup continues, but says so.
+
+        Refusing to boot because the embedding endpoint is briefly down is worse
+        than the risk. Logging it at debug and moving on — which is what the code
+        did — means nobody learns the guard never ran.
+        """
+        providers = MagicMock()
+        providers.embedding = AsyncMock()
+        providers.embedding.generate_embedding = AsyncMock(
+            side_effect=RuntimeError("connection refused")
+        )
+        config = _config(
+            embedding_provider="voyage", voyage_model="voyage-experimental",
+            voyage_api_key="k",
+        )
+
+        with caplog.at_level("WARNING"):
+            await AsyncMemory._validate_embedding_dimension(
+                providers, expected=1536, config=config,
+            )
+
+        assert any("could not be verified" in r.message for r in caplog.records)
+
+    async def test_bedrock_titan_v2_is_in_the_table(self):
+        """The 1024-vs-1536 Titan pair is the trap this table exists for.
+
+        `amazon.titan-embed-text-v1` is 1536 and `v2:0` is 1024, so upgrading the
+        model without touching `embedding_dimension` writes vectors the index
+        silently never returns.
+        """
+        from agent_memory.providers.manager import known_embedding_dimension
+
+        v1 = _config(embedding_provider="bedrock")
+        v1.embedding_model = "amazon.titan-embed-text-v1"
+        assert known_embedding_dimension(v1) == 1536
+
+        v2 = _config(embedding_provider="bedrock")
+        v2.embedding_model = "amazon.titan-embed-text-v2:0"
+        assert known_embedding_dimension(v2) == 1024
+
+    async def test_openai_large_is_in_the_table(self):
+        from agent_memory.providers.manager import known_embedding_dimension
+
+        cfg = _config(embedding_provider="openai")
+        cfg.openai_embedding_model = "text-embedding-3-large"
+        assert known_embedding_dimension(cfg) == 3072
+
+    async def test_an_unknown_provider_returns_none_rather_than_guessing(self):
+        from agent_memory.providers.manager import known_embedding_dimension
+
+        cfg = _config()
+        cfg.embedding_provider = "something-else"
+        assert known_embedding_dimension(cfg) is None
+
+    async def test_no_config_still_probes(self):
+        """Backwards compatible: `config` is optional and the probe still works."""
+        providers = MagicMock()
+        providers.embedding = AsyncMock()
+        providers.embedding.generate_embedding = AsyncMock(return_value=[0.0] * 768)
+
+        with pytest.raises(ConfigError, match="768"):
+            await AsyncMemory._validate_embedding_dimension(providers, expected=1536)
 
 
 class TestCreateAndClose:
@@ -415,3 +561,54 @@ def _build_for_lifecycle(**cfg_overrides):
     m.episodic_service.worker.run = AsyncMock()
     m._workers = []
     return m
+
+
+class TestWorkerStatusRedaction:
+    """REQ-E-090: /health is unauthenticated, so nothing here may quote a secret."""
+
+    @staticmethod
+    def _facade_with_dead_worker(exc):
+        m = AsyncMemory.__new__(AsyncMemory)
+        m.config = _config(workers_in_process=True)
+        task = MagicMock()
+        task.get_name.return_value = "agent-memory:enrichment"
+        task.done.return_value = True
+        task.cancelled.return_value = False
+        task.exception.return_value = exc
+        m._workers = [task]
+        return m
+
+    def test_a_crashed_workers_connection_string_is_not_served(self):
+        """TC-FACADE-WS-001: `repr(exc)` here was an unauthenticated credential leak.
+
+        A crashed worker's exception is most often a driver error, and driver errors
+        quote the URI they failed on — password included. `/health` is deliberately
+        the one route exempt from auth, because a probe that needs a token fails
+        during exactly the incident it exists to detect. So this dict is served to
+        anyone who can reach the port.
+        """
+        from pymongo.errors import PyMongoError
+
+        exc = PyMongoError(
+            "connection failed: mongodb+srv://svc_user:s3cr3t-pw@cluster0.abc.mongodb.net"
+        )
+        status = self._facade_with_dead_worker(exc)
+        error = status.worker_status()["workers"]["enrichment"]["error"]
+
+        assert "s3cr3t-pw" not in error
+        # The type and the host survive — a redacted-to-nothing field trains
+        # operators to ignore it.
+        assert "PyMongoError" in error
+        assert "cluster0.abc.mongodb.net" in error
+
+    def test_status_degrades_and_names_the_dead_worker(self):
+        # TC-FACADE-WS-002: the aggregate an alert watches.
+        status = self._facade_with_dead_worker(RuntimeError("boom")).worker_status()
+        assert status["enabled"] is True
+        assert status["running"] is False
+        assert status["workers"]["enrichment"]["done"] is True
+
+    def test_a_worker_that_exited_without_an_exception_reports_none(self):
+        # TC-FACADE-WS-003: no error string invented for a clean exit.
+        status = self._facade_with_dead_worker(None).worker_status()
+        assert status["workers"]["enrichment"]["error"] is None
