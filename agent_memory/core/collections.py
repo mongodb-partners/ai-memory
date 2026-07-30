@@ -1,0 +1,417 @@
+"""Collection names and index definitions.
+
+Index definitions are separated from migration logic so they serve as
+the canonical reference for the database schema. ``core/migrations.py`` is
+data-driven over these two lists, so adding a collection here is enough.
+
+Both sets are *functions* of the configuration — ``get_standard_indexes(config)``
+and ``get_search_indexes(embedding_dimension)`` — because the values that belong
+in an index definition are values the operator sets. Every ``expireAfterSeconds``
+here used to be a literal that happened to equal a default: ``ix_audit_ttl`` was
+``365 * 86400`` next to ``audit_retention_days: int = 365``. Setting
+``AUDIT_RETENTION_DAYS=30`` changed the config field, changed nothing about when
+audit records actually expired, and reported success. The two agreed only by
+coincidence, and only at the defaults.
+
+``STANDARD_INDEXES`` and ``SEARCH_INDEXES`` remain as module-level constants
+built from the defaults, for reference and for tests that assert on shape rather
+than on a deployment's values.
+"""
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle: config imports nothing here
+    from agent_memory.core.config import MCPConfig
+
+# ─── Collection Names ────────────────────────────────────────────
+
+MEMORIES: str = "memories"
+EPISODES: str = "episodes"
+# Per-thread step counters, kept out of EPISODES so that collection stays
+# homogeneous — one document shape, one TTL policy, one index set.
+EPISODES_COUNTERS: str = "episodes_counters"
+SEMANTIC_CACHE: str = "semantic_cache"
+AUDIT_LOG: str = "audit_log"
+RATE_LIMITS: str = "rate_limits"
+GOVERNANCE_PROFILES: str = "governance_profiles"
+PROMPTS: str = "prompts"
+DECISIONS: str = "decisions"
+
+# Default episodic retention, and the value ``get_standard_indexes`` falls back
+# to when no config is supplied. A turn log is high-volume and loses value fast;
+# 30 days covers "what did we do last month" without unbounded growth. Override
+# with ``EPISODIC_RETENTION_DAYS``, or at runtime — for this process's lifetime —
+# via ``set_activity_retention`` (collMod).
+EPISODES_DEFAULT_TTL_SECONDS: int = 30 * 86400
+
+# Fallbacks for the other TTL indexes, used when ``get_standard_indexes`` is
+# called without a config. Each mirrors the default of the ``MCPConfig`` field
+# named beside it; the config is the authority when one is passed.
+_DEFAULT_SOFT_DELETE_PURGE_SECONDS: int = 30 * 86400   # soft_delete_purge_days
+_DEFAULT_CACHE_TTL_SECONDS: int = 3600                  # cache_ttl_seconds
+_DEFAULT_AUDIT_TTL_SECONDS: int = 365 * 86400           # audit_retention_days
+_DEFAULT_RATE_LIMIT_TTL_SECONDS: int = 86400            # rate_limit_retention_seconds
+
+
+def get_standard_indexes(config: "MCPConfig | None" = None) -> list[dict]:
+    """Return the standard B-tree index definitions for ``config``.
+
+    Every TTL among them is an operator-set duration, so the definitions are
+    derived rather than declared. Passing ``None`` yields the defaults, which is
+    what the module-level ``STANDARD_INDEXES`` constant holds.
+
+    A TTL whose configured value is non-positive is clamped to one second rather
+    than passed through: ``expireAfterSeconds: 0`` on a *timestamp* field is not
+    "keep nothing", it is the ``expires_at`` idiom — expire each document at the
+    instant its own field names — and applying it to ``created_at`` would delete
+    every cache entry and audit record as soon as the TTL monitor noticed them.
+    ``CACHE_TTL_SECONDS=0`` most likely means "as briefly as possible"; it must
+    not silently mean "and also reinterpret the field".
+    """
+    def seconds(value: int, fallback: int) -> int:
+        return max(1, value) if value is not None else fallback
+
+    if config is None:
+        soft_delete_ttl = _DEFAULT_SOFT_DELETE_PURGE_SECONDS
+        cache_ttl = _DEFAULT_CACHE_TTL_SECONDS
+        audit_ttl = _DEFAULT_AUDIT_TTL_SECONDS
+        rate_limit_ttl = _DEFAULT_RATE_LIMIT_TTL_SECONDS
+        episodes_ttl = EPISODES_DEFAULT_TTL_SECONDS
+    else:
+        soft_delete_ttl = seconds(
+            config.soft_delete_purge_days * 86400, _DEFAULT_SOFT_DELETE_PURGE_SECONDS
+        )
+        cache_ttl = seconds(config.cache_ttl_seconds, _DEFAULT_CACHE_TTL_SECONDS)
+        audit_ttl = seconds(
+            config.audit_retention_days * 86400, _DEFAULT_AUDIT_TTL_SECONDS
+        )
+        # A counter must outlive the window it counts, or the limit stops being
+        # enforced for the tail of any window longer than the retention.
+        rate_limit_ttl = seconds(
+            max(
+                config.rate_limit_retention_seconds,
+                config.rate_limit_window_seconds,
+            ),
+            _DEFAULT_RATE_LIMIT_TTL_SECONDS,
+        )
+        episodes_ttl = seconds(
+            config.episodic_retention_days * 86400, EPISODES_DEFAULT_TTL_SECONDS
+        )
+
+    return _standard_indexes(
+        soft_delete_ttl=soft_delete_ttl,
+        cache_ttl=cache_ttl,
+        audit_ttl=audit_ttl,
+        rate_limit_ttl=rate_limit_ttl,
+        episodes_ttl=episodes_ttl,
+    )
+
+
+# ─── Standard (B-tree) Indexes ───────────────────────────────────
+#
+# Each entry: collection, keys (list of (field, direction) tuples),
+# name, optional unique flag, optional kwargs dict.
+
+
+def _standard_indexes(
+    *,
+    soft_delete_ttl: int,
+    cache_ttl: int,
+    audit_ttl: int,
+    rate_limit_ttl: int,
+    episodes_ttl: int,
+) -> list[dict]:
+    return [
+        # -- memories --
+        {
+            "collection": MEMORIES,
+            "keys": [("expires_at", 1)],
+            "name": "ix_memories_expires_at",
+            "kwargs": {"expireAfterSeconds": 0},
+        },
+        {
+            "collection": MEMORIES,
+            "keys": [("user_id", 1), ("tier", 1), ("created_at", -1)],
+            "name": "ix_memories_user_tier_created",
+            "kwargs": {"partialFilterExpression": {"deleted_at": None}},
+        },
+        {
+            "collection": MEMORIES,
+            "keys": [("user_id", 1), ("conversation_id", 1)],
+            "name": "ix_memories_conversation",
+            "kwargs": {"partialFilterExpression": {"deleted_at": None}},
+        },
+        {
+            "collection": MEMORIES,
+            # The enrichment worker's claim query: equality on `enrichment_status`, an
+            # `$or` over `enrichment_claimed_at`, then the `created_at` sort that makes
+            # the queue FIFO.
+            #
+            # `enrichment_claimed_at` sits between them because a claim runs on every
+            # poll of a busy queue and the alternative is scanning every pending
+            # document to find the unclaimed ones. It cannot serve the `$or` as an index
+            # bound — MongoDB will scan the `enrichment_status` prefix and filter — but
+            # it keeps the field in the index, so the filter is applied without fetching
+            # each document.
+            "keys": [
+                ("enrichment_status", 1),
+                ("enrichment_claimed_at", 1),
+                ("created_at", 1),
+            ],
+            "name": "ix_memories_enrichment_queue",
+        },
+        {
+            "collection": MEMORIES,
+            "keys": [("deleted_at", 1)],
+            "name": "ix_memories_deleted_at_ttl",
+            "kwargs": {
+                "expireAfterSeconds": soft_delete_ttl,
+                "partialFilterExpression": {"deleted_at": {"$type": "date"}},
+            },
+        },
+        # -- episodes --
+        # Thread replay; the primary read path for "show me this conversation's
+        # turns". The key order mirrors `get_thread` exactly: equality on
+        # (user_id, thread_id), then the sort on (ts, step).
+        #
+        # `user_id` leads because every episodic read is tenant-scoped — a thread id
+        # is not a capability — so an index keyed on thread_id alone leaves the
+        # isolation filter as a residual predicate the server applies after the scan.
+        # `ts` precedes `step` because that is the sort `get_thread` issues, and the
+        # sort order is itself deliberate: `step` can be null when the durable counter
+        # failed, and null sorts below every number, so leading on it would relocate a
+        # turn to the front of the replay rather than keep it in place. See
+        # `EpisodicService.get_thread`.
+        {
+            "collection": EPISODES,
+            "keys": [("user_id", 1), ("thread_id", 1), ("ts", 1), ("step", 1)],
+            "name": "ix_episodes_thread_step",
+        },
+        {
+            "collection": EPISODES,
+            "keys": [("user_id", 1), ("ts", -1)],
+            "name": "ix_episodes_user_ts",
+        },
+        {
+            "collection": EPISODES,
+            "keys": [("thread_id", 1), ("ts", -1)],
+            "name": "ix_episodes_thread_ts",
+        },
+        # Join a logged turn back to a trace or support ticket. Same shape as the
+        # thread index: equality prefix, then the (ts, step) sort the read issues.
+        {
+            "collection": EPISODES,
+            "keys": [
+                ("user_id", 1), ("correlation_id", 1), ("ts", 1), ("step", 1),
+            ],
+            "name": "ix_episodes_correlation",
+        },
+        {
+            "collection": EPISODES,
+            "keys": [("ts", 1)],
+            "name": "ix_episodes_ttl",
+            "kwargs": {"expireAfterSeconds": episodes_ttl},
+        },
+        # -- semantic_cache --
+        {
+            "collection": SEMANTIC_CACHE,
+            "keys": [("created_at", 1)],
+            "name": "ix_cache_ttl",
+            "kwargs": {"expireAfterSeconds": cache_ttl},
+        },
+        # -- audit_log --
+        {
+            "collection": AUDIT_LOG,
+            "keys": [("user_id", 1), ("timestamp", -1)],
+            "name": "ix_audit_user_timestamp",
+        },
+        {
+            "collection": AUDIT_LOG,
+            "keys": [("timestamp", 1)],
+            "name": "ix_audit_ttl",
+            "kwargs": {"expireAfterSeconds": audit_ttl},
+        },
+        # -- rate_limits --
+        {
+            "collection": RATE_LIMITS,
+            "keys": [("timestamp", 1)],
+            "name": "ix_rate_limits_ttl",
+            "kwargs": {"expireAfterSeconds": rate_limit_ttl},
+        },
+        {
+            "collection": RATE_LIMITS,
+            "keys": [("user_id", 1), ("operation", 1), ("timestamp", -1)],
+            "name": "ix_rate_limits_user_op",
+        },
+        # -- governance_profiles --
+        {
+            "collection": GOVERNANCE_PROFILES,
+            "keys": [("role", 1)],
+            "name": "ix_governance_profiles_role",
+            "kwargs": {"unique": True},
+        },
+        # -- prompts --
+        {
+            "collection": PROMPTS,
+            "keys": [("name", 1), ("version", -1)],
+            "name": "ix_prompts_name_version",
+            "kwargs": {"unique": True},
+        },
+        # -- decisions --
+        {
+            "collection": DECISIONS,
+            "keys": [("expires_at", 1)],
+            "name": "ix_decisions_ttl",
+            "kwargs": {"expireAfterSeconds": 0},
+        },
+        {
+            "collection": DECISIONS,
+            "keys": [("user_id", 1), ("key", 1)],
+            "name": "ix_decisions_user_key",
+            "kwargs": {"unique": True},
+        },
+    ]
+
+
+# The definitions at their defaults. Reconciliation reads
+# ``get_standard_indexes(config)``; this constant is the reference copy, and what
+# a caller with no config in hand gets.
+STANDARD_INDEXES: list[dict] = get_standard_indexes()
+
+
+# ─── Atlas Search / Vector Search Indexes ────────────────────────
+#
+# Created asynchronously in the background after startup.
+# Each entry: collection, name, type ("vectorSearch" | "search"),
+# definition (passed to SearchIndexModel).
+
+_DEFAULT_EMBEDDING_DIMENSION = 1536
+
+
+def get_search_indexes(embedding_dimension: int = _DEFAULT_EMBEDDING_DIMENSION) -> list[dict]:
+    """Return Atlas Search / Vector Search index definitions.
+
+    ``embedding_dimension`` must match the output size of the configured
+    embedding provider (e.g. 1536 for Bedrock Titan, 1024 for Voyage).
+    """
+    return [
+        # Vector search on memories.
+        #
+        # `memory_type` and `tags` are here because `recall` and `hybrid_search`
+        # both pre-filter on them. An undeclared filter path is not an error — the
+        # branch just matches nothing — so a filtered recall returned zero results
+        # while the memories sat in the collection. The failure looks like "the user
+        # has no memories of that type", which is indistinguishable from the truth.
+        {
+            "collection": MEMORIES,
+            "name": "memories_vector_index",
+            "type": "vectorSearch",
+            "definition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": embedding_dimension,
+                        "similarity": "cosine",
+                    },
+                    {"type": "filter", "path": "user_id"},
+                    {"type": "filter", "path": "tier"},
+                    {"type": "filter", "path": "deleted_at"},
+                    {"type": "filter", "path": "memory_type"},
+                    # An array of strings. `filter` fields accept arrays of the
+                    # scalar types, matching when any element matches — which is
+                    # what lets an all-of tag query be expressed as an `$and` of
+                    # equalities. See `tag_filter` in services/memory.py.
+                    {"type": "filter", "path": "tags"},
+                ]
+            },
+        },
+        # Full-text search on memories. The scoping fields are `token`, not
+        # `string`: an analyzed field cannot back an exact `equals` filter.
+        {
+            "collection": MEMORIES,
+            "name": "memories_fts_index",
+            "type": "search",
+            "definition": {
+                "mappings": {
+                    "dynamic": False,
+                    "fields": {
+                        "content": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "user_id": {"type": "token"},
+                        "tier": {"type": "token"},
+                        "is_deleted": {"type": "token"},
+                        # Declared in *both* indexes on purpose. A pre-filter that
+                        # only one branch of a `$rankFusion` applies is not a
+                        # filter: the unfiltered branch contributes matches that
+                        # ignore it, and fusion mixes them into the same ranked
+                        # list, so a `memory_type`-scoped search returned documents
+                        # of every other type — visibly wrong results rather than
+                        # missing ones.
+                        "memory_type": {"type": "token"},
+                        "tags": {"type": "token"},
+                    },
+                }
+            },
+        },
+        # Vector search on episodes. Every field used as a $vectorSearch
+        # pre-filter must be declared here or the branch silently returns
+        # nothing — hence thread_id and agent_name alongside user_id.
+        {
+            "collection": EPISODES,
+            "name": "episodes_vector_index",
+            "type": "vectorSearch",
+            "definition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": embedding_dimension,
+                        "similarity": "cosine",
+                    },
+                    {"type": "filter", "path": "user_id"},
+                    {"type": "filter", "path": "thread_id"},
+                    {"type": "filter", "path": "agent_name"},
+                ]
+            },
+        },
+        # Full-text search on episodes. The scoping fields are `token`, not
+        # `string`: an analyzed field cannot back an exact `equals` filter.
+        {
+            "collection": EPISODES,
+            "name": "episodes_fts_index",
+            "type": "search",
+            "definition": {
+                "mappings": {
+                    "dynamic": False,
+                    "fields": {
+                        "search_text": {"type": "string"},
+                        "user_id": {"type": "token"},
+                        "thread_id": {"type": "token"},
+                        "agent_name": {"type": "token"},
+                    },
+                }
+            },
+        },
+        # Vector search on semantic_cache
+        {
+            "collection": SEMANTIC_CACHE,
+            "name": "cache_vector_index",
+            "type": "vectorSearch",
+            "definition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": embedding_dimension,
+                        "similarity": "cosine",
+                    },
+                    {"type": "filter", "path": "user_id"},
+                ]
+            },
+        },
+    ]
+
+
+# Backward-compatible constant for tests that reference SEARCH_INDEXES directly
+SEARCH_INDEXES: list[dict] = get_search_indexes()

@@ -130,6 +130,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -170,3 +172,17 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Audit entries MongoDB would not take. The default `audit_fallback_path` is
+# relative, so running anything from the repo root lands it here — and it holds
+# real user ids and operation names, which is not a thing to commit.
+audit_fallback.jsonl
+audit_fallback.jsonl.1
+superpowers/
+talks/
+# Node — the sample UI (examples/memory-ui/frontend). `dist/` is already covered
+# above by the Python build rule, which happens to match Vite's output too.
+node_modules/
+.vite/
+npm-debug.log*
+*.tsbuildinfo

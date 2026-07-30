@@ -1,0 +1,188 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-memory"
+version = "4.2.0"
+description = "MongoDB Atlas-backed agent memory: short-term, long-term, episodic, and semantic cache in one cluster"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [
+    { name = "Mohammad Daoud Farooqi", email = "mohammaddaoud.farooqi@mongodb.com" },
+]
+keywords = [
+    "agent-memory", "mongodb", "atlas", "vector-search", "rag",
+    "episodic-memory", "semantic-cache", "mcp", "llm", "agents",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "fastmcp>=3.2.0",
+    "pymongo>=4.12.0",
+    "boto3>=1.36.26",
+    "pydantic>=2.10.6",
+    "pydantic-settings>=2.0",
+    # Floor is 1.2.2, not 1.0.1: earlier versions follow symlinks in `set_key`
+    # (GHSA / CVE, moderate) and can overwrite an arbitrary file through the
+    # cross-device rename fallback. Nothing here calls `set_key` and the library
+    # never imports dotenv at all, so this is not reachable in our own code --
+    # but the floor is what a consumer's resolver reads, and leaving it at 1.0.1
+    # lets a fresh install pick a vulnerable version to satisfy us.
+    "python-dotenv>=1.2.2",
+    "PyJWT>=2.13.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.40.0"]
+anthropic = ["anthropic>=0.39.0"]
+rest = ["fastapi>=0.115.0", "uvicorn>=0.30.0"]
+all = [
+    "openai>=1.40.0",
+    "anthropic>=0.39.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+]
+# The sample UI's backend (examples/memory-ui/server). Not part of `all`: the
+# library itself never imports sse-starlette, and a demo dependency has no
+# business in a production install.
+demo = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "sse-starlette>=2.1.0",
+]
+# Offline training for the local importance scorer (`scripts/train_importance.py`).
+# Deliberately not in `all`, for the same reason as `demo`: nothing under
+# agent_memory/ imports any of these, the script runs on a developer machine or in
+# CI, and adding ~200MB of transitive weight to the ordinary install would undo the
+# reason the runtime scorer is pure Python. A grep test in test_packaging.py keeps
+# that honest.
+training = [
+    "scikit-learn>=1.5.0",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "datasets>=2.19.0",
+]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=7.0",
+    "PyJWT>=2.13.0",
+    "fastapi>=0.115.0",
+    "openai>=1.40.0",
+    "anthropic>=0.39.0",
+    # The demo server has tests, so its transport must be importable here too.
+    "sse-starlette>=2.1.0",
+    # CI runs `uv run ruff check agent_memory/`. Undeclared, that resolved to
+    # whatever ruff happened to be on PATH — a developer's Homebrew build locally,
+    # and *nothing* on a clean runner, where `uv run ruff` exits 2 with "Failed to
+    # spawn: ruff" and the lint job fails for a reason unrelated to the code.
+    # Pinned to a minor range because the default rule set and `target-version`
+    # inference change between releases: ruff 0.9 reported this package clean while
+    # 0.16 flagged 28 findings, so an unpinned linter makes CI's verdict depend on
+    # its release date rather than on the diff.
+    "ruff>=0.14,<0.17",
+]
+
+# PyPI metadata is immutable per release, so these point at the repository's
+# current name. GitHub issues a permanent redirect after a rename, so an
+# ai-memory URL keeps resolving once the repo becomes agent-memory; the reverse
+# would 404 until the rename actually happened.
+[project.urls]
+Homepage = "https://github.com/mongodb-partners/ai-memory"
+Repository = "https://github.com/mongodb-partners/ai-memory"
+Issues = "https://github.com/mongodb-partners/ai-memory/issues"
+Changelog = "https://github.com/mongodb-partners/ai-memory/blob/main/CHANGELOG.md"
+
+[project.scripts]
+agent-memory = "agent_memory.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_memory"]
+
+# Explicit allow-list rather than an exclude-list. A live .env exists in this
+# working tree, so a forgotten exclude pattern would publish credentials to a
+# public index — an unrecoverable mistake, since a PyPI release cannot be edited.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/agent_memory",
+    "/tests",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+    "^\\s*\\.\\.\\.$",
+    "@abstractmethod",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["-v", "--tb=short"]
+testpaths = ["tests"]
+
+# Pinned so CI's verdict depends on the diff rather than on which ruff the runner
+# happened to have. With no config at all, ruff's default selection is whatever the
+# installed version defaults to *and* `target-version` is inferred from
+# `requires-python`; those two together moved this package from "clean" on 0.9 to
+# 28 findings on 0.16 without a line of source changing.
+[tool.ruff]
+target-version = "py311"
+# `docs` was excluded wholesale, which excludes any script that ever lands there
+# along with the prose. Excluding the prose by extension instead means a `.py`
+# added under `docs/` gets linted rather than silently skipped — the exclusion
+# should be about file type, not about a directory that happens to hold prose today.
+extend-exclude = [".ruff_cache", "docs/**/*.md"]
+
+[tool.ruff.lint]
+# Beyond ruff's default `E4,E7,E9,F`:
+#   I   — import order, so a rebase cannot quietly reorder imports
+#   UP  — pyupgrade; the floor is 3.11, so `datetime.UTC` and PEP 604 apply
+#   RUF — ruff's own checks, including RUF100, which catches `noqa` directives
+#         that stopped suppressing anything (a stale one hides a live finding)
+select = ["E4", "E7", "E9", "F", "I", "UP", "RUF"]
+
+# Not selected, each for a reason rather than for convenience:
+#   BLE001/S110 — `except Exception: pass` in the health probe and the migration
+#                 path is deliberate and marked `# pragma: no cover - a probe must
+#                 never 500`. A probe that raises is worse than one that omits a
+#                 field, so selecting these would mean adding 15 noqa comments to
+#                 the code they are pointing at correctly.
+#   B008        — `Depends(...)` in an argument default is how FastAPI declares
+#                 dependencies. The rule is right about Python in general and wrong
+#                 about this framework.
+#   SIM103      — flags an early-return style the surrounding code uses on purpose.
+ignore = [
+    # Flags en dashes and curly quotes in *prose docstrings* as possible homoglyph
+    # attacks. The threat is real in identifiers and string literals; in a
+    # paragraph of English explaining why a threshold is 0.1 it is noise, and
+    # "fixing" it would mean degrading the punctuation of every docstring in the
+    # package. RUF001/RUF003 stay enabled, so an ambiguous character in an
+    # identifier or an inline comment is still caught.
+    "RUF002",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Trainer-only: `scripts/` is not shipped and not importable by the library.
+"scripts/*" = ["T201"]  # printing is the trainer's entire user interface

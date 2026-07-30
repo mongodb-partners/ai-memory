@@ -1,0 +1,49 @@
+[
+  {
+    "$match": {
+      "user_id": "<<USER_ID>>",
+      "deleted_at": null
+    }
+  },
+  {
+    "$group": {
+      "_id": "$tier",
+      "count": {
+        "$sum": 1
+      },
+      "mean_importance": {
+        "$avg": "$importance"
+      },
+      "total_accesses": {
+        "$sum": "$access_count"
+      },
+      "newest": {
+        "$max": "$created_at"
+      },
+      "oldest": {
+        "$min": "$created_at"
+      }
+    }
+  },
+  {
+    "$project": {
+      "_id": 0,
+      "tier": "$_id",
+      "count": 1,
+      "mean_importance": {
+        "$round": [
+          "$mean_importance",
+          3
+        ]
+      },
+      "total_accesses": 1,
+      "newest": 1,
+      "oldest": 1
+    }
+  },
+  {
+    "$sort": {
+      "tier": 1
+    }
+  }
+]

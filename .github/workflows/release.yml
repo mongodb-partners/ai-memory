@@ -1,0 +1,110 @@
+# Publishing is deliberately NOT automatic. agent-memory is not on PyPI and is
+# installed with `uv add git+https://github.com/mongodb-partners/ai-memory.git`.
+# A tag push therefore builds and verifies only — the publish jobs are reachable
+# solely by a manual workflow_dispatch, so nobody releases the name by tagging.
+# Both publish jobs also need a GitHub environment (`testpypi` / `pypi`) with
+# trusted publishing configured; neither exists yet, so a dispatch would fail
+# closed rather than upload something unintended.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Index to publish to (build-only if left unset)"
+        required: true
+        default: none
+        type: choice
+        options: [none, testpypi, pypi]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      # A tag is not a licence to skip the suite. A broken release cannot be
+      # replaced on PyPI — only yanked and superseded.
+      - name: Unit tests
+        run: uv run pytest tests/unit -q
+
+      - name: Build
+        run: uv build
+
+      - name: Assert the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(uv run python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match pyproject version $pkg."
+            exit 1
+          fi
+          echo "Tag and package agree on $pkg."
+
+      # Immutability again: a credential published by accident cannot be
+      # unpublished, only rotated. Loops rather than globbing into `tar`, and
+      # fails on an empty dist/ — see the same step in ci.yml.
+      - name: Assert no secrets in the artifacts
+        run: |
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::No sdist in dist/ — the check would pass vacuously."
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            if tar tzf "$archive" | grep -iE '\.env|\.coverage'; then
+              echo "::error::Credential-shaped file found in $archive."
+              exit 1
+            fi
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      # Trusted publishing: OIDC instead of a long-lived token in secrets.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    needs: build
+    # A tag alone is NOT sufficient — an explicit dispatch with target=pypi is.
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'pypi'
+    runs-on: ubuntu-latest
+    # A protected environment means a human approves the one step that cannot
+    # be undone.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1

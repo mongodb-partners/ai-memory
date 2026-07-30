@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't cancel 3.12 and 3.13 because 3.11 failed — a version-specific
+      # break is exactly what this matrix exists to find.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras --python ${{ matrix.python-version }}
+
+      # `ruff` is pinned in the `dev` extra, so `uv sync --all-extras` above
+      # installs it. It used to be undeclared, which made this step resolve
+      # whatever ruff was on PATH — a developer's Homebrew build locally, and
+      # nothing at all here, where `uv run ruff` exits 2 with "Failed to spawn".
+      # `--no-sync` keeps that honest: it fails rather than quietly installing.
+      #
+      # No path argument, so ruff walks the whole repo. It was `agent_memory/`
+      # only, which left the 134 findings in tests/, examples/, and scripts/
+      # permanently invisible — and the gap grew, because nothing failed as it
+      # did. Two of those findings were real: a `match="bad.json"` whose
+      # unescaped `.` also accepted "badXjson", and an import of `build_shells`
+      # in test_transport.py that no longer matched how the tests call it.
+      #
+      # Linting the tests matters more than linting the library, not less: a
+      # test is the thing that says the library is correct, and a weakened
+      # assertion is the one bug with no test behind it.
+      - name: Lint
+        run: uv run --no-sync ruff check
+
+      # The unit suite is fully mocked — no Atlas, no cloud credentials. The
+      # integration tier gates on server reachability and is intentionally not
+      # run here.
+      - name: Unit tests
+        run: uv run pytest tests/unit -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+
+      - name: Build
+        run: uv build
+
+      # A live .env exists in developer working trees, and a PyPI release cannot
+      # be edited after upload. The sdist uses an allow-list, so this is the
+      # second gate rather than the only one.
+      #
+      # Loops rather than `tar tzf dist/*.tar.gz`: `tar` reads only its first
+      # argument as the archive and then looks for the rest *inside* it, so two
+      # tarballs in dist/ made this exit 1 with "not found in archive" — a check
+      # that fails for the wrong reason, and whose fix is tempting to spell `|| true`.
+      - name: Assert no secrets in the artifacts
+        run: |
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::No sdist in dist/ — the check would pass vacuously."
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            if tar tzf "$archive" | grep -iE '\.env|\.coverage'; then
+              echo "::error::Credential-shaped file found in $archive."
+              exit 1
+            fi
+          done
+          echo "sdist is clean."
+
+      - name: Assert the package imports from the built wheel
+        run: |
+          uv venv /tmp/smoke
+          VIRTUAL_ENV=/tmp/smoke uv pip install dist/*.whl
+          /tmp/smoke/bin/python -c \
+            "from agent_memory import AsyncMemory, Memory, MemoryConfig, __version__; print(__version__)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: dist
+          path: dist/
+
+  # The image build broke once already and nothing noticed: adding `readme` to
+  # pyproject made README.md a build-time requirement the Dockerfile did not
+  # copy. Building here is the only thing that catches that class of drift.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Build the image
+        run: docker build -t agent-memory:ci .
+
+      # Asserting the USER directive took effect, not merely that it is present.
+      # A chown that misses the venv, or a base-image change, would leave this
+      # reporting uid=0 while the Dockerfile still reads correctly.
+      - name: Assert the container does not run as root
+        run: |
+          uid="$(docker run --rm agent-memory:ci id -u)"
+          if [ "$uid" = "0" ]; then
+            echo "::error::Container runs as root (uid 0)."
+            exit 1
+          fi
+          echo "Container runs as uid $uid."
+
+      - name: Assert the package imports inside the image
+        run: |
+          docker run --rm agent-memory:ci uv run python -c \
+            "from agent_memory import AsyncMemory, Memory, MemoryConfig, __version__; print(__version__)"

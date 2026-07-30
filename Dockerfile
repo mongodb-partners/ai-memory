@@ -1,28 +1,37 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set up working directory
-WORKDIR /code
+WORKDIR /app
 
-# Copy requirements first to leverage Docker cache
-COPY ./requirements.txt /code/requirements.txt
-RUN pip install -r requirements.txt
+# Install uv for fast, reproducible installs. Pinned by digest, not `:latest`:
+# a mutable tag can be repointed by the publisher, which makes the build both
+# irreproducible and a supply-chain surface. This digest is what `:latest`
+# resolved to on 2026-07-29; it does not correspond to any semver tag, so the
+# digest is the only stable identifier. Bump it deliberately.
+COPY --from=ghcr.io/astral-sh/uv@sha256:606e70c71c852d03f611b1e56a195d08648507018a7057fab82c4974c4eae105 /uv /usr/local/bin/uv
 
-# Copy all application code
-COPY ./main.py /code/
-COPY ./config.py /code/
-COPY ./database/ /code/database/
-COPY ./models/ /code/models/
-COPY ./services/ /code/services/
-COPY ./utils/ /code/utils/
+# Dependency layer (cached): manifest + lockfile. README.md and LICENSE are
+# required here, not optional niceties — pyproject declares `readme` and
+# `license-files`, and hatchling fails the build outright if either is missing.
+COPY pyproject.toml ./
+COPY uv.lock ./
+COPY README.md ./
+COPY LICENSE ./
+RUN uv sync --frozen --no-install-project --extra all || uv sync --extra all
 
-# Alternative: Copy the entire project directory
-# COPY . /code/
+# Application code
+COPY agent_memory/ ./agent_memory/
 
-# Make sure directory permissions are correct
-RUN chmod -R 755 /code
+RUN uv pip install --system -e ".[all]"
 
-# Expose the API port
-EXPOSE 8182
+# Drop root. Nothing here needs it: the server binds 8000, not a privileged
+# port, and every write the process makes goes to Atlas rather than the
+# filesystem. `uv run` resolves /app/.venv, so the venv has to be writable by
+# the runtime user — hence the chown before the USER switch.
+RUN useradd --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
 
-# Run the FastAPI application
-ENTRYPOINT ["python3", "main.py"]
+EXPOSE 8000
+
+# TRANSPORT=mcp|rest|both selects which shell(s) to serve.
+CMD ["uv", "run", "agent-memory"]

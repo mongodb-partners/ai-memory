@@ -1,0 +1,59 @@
+/* Self-hosted brand fonts.
+ *
+ * The retail app this UI borrows from loaded these from static.mongodb.com and
+ * fonts.googleapis.com. That is fine in a datacenter and hostile at a
+ * conference booth: on captive-portal wifi the requests hang rather than fail
+ * fast, and `font-display: swap` then renders the entire UI in Times New Roman
+ * for the duration of the talk.
+ *
+ * The files live in /public/fonts (264 KB total, six woff2). Source Code Pro is
+ * the Google latin subset — one variable file covers both weights.
+ */
+
+@font-face {
+  font-family: 'MongoDB Value Serif';
+  src: url('/fonts/MongoDBValueSerif-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'MongoDB Value Serif';
+  src: url('/fonts/MongoDBValueSerif-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'MongoDB Value Serif';
+  src: url('/fonts/MongoDBValueSerif-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Euclid Circular A';
+  src: url('/fonts/EuclidCircularA-Regular-WebXL.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Euclid Circular A';
+  src: url('/fonts/EuclidCircularA-Medium-WebXL.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* One variable file serves 400 and 600; the browser synthesizes the rest. */
+@font-face {
+  font-family: 'Source Code Pro';
+  src: url('/fonts/SourceCodePro-Latin.woff2') format('woff2');
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+2000-206F,
+    U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215;
+}

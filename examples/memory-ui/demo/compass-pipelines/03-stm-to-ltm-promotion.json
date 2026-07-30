@@ -1,0 +1,54 @@
+[
+  {
+    "$match": {
+      "user_id": "<<USER_ID>>",
+      "tier": "stm",
+      "deleted_at": null,
+      "importance": {
+        "$gte": 0.6
+      },
+      "access_count": {
+        "$gte": 2
+      },
+      "$expr": {
+        "$lt": [
+          "$created_at",
+          {
+            "$dateSubtract": {
+              "startDate": "$$NOW",
+              "unit": "minute",
+              "amount": 60
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "age_minutes": {
+        "$dateDiff": {
+          "startDate": "$created_at",
+          "endDate": "$$NOW",
+          "unit": "minute"
+        }
+      }
+    }
+  },
+  {
+    "$sort": {
+      "importance": -1,
+      "access_count": -1
+    }
+  },
+  {
+    "$project": {
+      "_id": 0,
+      "content": 1,
+      "importance": 1,
+      "access_count": 1,
+      "age_minutes": 1,
+      "conversation_id": 1
+    }
+  }
+]
