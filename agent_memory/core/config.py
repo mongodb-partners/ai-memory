@@ -87,6 +87,16 @@ class MCPConfig(BaseSettings):
     ltm_retention_reference_days: int = 180
     ltm_retention_standard_days: int = 90
     ltm_retention_temporary_days: int = 7
+    # How long a logged turn is kept. A turn log is high-volume and loses value
+    # fast, so 30 days covers "what did we do last month" without unbounded
+    # growth.
+    #
+    # This is the *declared* retention: startup reconciles the TTL index on
+    # `episodes` to it. `set_activity_retention` changes the same index at
+    # runtime via collMod, which is the right shape for "shorten this for the
+    # next hour" but does not survive a restart — the next startup reconciles
+    # back to the value here. Set this field to make a change permanent.
+    episodic_retention_days: int = 30
 
     # Memory Evolution Thresholds
     reinforce_threshold: float = 0.85
@@ -178,6 +188,12 @@ class MCPConfig(BaseSettings):
     rate_limit_enabled: bool = False
     rate_limit_window_seconds: int = 60
     rate_limit_max_requests: int = 100
+    # How long a spent window counter is kept before Atlas expires it. Only
+    # needs to outlive its own window; the generous default leaves the recent
+    # ones readable while debugging a limit that fired. The TTL index is
+    # reconciled to `max(this, rate_limit_window_seconds)` so a long window
+    # cannot have its own counters expired out from under it mid-window.
+    rate_limit_retention_seconds: int = 86400
 
     # Prompt Library (Phase 2)
     prompt_experiment_enabled: bool = True

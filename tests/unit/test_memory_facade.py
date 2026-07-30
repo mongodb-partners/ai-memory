@@ -819,6 +819,84 @@ class TestStartupRefusesToStrandStoredVectors:
         assert ensure.await_args.kwargs["allow_dimension_change"] is True
 
 
+class TestStartupCarriesRetentionIntoTheIndexes:
+    """`create()` must hand `ensure_indexes` the config, not just the database.
+
+    The TTL definitions are derived from the config now, but `ensure_indexes`
+    keeps `config` optional for callers that have none — so a call site that
+    forgot to pass it would build every TTL index at the shipped defaults and
+    report success. That is precisely the bug the derivation was meant to fix,
+    reintroduced one layer up, and no test of `get_standard_indexes` would see it.
+    """
+
+    def _wire(self, monkeypatch):
+        import agent_memory.core.database as dbmod
+        import agent_memory.core.migrations as mig
+        import agent_memory.memory as mem
+        import agent_memory.providers.manager as pm
+
+        db_manager = MagicMock()
+        db_manager.db = MagicMock()
+        db_manager.close = AsyncMock()
+        monkeypatch.setattr(
+            dbmod.DatabaseManager, "initialize", AsyncMock(return_value=db_manager)
+        )
+        ensure = AsyncMock()
+        monkeypatch.setattr(mig, "ensure_indexes", ensure)
+        monkeypatch.setattr(mig, "find_stranding_dimension_changes", AsyncMock(return_value=[]))
+        monkeypatch.setattr(mem, "_ensure_search_indexes_bg", AsyncMock())
+
+        def _providers(config):
+            from agent_memory.providers.manager import resolve_embedding
+
+            p = MagicMock()
+            p.embedding = AsyncMock()
+            p.embedding_spec = resolve_embedding(config)
+            p.embedding.generate_embedding = AsyncMock(
+                return_value=[0.0] * p.embedding_spec.dimension
+            )
+            return p
+
+        monkeypatch.setattr(pm, "ProviderManager", _providers)
+        return ensure
+
+    async def test_ensure_indexes_receives_the_config(self, monkeypatch):
+        ensure = self._wire(monkeypatch)
+        cfg = _config(
+            governance_enabled=False, rate_limit_enabled=False,
+            workers_in_process=False, audit_retention_days=30,
+        )
+
+        m = await AsyncMemory.create(cfg)
+        try:
+            assert ensure.await_args.args[1] is cfg
+        finally:
+            await m.close()
+
+    async def test_the_configured_retention_reaches_the_definitions(self, monkeypatch):
+        """End to end through `create()`: the object it passes really does derive
+        the changed duration. Asserting identity alone would still pass if the
+        derivation ignored the field."""
+        from agent_memory.core.collections import get_standard_indexes
+
+        ensure = self._wire(monkeypatch)
+        cfg = _config(
+            governance_enabled=False, rate_limit_enabled=False,
+            workers_in_process=False, audit_retention_days=30,
+        )
+
+        m = await AsyncMemory.create(cfg)
+        try:
+            passed = ensure.await_args.args[1]
+        finally:
+            await m.close()
+
+        audit = next(
+            ix for ix in get_standard_indexes(passed) if ix["name"] == "ix_audit_ttl"
+        )
+        assert audit["kwargs"]["expireAfterSeconds"] == 30 * 86400
+
+
 class TestCreateAndClose:
     """Exercise the create() wiring and close() teardown with everything mocked."""
 

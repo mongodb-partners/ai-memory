@@ -116,6 +116,60 @@ independently, so a badly trained artifact cannot emit the value that means
 
 ### Fixed
 
+**Every configured retention value was discarded.** `AUDIT_RETENTION_DAYS=30` set
+the config field, left `ix_audit_ttl` at its hardcoded `365 * 86400`, and reported
+success. The same held for `SOFT_DELETE_PURGE_DAYS`, `CACHE_TTL_SECONDS`, and the
+episodic TTL: each `expireAfterSeconds` in `STANDARD_INDEXES` was a literal that
+happened to equal the default of the field beside it, so config and behaviour
+agreed by coincidence and only until someone changed one.
+
+There is no symptom to notice. The operator sets a value, startup completes, the
+deployment reports healthy, and documents keep expiring on the previous schedule —
+which for an audit log means a retention obligation quietly not being met, and for
+a cache means an entry lifetime nobody can tune.
+
+`STANDARD_INDEXES` was a module-level list, so it could not read a config that
+does not exist at import time. It is now `get_standard_indexes(config)`, mirroring
+the `get_search_indexes(embedding_dimension)` pattern already used for stage 2,
+and `ensure_indexes(db, config)` is what `create()` calls. The constant remains,
+built from the defaults, for reference and for tests that assert on shape.
+
+Two things had to be true for a *changed* value to take effect, not just a
+first-run one:
+
+- **The conflict path had to catch it.** Reconciliation handled MongoDB error 86
+  (`IndexKeySpecsConflict`) only. `expireAfterSeconds` is an *option*, so a
+  changed duration raises 85 (`IndexOptionsConflict`) and took the
+  `logger.exception` branch instead — the old index survived, startup finished,
+  and the new retention never applied. Both codes are reconciled now.
+- **Zero could not be passed through.** `expireAfterSeconds: 0` is not "keep
+  nothing"; on a timestamp field it is the `expires_at` idiom — expire each
+  document at the instant its own field names. `CACHE_TTL_SECONDS=0` most likely
+  means "as briefly as possible", so it clamps to one second rather than
+  reinterpreting the field and deleting every cache entry and audit record on the
+  TTL monitor's next pass. Negative values clamp too, where the alternative is an
+  index that fails to build and so enforces nothing.
+
+- `EPISODIC_RETENTION_DAYS` (`episodic_retention_days`, default `30`) makes turn-log
+  retention declarable. `set_activity_retention` still retunes the live index via
+  `collMod`, but it changes the index rather than the configuration, so the next
+  startup reconciles back — the config field is how a change is made permanent,
+  and `EpisodicService.set_retention` now says so.
+- `RATE_LIMIT_RETENTION_SECONDS` (`rate_limit_retention_seconds`, default `86400`)
+  replaces a hardcoded `86400` with no field at all. It is raised to
+  `rate_limit_window_seconds` when that is longer: the counter *is* the enforcement
+  state, so expiring it inside its own window would let a caller who had exhausted
+  the limit start a fresh count.
+
+Verified against 18 mutations, all killed: each of the five TTLs reverted to its
+literal (five separately); the zero/negative clamp removed; the rate-limit window
+floor removed; `ensure_indexes` ignoring the config it was handed; `create()`
+calling it without one; only code 86 reconciled again; every `OperationFailure`
+treated as a conflict; the rebuild dropping its options; a failed rebuild aborting
+stage 1; the `expires_at` indexes given a duration; the soft-delete TTL losing its
+partial filter; a default silently shifted; the new config field removed; and the
+days-to-seconds conversion dropped.
+
 **Changing the embedding dimension silently orphaned every vector already
 stored.** A vector index cannot have its `numDimensions` edited, so index
 reconciliation dropped and recreated it. The documents beneath were untouched by

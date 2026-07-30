@@ -94,6 +94,7 @@ class TestMCPConfigDefaults:
         assert config.ltm_retention_reference_days == 180
         assert config.ltm_retention_standard_days == 90
         assert config.ltm_retention_temporary_days == 7
+        assert config.episodic_retention_days == 30
 
     def test_evolution_threshold_defaults(self):
         config = _make_config()
@@ -155,6 +156,41 @@ class TestMCPConfigDefaults:
         assert not hasattr(config, "auth_jwks_url")
         assert config.governance_enabled is False
         assert config.rate_limit_enabled is False
+
+    def test_rate_limit_defaults(self):
+        config = _make_config()
+        assert config.rate_limit_window_seconds == 60
+        assert config.rate_limit_max_requests == 100
+        assert config.rate_limit_retention_seconds == 86400
+
+
+class TestRetentionDurationsAreSettableFromTheEnvironment:
+    """The retention fields exist so a deployment can change them.
+
+    ``get_standard_indexes`` derives every TTL index from these, so an env var
+    that does not reach the model is an index that keeps the default duration —
+    see ``tests/unit/test_retention_is_configured.py`` for the other end.
+    """
+
+    def test_episodic_retention_from_env(self, monkeypatch):
+        monkeypatch.setenv("EPISODIC_RETENTION_DAYS", "3")
+        assert _make_config().episodic_retention_days == 3
+
+    def test_rate_limit_retention_from_env(self, monkeypatch):
+        monkeypatch.setenv("RATE_LIMIT_RETENTION_SECONDS", "600")
+        assert _make_config().rate_limit_retention_seconds == 600
+
+    def test_audit_retention_from_env(self, monkeypatch):
+        monkeypatch.setenv("AUDIT_RETENTION_DAYS", "30")
+        assert _make_config().audit_retention_days == 30
+
+    def test_soft_delete_purge_from_env(self, monkeypatch):
+        monkeypatch.setenv("SOFT_DELETE_PURGE_DAYS", "7")
+        assert _make_config().soft_delete_purge_days == 7
+
+    def test_cache_ttl_from_env(self, monkeypatch):
+        monkeypatch.setenv("CACHE_TTL_SECONDS", "120")
+        assert _make_config().cache_ttl_seconds == 120
 
 
 class TestMCPConfigEnvOverride:

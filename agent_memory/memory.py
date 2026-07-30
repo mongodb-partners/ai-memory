@@ -104,7 +104,10 @@ class AsyncMemory:
         db_manager = await DatabaseManager.initialize(config)
         self._db_manager = db_manager
         db = db_manager.db
-        await ensure_indexes(db)
+        # `config` is what carries the retention durations into the TTL indexes.
+        # Called without it, `ensure_indexes` builds them from the defaults —
+        # which is how every configured retention value used to be discarded.
+        await ensure_indexes(db, config)
 
         # 3. Providers + embedding-dimension guard (before any vector write)
         self.providers = ProviderManager(config)

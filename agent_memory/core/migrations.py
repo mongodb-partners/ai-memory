@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pymongo.errors import OperationFailure
 from pymongo.operations import SearchIndexModel
 
-from agent_memory.core.collections import STANDARD_INDEXES, get_search_indexes
+from agent_memory.core.collections import get_search_indexes, get_standard_indexes
 from agent_memory.exceptions import ConfigError
 
 logger = logging.getLogger(__name__)
@@ -47,12 +47,21 @@ _SEARCH_INDEX_POLL_TIMEOUT = 120  # max seconds to wait per index
 # ─── Stage 1: Standard Indexes ──────────────────────────────────
 
 
-async def ensure_indexes(db) -> None:
+async def ensure_indexes(db, config=None) -> None:
     """Create all standard B-tree indexes.  Idempotent — safe to call on
     every startup.  PyMongo silently succeeds if the index already exists
     with the same spec.
+
+    ``config`` supplies the TTL durations. Omitting it uses the defaults, which
+    is only right for a caller that has no config — every startup path passes
+    one, because the whole point of ``AUDIT_RETENTION_DAYS`` is that it reaches
+    the index.
+
+    Reconciling an *existing* index whose options changed is the half of this
+    that makes a configured retention take effect at all — see
+    :func:`_reconcile_conflicting_index`.
     """
-    for idx_def in STANDARD_INDEXES:
+    for idx_def in get_standard_indexes(config):
         collection_name: str = idx_def["collection"]
         keys: list[tuple[str, int]] = idx_def["keys"]
         name: str = idx_def["name"]
@@ -68,28 +77,10 @@ async def ensure_indexes(db) -> None:
             )
             logger.debug("Index '%s' on '%s' ensured.", name, collection_name)
         except OperationFailure as exc:
-            if exc.code == 86 and name:
-                # Index spec conflict — drop and recreate
-                logger.info(
-                    "Index '%s' on '%s' has conflicting options — "
-                    "dropping and recreating.",
-                    name,
-                    collection_name,
+            if exc.code in _INDEX_CONFLICT_CODES and name:
+                await _reconcile_conflicting_index(
+                    collection, collection_name, name, keys, extra_kwargs
                 )
-                try:
-                    await collection.drop_index(name)
-                    await collection.create_index(
-                        keys,
-                        name=name,
-                        background=True,
-                        **extra_kwargs,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to recreate index '%s' on '%s'.",
-                        name,
-                        collection_name,
-                    )
             else:
                 logger.exception(
                     "Failed to create index '%s' on '%s'.",
@@ -98,6 +89,61 @@ async def ensure_indexes(db) -> None:
                 )
 
     logger.info("Standard indexes ensured for all Phase 0 collections.")
+
+
+# The two ways `create_index` refuses because something already occupies the
+# name or the shape:
+#
+#   85 IndexOptionsConflict  — same keys, different options. This is the one a
+#      retention change produces: `expireAfterSeconds` is an *option*, so
+#      restarting with AUDIT_RETENTION_DAYS=30 against an index built at 365
+#      lands here and nowhere else.
+#   86 IndexKeySpecsConflict — same name, different keys. What a change to an
+#      index's key list produces.
+#
+# Only 86 used to be handled, which meant every option change — every TTL — took
+# the `logger.exception` branch and left the old index in place. The failure was
+# visible in the log and invisible in behaviour: startup completed, the
+# deployment reported healthy, and documents kept expiring on the previous
+# schedule.
+_INDEX_CONFLICT_CODES = frozenset({85, 86})
+
+
+async def _reconcile_conflicting_index(
+    collection, collection_name: str, name: str, keys, extra_kwargs: dict
+) -> None:
+    """Drop and recreate an index whose stored definition no longer matches.
+
+    Logged at INFO rather than DEBUG because it is a schema change to a live
+    collection: the drop leaves the collection unindexed for that access path
+    until the rebuild finishes, and on a large collection that is a visible
+    latency event someone will want to correlate with a deploy.
+
+    Dropping is the only route. Neither the keys nor ``expireAfterSeconds`` can
+    be edited in place through ``create_index``; ``collMod`` can change a TTL
+    alone, but not a key change, and reconciliation has to handle both — see
+    ``EpisodicService.set_retention`` for the collMod path, which exists to
+    retune retention *without* the drop when that is all that is needed.
+    """
+    logger.info(
+        "Index '%s' on '%s' has conflicting options — dropping and recreating.",
+        name,
+        collection_name,
+    )
+    try:
+        await collection.drop_index(name)
+        await collection.create_index(
+            keys,
+            name=name,
+            background=True,
+            **extra_kwargs,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to recreate index '%s' on '%s'.",
+            name,
+            collection_name,
+        )
 
 
 # ─── Preflight: dimension changes that would strand existing vectors ─────

@@ -348,6 +348,16 @@ class EpisodicService:
         Per-user retention would need a per-document ``expires_at`` and a TTL
         index on that field instead of ``ts``. That is a document-shape change,
         not a knob, and it is deliberately not pretended to be one here.
+
+        **Durability.** This changes the live index, not the configuration, so the
+        next startup reconciles ``ix_episodes_ttl`` back to
+        ``EPISODIC_RETENTION_DAYS`` — see ``core.collections.get_standard_indexes``.
+        That is the right precedence (the declared configuration is the source of
+        truth for what the deployment intends) and it makes this the wrong tool
+        for a permanent change: set the config field for that. The response says
+        nothing about the restart because a caller asking to shorten retention for
+        the next hour does not need to hear about it, but an operator using this
+        to make a lasting change would be surprised, so it is stated here.
         """
         if ttl_seconds is None:
             try:

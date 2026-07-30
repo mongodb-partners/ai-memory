@@ -3,7 +3,25 @@
 Index definitions are separated from migration logic so they serve as
 the canonical reference for the database schema. ``core/migrations.py`` is
 data-driven over these two lists, so adding a collection here is enough.
+
+Both sets are *functions* of the configuration — ``get_standard_indexes(config)``
+and ``get_search_indexes(embedding_dimension)`` — because the values that belong
+in an index definition are values the operator sets. Every ``expireAfterSeconds``
+here used to be a literal that happened to equal a default: ``ix_audit_ttl`` was
+``365 * 86400`` next to ``audit_retention_days: int = 365``. Setting
+``AUDIT_RETENTION_DAYS=30`` changed the config field, changed nothing about when
+audit records actually expired, and reported success. The two agreed only by
+coincidence, and only at the defaults.
+
+``STANDARD_INDEXES`` and ``SEARCH_INDEXES`` remain as module-level constants
+built from the defaults, for reference and for tests that assert on shape rather
+than on a deployment's values.
 """
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle: config imports nothing here
+    from agent_memory.core.config import MCPConfig
 
 # ─── Collection Names ────────────────────────────────────────────
 
@@ -19,167 +37,247 @@ GOVERNANCE_PROFILES: str = "governance_profiles"
 PROMPTS: str = "prompts"
 DECISIONS: str = "decisions"
 
-# Default episodic retention. A turn log is high-volume and loses value fast;
-# 30 days covers "what did we do last month" without unbounded growth. Tunable
-# at runtime via ``set_activity_retention`` (collMod) — STANDARD_INDEXES is a
-# static list, so it cannot be config-driven here.
+# Default episodic retention, and the value ``get_standard_indexes`` falls back
+# to when no config is supplied. A turn log is high-volume and loses value fast;
+# 30 days covers "what did we do last month" without unbounded growth. Override
+# with ``EPISODIC_RETENTION_DAYS``, or at runtime — for this process's lifetime —
+# via ``set_activity_retention`` (collMod).
 EPISODES_DEFAULT_TTL_SECONDS: int = 30 * 86400
+
+# Fallbacks for the other TTL indexes, used when ``get_standard_indexes`` is
+# called without a config. Each mirrors the default of the ``MCPConfig`` field
+# named beside it; the config is the authority when one is passed.
+_DEFAULT_SOFT_DELETE_PURGE_SECONDS: int = 30 * 86400   # soft_delete_purge_days
+_DEFAULT_CACHE_TTL_SECONDS: int = 3600                  # cache_ttl_seconds
+_DEFAULT_AUDIT_TTL_SECONDS: int = 365 * 86400           # audit_retention_days
+_DEFAULT_RATE_LIMIT_TTL_SECONDS: int = 86400            # rate_limit_retention_seconds
+
+
+def get_standard_indexes(config: "MCPConfig | None" = None) -> list[dict]:
+    """Return the standard B-tree index definitions for ``config``.
+
+    Every TTL among them is an operator-set duration, so the definitions are
+    derived rather than declared. Passing ``None`` yields the defaults, which is
+    what the module-level ``STANDARD_INDEXES`` constant holds.
+
+    A TTL whose configured value is non-positive is clamped to one second rather
+    than passed through: ``expireAfterSeconds: 0`` on a *timestamp* field is not
+    "keep nothing", it is the ``expires_at`` idiom — expire each document at the
+    instant its own field names — and applying it to ``created_at`` would delete
+    every cache entry and audit record as soon as the TTL monitor noticed them.
+    ``CACHE_TTL_SECONDS=0`` most likely means "as briefly as possible"; it must
+    not silently mean "and also reinterpret the field".
+    """
+    def seconds(value: int, fallback: int) -> int:
+        return max(1, value) if value is not None else fallback
+
+    if config is None:
+        soft_delete_ttl = _DEFAULT_SOFT_DELETE_PURGE_SECONDS
+        cache_ttl = _DEFAULT_CACHE_TTL_SECONDS
+        audit_ttl = _DEFAULT_AUDIT_TTL_SECONDS
+        rate_limit_ttl = _DEFAULT_RATE_LIMIT_TTL_SECONDS
+        episodes_ttl = EPISODES_DEFAULT_TTL_SECONDS
+    else:
+        soft_delete_ttl = seconds(
+            config.soft_delete_purge_days * 86400, _DEFAULT_SOFT_DELETE_PURGE_SECONDS
+        )
+        cache_ttl = seconds(config.cache_ttl_seconds, _DEFAULT_CACHE_TTL_SECONDS)
+        audit_ttl = seconds(
+            config.audit_retention_days * 86400, _DEFAULT_AUDIT_TTL_SECONDS
+        )
+        # A counter must outlive the window it counts, or the limit stops being
+        # enforced for the tail of any window longer than the retention.
+        rate_limit_ttl = seconds(
+            max(
+                config.rate_limit_retention_seconds,
+                config.rate_limit_window_seconds,
+            ),
+            _DEFAULT_RATE_LIMIT_TTL_SECONDS,
+        )
+        episodes_ttl = seconds(
+            config.episodic_retention_days * 86400, EPISODES_DEFAULT_TTL_SECONDS
+        )
+
+    return _standard_indexes(
+        soft_delete_ttl=soft_delete_ttl,
+        cache_ttl=cache_ttl,
+        audit_ttl=audit_ttl,
+        rate_limit_ttl=rate_limit_ttl,
+        episodes_ttl=episodes_ttl,
+    )
+
 
 # ─── Standard (B-tree) Indexes ───────────────────────────────────
 #
 # Each entry: collection, keys (list of (field, direction) tuples),
 # name, optional unique flag, optional kwargs dict.
 
-STANDARD_INDEXES: list[dict] = [
-    # -- memories --
-    {
-        "collection": MEMORIES,
-        "keys": [("expires_at", 1)],
-        "name": "ix_memories_expires_at",
-        "kwargs": {"expireAfterSeconds": 0},
-    },
-    {
-        "collection": MEMORIES,
-        "keys": [("user_id", 1), ("tier", 1), ("created_at", -1)],
-        "name": "ix_memories_user_tier_created",
-        "kwargs": {"partialFilterExpression": {"deleted_at": None}},
-    },
-    {
-        "collection": MEMORIES,
-        "keys": [("user_id", 1), ("conversation_id", 1)],
-        "name": "ix_memories_conversation",
-        "kwargs": {"partialFilterExpression": {"deleted_at": None}},
-    },
-    {
-        "collection": MEMORIES,
-        # The enrichment worker's claim query: equality on `enrichment_status`, an
-        # `$or` over `enrichment_claimed_at`, then the `created_at` sort that makes
-        # the queue FIFO.
-        #
-        # `enrichment_claimed_at` sits between them because a claim runs on every
-        # poll of a busy queue and the alternative is scanning every pending
-        # document to find the unclaimed ones. It cannot serve the `$or` as an index
-        # bound — MongoDB will scan the `enrichment_status` prefix and filter — but
-        # it keeps the field in the index, so the filter is applied without fetching
-        # each document.
-        "keys": [
-            ("enrichment_status", 1),
-            ("enrichment_claimed_at", 1),
-            ("created_at", 1),
-        ],
-        "name": "ix_memories_enrichment_queue",
-    },
-    {
-        "collection": MEMORIES,
-        "keys": [("deleted_at", 1)],
-        "name": "ix_memories_deleted_at_ttl",
-        "kwargs": {
-            "expireAfterSeconds": 30 * 86400,  # 30 days
-            "partialFilterExpression": {"deleted_at": {"$type": "date"}},
+
+def _standard_indexes(
+    *,
+    soft_delete_ttl: int,
+    cache_ttl: int,
+    audit_ttl: int,
+    rate_limit_ttl: int,
+    episodes_ttl: int,
+) -> list[dict]:
+    return [
+        # -- memories --
+        {
+            "collection": MEMORIES,
+            "keys": [("expires_at", 1)],
+            "name": "ix_memories_expires_at",
+            "kwargs": {"expireAfterSeconds": 0},
         },
-    },
-    # -- episodes --
-    # Thread replay; the primary read path for "show me this conversation's
-    # turns". The key order mirrors `get_thread` exactly: equality on
-    # (user_id, thread_id), then the sort on (ts, step).
-    #
-    # `user_id` leads because every episodic read is tenant-scoped — a thread id
-    # is not a capability — so an index keyed on thread_id alone leaves the
-    # isolation filter as a residual predicate the server applies after the scan.
-    # `ts` precedes `step` because that is the sort `get_thread` issues, and the
-    # sort order is itself deliberate: `step` can be null when the durable counter
-    # failed, and null sorts below every number, so leading on it would relocate a
-    # turn to the front of the replay rather than keep it in place. See
-    # `EpisodicService.get_thread`.
-    {
-        "collection": EPISODES,
-        "keys": [("user_id", 1), ("thread_id", 1), ("ts", 1), ("step", 1)],
-        "name": "ix_episodes_thread_step",
-    },
-    {
-        "collection": EPISODES,
-        "keys": [("user_id", 1), ("ts", -1)],
-        "name": "ix_episodes_user_ts",
-    },
-    {
-        "collection": EPISODES,
-        "keys": [("thread_id", 1), ("ts", -1)],
-        "name": "ix_episodes_thread_ts",
-    },
-    # Join a logged turn back to a trace or support ticket. Same shape as the
-    # thread index: equality prefix, then the (ts, step) sort the read issues.
-    {
-        "collection": EPISODES,
-        "keys": [
-            ("user_id", 1), ("correlation_id", 1), ("ts", 1), ("step", 1),
-        ],
-        "name": "ix_episodes_correlation",
-    },
-    {
-        "collection": EPISODES,
-        "keys": [("ts", 1)],
-        "name": "ix_episodes_ttl",
-        "kwargs": {"expireAfterSeconds": EPISODES_DEFAULT_TTL_SECONDS},
-    },
-    # -- semantic_cache --
-    {
-        "collection": SEMANTIC_CACHE,
-        "keys": [("created_at", 1)],
-        "name": "ix_cache_ttl",
-        "kwargs": {"expireAfterSeconds": 3600},
-    },
-    # -- audit_log --
-    {
-        "collection": AUDIT_LOG,
-        "keys": [("user_id", 1), ("timestamp", -1)],
-        "name": "ix_audit_user_timestamp",
-    },
-    {
-        "collection": AUDIT_LOG,
-        "keys": [("timestamp", 1)],
-        "name": "ix_audit_ttl",
-        "kwargs": {"expireAfterSeconds": 365 * 86400},
-    },
-    # -- rate_limits --
-    {
-        "collection": RATE_LIMITS,
-        "keys": [("timestamp", 1)],
-        "name": "ix_rate_limits_ttl",
-        "kwargs": {"expireAfterSeconds": 86400},  # 24 hours
-    },
-    {
-        "collection": RATE_LIMITS,
-        "keys": [("user_id", 1), ("operation", 1), ("timestamp", -1)],
-        "name": "ix_rate_limits_user_op",
-    },
-    # -- governance_profiles --
-    {
-        "collection": GOVERNANCE_PROFILES,
-        "keys": [("role", 1)],
-        "name": "ix_governance_profiles_role",
-        "kwargs": {"unique": True},
-    },
-    # -- prompts --
-    {
-        "collection": PROMPTS,
-        "keys": [("name", 1), ("version", -1)],
-        "name": "ix_prompts_name_version",
-        "kwargs": {"unique": True},
-    },
-    # -- decisions --
-    {
-        "collection": DECISIONS,
-        "keys": [("expires_at", 1)],
-        "name": "ix_decisions_ttl",
-        "kwargs": {"expireAfterSeconds": 0},
-    },
-    {
-        "collection": DECISIONS,
-        "keys": [("user_id", 1), ("key", 1)],
-        "name": "ix_decisions_user_key",
-        "kwargs": {"unique": True},
-    },
-]
+        {
+            "collection": MEMORIES,
+            "keys": [("user_id", 1), ("tier", 1), ("created_at", -1)],
+            "name": "ix_memories_user_tier_created",
+            "kwargs": {"partialFilterExpression": {"deleted_at": None}},
+        },
+        {
+            "collection": MEMORIES,
+            "keys": [("user_id", 1), ("conversation_id", 1)],
+            "name": "ix_memories_conversation",
+            "kwargs": {"partialFilterExpression": {"deleted_at": None}},
+        },
+        {
+            "collection": MEMORIES,
+            # The enrichment worker's claim query: equality on `enrichment_status`, an
+            # `$or` over `enrichment_claimed_at`, then the `created_at` sort that makes
+            # the queue FIFO.
+            #
+            # `enrichment_claimed_at` sits between them because a claim runs on every
+            # poll of a busy queue and the alternative is scanning every pending
+            # document to find the unclaimed ones. It cannot serve the `$or` as an index
+            # bound — MongoDB will scan the `enrichment_status` prefix and filter — but
+            # it keeps the field in the index, so the filter is applied without fetching
+            # each document.
+            "keys": [
+                ("enrichment_status", 1),
+                ("enrichment_claimed_at", 1),
+                ("created_at", 1),
+            ],
+            "name": "ix_memories_enrichment_queue",
+        },
+        {
+            "collection": MEMORIES,
+            "keys": [("deleted_at", 1)],
+            "name": "ix_memories_deleted_at_ttl",
+            "kwargs": {
+                "expireAfterSeconds": soft_delete_ttl,
+                "partialFilterExpression": {"deleted_at": {"$type": "date"}},
+            },
+        },
+        # -- episodes --
+        # Thread replay; the primary read path for "show me this conversation's
+        # turns". The key order mirrors `get_thread` exactly: equality on
+        # (user_id, thread_id), then the sort on (ts, step).
+        #
+        # `user_id` leads because every episodic read is tenant-scoped — a thread id
+        # is not a capability — so an index keyed on thread_id alone leaves the
+        # isolation filter as a residual predicate the server applies after the scan.
+        # `ts` precedes `step` because that is the sort `get_thread` issues, and the
+        # sort order is itself deliberate: `step` can be null when the durable counter
+        # failed, and null sorts below every number, so leading on it would relocate a
+        # turn to the front of the replay rather than keep it in place. See
+        # `EpisodicService.get_thread`.
+        {
+            "collection": EPISODES,
+            "keys": [("user_id", 1), ("thread_id", 1), ("ts", 1), ("step", 1)],
+            "name": "ix_episodes_thread_step",
+        },
+        {
+            "collection": EPISODES,
+            "keys": [("user_id", 1), ("ts", -1)],
+            "name": "ix_episodes_user_ts",
+        },
+        {
+            "collection": EPISODES,
+            "keys": [("thread_id", 1), ("ts", -1)],
+            "name": "ix_episodes_thread_ts",
+        },
+        # Join a logged turn back to a trace or support ticket. Same shape as the
+        # thread index: equality prefix, then the (ts, step) sort the read issues.
+        {
+            "collection": EPISODES,
+            "keys": [
+                ("user_id", 1), ("correlation_id", 1), ("ts", 1), ("step", 1),
+            ],
+            "name": "ix_episodes_correlation",
+        },
+        {
+            "collection": EPISODES,
+            "keys": [("ts", 1)],
+            "name": "ix_episodes_ttl",
+            "kwargs": {"expireAfterSeconds": episodes_ttl},
+        },
+        # -- semantic_cache --
+        {
+            "collection": SEMANTIC_CACHE,
+            "keys": [("created_at", 1)],
+            "name": "ix_cache_ttl",
+            "kwargs": {"expireAfterSeconds": cache_ttl},
+        },
+        # -- audit_log --
+        {
+            "collection": AUDIT_LOG,
+            "keys": [("user_id", 1), ("timestamp", -1)],
+            "name": "ix_audit_user_timestamp",
+        },
+        {
+            "collection": AUDIT_LOG,
+            "keys": [("timestamp", 1)],
+            "name": "ix_audit_ttl",
+            "kwargs": {"expireAfterSeconds": audit_ttl},
+        },
+        # -- rate_limits --
+        {
+            "collection": RATE_LIMITS,
+            "keys": [("timestamp", 1)],
+            "name": "ix_rate_limits_ttl",
+            "kwargs": {"expireAfterSeconds": rate_limit_ttl},
+        },
+        {
+            "collection": RATE_LIMITS,
+            "keys": [("user_id", 1), ("operation", 1), ("timestamp", -1)],
+            "name": "ix_rate_limits_user_op",
+        },
+        # -- governance_profiles --
+        {
+            "collection": GOVERNANCE_PROFILES,
+            "keys": [("role", 1)],
+            "name": "ix_governance_profiles_role",
+            "kwargs": {"unique": True},
+        },
+        # -- prompts --
+        {
+            "collection": PROMPTS,
+            "keys": [("name", 1), ("version", -1)],
+            "name": "ix_prompts_name_version",
+            "kwargs": {"unique": True},
+        },
+        # -- decisions --
+        {
+            "collection": DECISIONS,
+            "keys": [("expires_at", 1)],
+            "name": "ix_decisions_ttl",
+            "kwargs": {"expireAfterSeconds": 0},
+        },
+        {
+            "collection": DECISIONS,
+            "keys": [("user_id", 1), ("key", 1)],
+            "name": "ix_decisions_user_key",
+            "kwargs": {"unique": True},
+        },
+    ]
+
+
+# The definitions at their defaults. Reconciliation reads
+# ``get_standard_indexes(config)``; this constant is the reference copy, and what
+# a caller with no config in hand gets.
+STANDARD_INDEXES: list[dict] = get_standard_indexes()
+
 
 # ─── Atlas Search / Vector Search Indexes ────────────────────────
 #

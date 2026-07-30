@@ -245,9 +245,13 @@ manage indexes yourself:
    `token` type, not `string`.** A `string` field is analyzed, so exact
    equality quietly stops matching.
 
-Retention is tunable at runtime. `set_activity_retention` issues a `collMod` on
-the existing TTL index rather than dropping and rebuilding it, and falls back to
-`create_index` if `collMod` is unavailable.
+Retention is configured, and reconciled to the configuration on every startup —
+see [Retention](#retention) below. `set_activity_retention` is the runtime
+override for episodic retention specifically: it issues a `collMod` on the
+existing TTL index rather than dropping and rebuilding it (falling back to
+`create_index` where `collMod` is unavailable), which makes it cheap but not
+durable — the next startup reconciles the index back to
+`episodic_retention_days`.
 
 ## Configuration
 
@@ -262,6 +266,10 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `embedding_dimension` | `1536` | Auto-aligned to the model for Voyage while left at the default; a mismatch raises at startup |
 | `allow_embedding_dimension_change` | `False` | Startup refuses when the dimension changed and existing vectors would be orphaned — see below |
 | `stm_ttl_hours` | `24` | Short-term retention |
+| `soft_delete_purge_days` | `30` | How long a soft-deleted memory survives before purge |
+| `episodic_retention_days` | `30` | Turn-log retention — see [Retention](#retention) |
+| `cache_ttl_seconds` | `3600` | Semantic-cache entry lifetime |
+| `audit_retention_days` | `365` | Audit-log retention |
 | `episodic_enabled` | `True` | `False` accepts and discards, so callers need no conditionals |
 | `episodic_queue_size` | `1000` | Bounded; full → drop oldest |
 | `episodic_batch_size` | `20` | Turns per `insert_many` |
@@ -271,6 +279,37 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `await_search_indexes` | `False` | Set `True` in short-lived scripts, or the process can exit before indexes are queryable |
 | `importance_scorer` | `llm` | `local` scores in-process instead of calling the LLM |
 | `importance_model_path` | — | Explicit coefficient artifact; unset auto-selects a bundled one |
+
+### Retention
+
+Every retention duration is a config value that reaches the index enforcing it.
+Startup reconciles each TTL index to the configuration, so changing a value and
+restarting rebuilds the index at the new duration:
+
+| Setting | Default | Expires |
+|---|---|---|
+| `soft_delete_purge_days` | `30` | Soft-deleted memories, permanently |
+| `episodic_retention_days` | `30` | Logged turns |
+| `cache_ttl_seconds` | `3600` | Semantic-cache entries |
+| `audit_retention_days` | `365` | Audit records |
+| `rate_limit_retention_seconds` | `86400` | Spent rate-limit window counters |
+
+**Shortening a retention deletes data.** The rebuilt index applies to documents
+already stored, so anything past the new cutoff is expired by Atlas's TTL monitor
+within a minute or two of the restart — not at the next write, and with no
+confirmation step. Check the value before restarting a deployment whose history
+matters. Lengthening one is safe; it only stops future expiry, and nothing
+already deleted comes back.
+
+`rate_limit_retention_seconds` is raised to `rate_limit_window_seconds` when that
+is longer. A counter *is* the enforcement state, so expiring it inside its own
+window would let a caller who had exhausted the limit start a fresh count.
+
+Long-term retention works differently: it is per-tier, applied as a per-document
+`expires_at` at write time rather than as one collection-wide duration, via
+`ltm_retention_critical_days` / `_reference_days` / `_standard_days` /
+`_temporary_days`. Changing those affects memories written afterwards — the
+`expires_at` already stamped on existing documents is not rewritten.
 
 ### Changing the embedding model later
 
