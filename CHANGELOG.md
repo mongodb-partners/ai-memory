@@ -37,6 +37,51 @@ imports the scientific stack.
   embedding head, and much better than returning a constant.
 - `training` optional-dependency group for the offline trainer. Deliberately not
   part of `all`.
+- `scripts/train_importance.py` — the offline trainer, with four label sources that
+  compose: the locomo/longmemeval long-term-memory benchmarks, distillation from the
+  shipped `assess_importance`, a synthetic in-domain set spanning the scale, and
+  `--source mongodb` for retraining on a deployment's own access and consolidation
+  signals. `LogisticRegression` and `Ridge` are fitted side by side against two
+  constant baselines, and every metric is computed through the *runtime's* arithmetic
+  — the library's own `logistic` and clamp, not sklearn's `predict` — so a printed
+  number is one the served scorer reproduces.
+
+**Only the `lexical` artifact ships trained.** `titan-1536` and `voyage-3-1024` are
+zero-coefficient placeholders that score every memory 0.5 — above the forgetting
+threshold, below the promotion threshold — so enabling `IMPORTANCE_SCORER=local` on
+those two triples does not approximate the LLM, it turns importance-based promotion
+off. Untrained on purpose: 1024 coefficients against ~900 usable labeled rows, with
+the learning curve still climbing and no plateau in sight. A trained-looking artifact
+at that ratio would be less honest than an obvious placeholder. Each file says so in
+its `training.note`, and the README says which triples are affected.
+
+**The benchmarks are collected but carry zero weight by default**, and that default
+is a measurement rather than a preference. Their labels mark a turn positive when a
+later question cited it as evidence, and the questions are time-anchored, so
+`yesterday` carries a 21.7× lift toward positives and `today` 3.2×. Every nonzero
+weight from 0.1 to 2.0 trains the `temporal` feature strongly positive and yields a
+model that promotes *"let's pick this up after lunch, I'm busy today and tomorrow"*
+(0.775, above the promotion threshold) over *"our policy is that customer data never
+leaves the EU region"* (0.435). The stage is kept rather than deleted because the
+confound is specific to seven lexical features that can only see the *word*
+`yesterday`; an embedding head can tell "we deployed yesterday" from "call me
+tomorrow", so the grounded-utility signal is still worth having there.
+
+**A discrimination gate, because the calibration metrics cannot catch this.** The
+trainer refuses to write a model that ranks any of four expiring task-chatter cases
+above any of four standing-preference cases, held out by construction, regardless of
+aggregate metrics. Not redundant: it rejected a candidate scoring 0.85 on the
+composite, and the shipped model beats the hardest constant baseline by 0.0005 on
+composite while separating the held-out cases by 0.0218. Calibration is satisfiable
+by a model that predicts the training mean for everything and discriminates nothing,
+which is precisely the model a threshold-based consolidator must not be handed.
+
+Two limits are documented rather than papered over. The seven lexical features cannot
+separate 31.5% of the label variance — measured as rows sharing a feature vector while
+carrying different labels — and the learning curve is flat past ~460 rows, so a larger
+training set will not improve this artifact; the ceiling is the feature space, not the
+sample count. And `assess_importance` returns a 1-10 integer, so distilled labels take
+only 9 distinct values: the local scorer cannot be more granular than its teacher.
 
 **Calibration matters more than ranking here.** Consolidation compares importance
 against *absolute* thresholds — below `forgetting_score_threshold` (0.1) a memory

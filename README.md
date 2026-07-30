@@ -285,16 +285,51 @@ pure Python.
 
 Which artifact loads, when `importance_model_path` is unset:
 
-| `embedding_provider` / model / dimension | Artifact |
-|---|---|
-| `bedrock` / `amazon.titan-embed-text-v1` / 1536 | `titan-1536` |
-| `voyage` / `voyage-3` / 1024 | `voyage-3-1024` |
-| anything else | `lexical` |
+| `embedding_provider` / model / dimension | Artifact | State |
+|---|---|---|
+| `bedrock` / `amazon.titan-embed-text-v1` / 1536 | `titan-1536` | **untrained placeholder** |
+| `voyage` / `voyage-3` / 1024 | `voyage-3-1024` | **untrained placeholder** |
+| anything else | `lexical` | trained |
 
 Selection is on the whole triple, not the provider: `voyage-3` emits 1024
 dimensions and `voyage-3-lite` emits 512, and coefficients are positional. The
 `lexical` fallback scores seven bounded text features instead of the embedding —
 weaker than a trained embedding head, and much better than a constant.
+
+**Only `lexical` ships trained.** Both embedding artifacts are zero-coefficient
+placeholders: they score every memory 0.5, which sits above the forgetting
+threshold and below the promotion threshold, so `IMPORTANCE_SCORER=local` on Titan
+1536 or Voyage-3 1024 does not approximate the LLM — it quietly turns
+importance-based promotion off. They are untrained on purpose. The embedding head
+has 1024 coefficients and the available label volume is ~900 usable rows, where the
+learning curve is still climbing with no plateau; a trained-looking artifact at that
+ratio would be less honest than an obvious placeholder. Train one with
+`--space embedding` against your own embedder before relying on it, or stay on the
+LLM scorer for those two triples.
+
+Because selection is on the whole triple, an embedder that is not in the table —
+`voyage-4` at 1024, for instance — falls through to `lexical`, which is the trained
+artifact. That fallback is the better outcome today, but it is a fallthrough rather
+than a decision, so check the log line at startup to see which artifact loaded.
+
+The lexical artifact is trained on LLM-distilled labels only. The two long-term
+memory benchmarks (locomo, longmemeval) are collected by the trainer but carry zero
+weight in the fit by default, and that default is a measurement: their labels mark a
+turn positive when a later question cited it as evidence, and the questions are
+time-anchored, so `yesterday` carries a 21.7× lift toward positives. Any nonzero
+weight trains the `temporal` feature strongly positive and produces a model that
+promotes *"let's pick this up after lunch, I'm busy today and tomorrow"* (0.775)
+over *"our policy is that customer data never leaves the EU region"* (0.435). The
+shipped artifact scores those 0.377 and 0.719 respectively. Coefficient signs are
+readable in the file and match the design: `preference` and `identity` positive,
+`temporal` and `interrogative` negative.
+
+Two limits worth knowing before you tune it. The seven lexical features cannot
+separate 31.5% of the label variance — measured, as rows sharing a feature vector
+while carrying different labels — and the learning curve is flat past ~460 rows, so
+a larger training set will not improve this artifact. And `assess_importance` returns
+a 1-10 integer, so the distilled labels take only 9 distinct values; the local
+scorer cannot be more granular than its teacher.
 
 **Check calibration before switching a production deployment.** Consolidation
 compares importance against *absolute* thresholds: below `forgetting_score_threshold`
@@ -314,6 +349,19 @@ not ask for.
 Retraining is offline and optional: `pip install 'agent-memory[training]'` then
 `python scripts/train_importance.py --help`. Nothing under `agent_memory/` imports
 scikit-learn or numpy, and a packaging test enforces it.
+
+The trainer refuses to write a model that ranks expiring task chatter above standing
+preferences, on eight held-out cases, regardless of how good its aggregate metrics
+look. That gate is not redundant with the metrics — it rejected a candidate scoring
+0.85 on the composite. Calibration metrics are satisfiable by a model that predicts
+the training mean for every input and discriminates nothing, which is exactly the
+model a threshold-based consolidator must not be given.
+
+`--source mongodb` is the path past the shipped artifact: it labels your own memories
+from `access_count`, age, and whether consolidation soft-deleted them. No LLM calls,
+and unlike the benchmarks it is drawn from your deployment's own distribution. It
+needs a store with real usage history, so it is worth revisiting once memories have
+been recalled a few times rather than on day one.
 
 ### Two Voyage endpoints, and the key decides which
 
