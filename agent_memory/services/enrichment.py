@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+from pymongo import ReturnDocument
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import MIN_SUMMARIZABLE_CHARS, is_usable_summary
@@ -59,21 +61,78 @@ class EnrichmentWorker:
         self._running = False
 
     async def process_batch(self) -> int:
-        """Find and process one batch of pending/merge_pending memories. Returns count processed."""
-        cursor = self.memories.find(
-            {"enrichment_status": {"$in": ["pending", "merge_pending"]}},
-            sort=[("created_at", 1)],
-            limit=self.config.enrichment_batch_size,
-        )
-        pending = await cursor.to_list(None)
+        """Claim and process one batch of pending memories. Returns count claimed.
 
-        if not pending:
+        Every document is claimed individually with ``find_one_and_update`` before
+        any work starts. The previous ``find`` + ``to_list`` selected work without
+        marking it, so two processes polling the same collection read the same
+        documents and both enriched them: two LLM bills per memory, two evolution
+        passes against the same content, and a last-writer-wins race on the
+        resulting ``importance`` and ``summary``. Nothing in the deployment
+        prevented that — ``TRANSPORT=rest`` and ``TRANSPORT=mcp`` each run a worker,
+        and running both is the documented way to serve both shells.
+
+        Claiming one at a time rather than with a bulk ``update_many`` + re-read is
+        deliberate: ``find_one_and_update`` returns *the document this worker won*,
+        so a claim either succeeds and yields work or fails and yields nothing.
+        A bulk update would report how many documents were claimed but not which,
+        leaving a second query to guess at them.
+        """
+        claimed = []
+        for _ in range(self.config.enrichment_batch_size):
+            memory = await self._claim_one()
+            if memory is None:
+                break
+            claimed.append(memory)
+
+        if not claimed:
             return 0
 
-        tasks = [self._enrich_with_semaphore(memory) for memory in pending]
+        tasks = [self._enrich_with_semaphore(memory) for memory in claimed]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        return len(pending)
+        return len(claimed)
+
+    async def _claim_one(self) -> dict | None:
+        """Atomically take ownership of one pending memory, or return None.
+
+        The filter is the interesting part. A document is claimable when it is
+        pending *and* either unclaimed or holding an expired lease:
+
+        * ``enrichment_claimed_at`` absent covers every document written before this
+          field existed, and every document written by ``store_ltm``, which does not
+          set it. ``$exists: false`` and ``null`` are both matched via ``$eq: None``
+          — MongoDB treats a missing field as null for equality, which is exactly
+          the semantics wanted here.
+        * A lease older than ``enrichment_lease_seconds`` is reclaimable, because the
+          alternative is that a worker crashing mid-call strands the document
+          forever. This is the one path where two workers *can* touch the same
+          memory, and it is bounded: it requires the first worker to still be alive
+          and still working after the lease expired.
+
+        The claim writes a fresh timestamp, so a worker holding a claim it has not
+        finished cannot have its work taken for another full lease period.
+        """
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=self.config.enrichment_lease_seconds)
+        return await self.memories.find_one_and_update(
+            {
+                "enrichment_status": {"$in": ["pending", "merge_pending"]},
+                "$or": [
+                    {"enrichment_claimed_at": {"$eq": None}},
+                    {"enrichment_claimed_at": {"$lt": cutoff}},
+                ],
+            },
+            {"$set": {"enrichment_claimed_at": now}},
+            sort=[("created_at", 1)],
+            # The claim's own write must not be what this worker enriches: the
+            # document is read for its content, and `after` would return one whose
+            # `enrichment_claimed_at` is set while every other field is unchanged.
+            # Either is correct here — `before` is chosen because the returned dict
+            # is passed straight to `_enrich_memory`, which reads `content`,
+            # `embedding`, and `enrichment_status`, none of which the claim touches.
+            return_document=ReturnDocument.BEFORE,
+        )
 
     async def _enrich_with_semaphore(self, memory: dict) -> None:
         async with self._semaphore:
@@ -109,7 +168,14 @@ class EnrichmentWorker:
                         "enrichment_status": status,
                         "enrichment_retries": new_retries,
                         "updated_at": datetime.now(UTC),
-                    }
+                    },
+                    # Release the claim on the way out. Without this the document
+                    # keeps this worker's lease while sitting in `pending`, so the
+                    # retry the counter was just incremented for could not happen
+                    # until the lease expired — turning a transient LLM error into
+                    # a lease-length delay for no reason. The retry counter, not the
+                    # claim, is what bounds repeated failures.
+                    "$unset": {"enrichment_claimed_at": ""},
                 },
             )
 
@@ -165,7 +231,15 @@ class EnrichmentWorker:
         if summary is not None:
             update["summary"] = summary
 
-        await self.memories.update_one({"_id": memory_id}, {"$set": update})
+        # `$unset` on completion as well as on failure. A `complete` document with a
+        # stale claim is not re-enriched — the status filter excludes it — but it
+        # would leave the field as a permanent, meaningless artifact on most
+        # documents in the collection, and `consolidation` puts memories back into
+        # `pending` to be re-enriched, which the leftover lease would then delay.
+        await self.memories.update_one(
+            {"_id": memory_id},
+            {"$set": update, "$unset": {"enrichment_claimed_at": ""}},
+        )
 
     async def _summarize(self, content: str) -> str | None:
         """Summarize `content`, or return None when no usable summary exists.
@@ -223,7 +297,8 @@ class EnrichmentWorker:
                     "$set": {
                         "enrichment_status": "complete",
                         "updated_at": datetime.now(UTC),
-                    }
+                    },
+                    "$unset": {"enrichment_claimed_at": ""},
                 },
             )
             return
@@ -278,7 +353,8 @@ class EnrichmentWorker:
                         memory.get("importance", 0.5),
                     ),
                     "updated_at": now,
-                }
+                },
+                "$unset": {"enrichment_claimed_at": ""},
             },
         )
 

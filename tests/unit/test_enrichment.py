@@ -1,7 +1,7 @@
 """Tests for EnrichmentWorker."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 from bson import ObjectId
 
@@ -79,9 +79,7 @@ class TestEnrichmentWorkerProcessBatch:
         memory_svc = _make_memory_service()
 
         memory = _make_pending_memory()
-        mock_cursor = MagicMock()
-        mock_cursor.to_list = AsyncMock(return_value=[memory])
-        col.find.return_value = mock_cursor
+        col.find_one_and_update = AsyncMock(side_effect=[memory, None])
 
         worker = EnrichmentWorker(col, config, providers, memory_svc)
         count = await worker.process_batch()
@@ -95,14 +93,24 @@ class TestEnrichmentWorkerProcessBatch:
         assert update_set["summary"] == "A test summary"
 
 
-def _make_col_with_cursor(memories: list[dict]):
-    """Create a MagicMock collection with find() returning a cursor."""
+def _make_col_with_queue(memories: list[dict]):
+    """A collection whose claim call hands out `memories`, then reports empty.
+
+    The worker claims one document per `find_one_and_update` and stops at the
+    first `None`, so the queue is the list followed by a sentinel. A mock that
+    returned the same document forever would loop to `enrichment_batch_size`
+    and enrich one memory fifty times.
+    """
     col = MagicMock()
     col.update_one = AsyncMock()
-    mock_cursor = MagicMock()
-    mock_cursor.to_list = AsyncMock(return_value=memories)
-    col.find.return_value = mock_cursor
+    col.find_one_and_update = AsyncMock(side_effect=[*memories, None])
     return col
+
+
+#: The name this helper had when the worker selected work with `find`. Kept as an
+#: alias so the diff that introduced claiming does not also rewrite forty call
+#: sites — those tests are the evidence that claiming changed nothing else.
+_make_col_with_cursor = _make_col_with_queue
 
 
 class TestEnrichmentWorkerFailure:
@@ -268,10 +276,8 @@ class TestEnrichmentWorkerMergePending:
 
         col = MagicMock()
         col.update_one = AsyncMock()
-        # find() returns the merge_pending memory
-        mock_cursor = MagicMock()
-        mock_cursor.to_list = AsyncMock(return_value=[merge_memory])
-        col.find.return_value = mock_cursor
+        # the claim hands out the merge_pending memory, then the queue is empty
+        col.find_one_and_update = AsyncMock(side_effect=[merge_memory, None])
         # find_one() returns the merge target
         col.find_one = AsyncMock(return_value={
             "_id": merge_target_id,
@@ -323,9 +329,7 @@ class TestEnrichmentWorkerMergePending:
 
         col = MagicMock()
         col.update_one = AsyncMock()
-        mock_cursor = MagicMock()
-        mock_cursor.to_list = AsyncMock(return_value=[merge_memory])
-        col.find.return_value = mock_cursor
+        col.find_one_and_update = AsyncMock(side_effect=[merge_memory, None])
         col.find_one = AsyncMock(return_value={
             "_id": merge_target_id,
             "content": "existing content",
@@ -392,9 +396,7 @@ class TestEnrichmentWorkerRunLoop:
     async def test_run_breaks_on_cancelled_error_from_process_batch(self):
         """CancelledError raised inside process_batch triggers the break path."""
         col = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.to_list = AsyncMock(side_effect=asyncio.CancelledError)
-        col.find.return_value = mock_cursor
+        col.find_one_and_update = AsyncMock(side_effect=asyncio.CancelledError)
         config = _make_config(enrichment_interval_seconds=0)
         providers = _make_providers()
         memory_svc = _make_memory_service()
@@ -408,9 +410,7 @@ class TestEnrichmentWorkerRunLoop:
 
     async def test_run_handles_exception_in_batch(self):
         col = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.to_list = AsyncMock(side_effect=Exception("db error"))
-        col.find.return_value = mock_cursor
+        col.find_one_and_update = AsyncMock(side_effect=Exception("db error"))
         config = _make_config(enrichment_interval_seconds=0)
         providers = _make_providers()
         memory_svc = _make_memory_service()
@@ -450,9 +450,7 @@ class TestEnrichmentWorkerMergeTargetNotFound:
 
         col = MagicMock()
         col.update_one = AsyncMock()
-        mock_cursor = MagicMock()
-        mock_cursor.to_list = AsyncMock(return_value=[merge_memory])
-        col.find.return_value = mock_cursor
+        col.find_one_and_update = AsyncMock(side_effect=[merge_memory, None])
         col.find_one = AsyncMock(return_value=None)  # Target deleted
 
         config = _make_config()
@@ -619,3 +617,360 @@ class TestLLMPathUnchanged:
         args, kwargs = providers.llm.assess_importance.await_args
         assert args == (LONG_CONTENT,)
         assert kwargs == {}
+
+
+# ── Atomic claiming ─────────────────────────────────────────────────────────────
+
+
+class _ClaimableCollection:
+    """A collection that models `find_one_and_update` as a real atomic operation.
+
+    Written as a fake rather than a mock because what is under test *is* the
+    atomicity. A `MagicMock` returns whatever it was told to return, so two
+    workers polling it both "win" every document and the test passes whether or
+    not the production code claims anything — which is precisely the bug.
+
+    Here, the matched document is mutated in place before the call returns, so a
+    second caller sees the claim the first one made. That is the property MongoDB
+    guarantees for a single-document update and the only one this fix relies on.
+    """
+
+    def __init__(self, docs: list[dict], now: datetime | None = None) -> None:
+        self.docs = docs
+        self.now = now or datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        self.claim_filters: list[dict] = []
+        self.updates: list[tuple[dict, dict]] = []
+
+    def _matches(self, doc: dict, query: dict) -> bool:
+        for key, cond in query.items():
+            if key == "$or":
+                if not any(self._matches(doc, branch) for branch in cond):
+                    return False
+                continue
+            value = doc.get(key)
+            if isinstance(cond, dict):
+                for op, operand in cond.items():
+                    if op == "$in" and value not in operand:
+                        return False
+                    if op == "$eq" and value != operand:
+                        return False
+                    if op == "$lt" and not (value is not None and value < operand):
+                        return False
+                    if op == "$exists" and (value is not None) != operand:
+                        return False
+            elif value != cond:
+                return False
+        return True
+
+    async def find_one_and_update(
+        self, query: dict, update: dict, sort=None, return_document=None
+    ):
+        self.claim_filters.append(query)
+        candidates = [d for d in self.docs if self._matches(d, query)]
+        if sort:
+            for key, direction in reversed(sort):
+                candidates.sort(
+                    key=lambda d: d.get(key) or 0, reverse=direction < 0
+                )
+        if not candidates:
+            return None
+        doc = candidates[0]
+        before = dict(doc)
+        doc.update(update.get("$set", {}))
+        return before
+
+    async def update_one(self, query: dict, update: dict) -> None:
+        self.updates.append((query, update))
+        for doc in self.docs:
+            if self._matches(doc, query):
+                doc.update(update.get("$set", {}))
+                for field in update.get("$unset", {}):
+                    doc.pop(field, None)
+                break
+
+    async def find_one(self, query: dict):
+        for doc in self.docs:
+            if self._matches(doc, query):
+                return doc
+        return None
+
+    def find(self, query: dict, sort=None, limit=None):
+        """Non-atomic selection — deliberately supported though production no
+        longer calls it.
+
+        Without this, reverting the worker to a plain `find` would fail the tests
+        below with `AttributeError` rather than on their assertions, which proves
+        only that the method name changed. With it, the concurrency test fails
+        because both workers really do win the same document — the actual defect.
+        """
+        matched = [d for d in self.docs if self._matches(d, query)]
+        if sort:
+            for key, direction in reversed(sort):
+                matched.sort(key=lambda d: d.get(key) or 0, reverse=direction < 0)
+        if limit:
+            matched = matched[:limit]
+
+        class _Cursor:
+            async def to_list(self, _n=None):
+                return matched
+
+        return _Cursor()
+
+
+def _claimable(**overrides) -> dict:
+    doc = _make_pending_memory()
+    doc.update(overrides)
+    return doc
+
+
+class TestWorkIsClaimedBeforeItIsDone:
+    """Two workers on one queue must not both enrich the same memory.
+
+    `TRANSPORT=rest` and `TRANSPORT=mcp` are separate processes, each running a
+    worker, and running both is the documented way to serve both shells. Before
+    claiming, they polled the same collection with a plain `find` and both got the
+    same documents: two LLM bills per memory, two evolution passes over the same
+    content, and a last-writer-wins race on the resulting importance and summary.
+    """
+
+    async def test_two_workers_do_not_claim_the_same_memory(self):
+        col = _ClaimableCollection([_claimable(), _claimable()])
+        config = _make_config(enrichment_batch_size=10)
+        worker_a = EnrichmentWorker(col, config, _make_providers(), _make_memory_service())
+        worker_b = EnrichmentWorker(col, config, _make_providers(), _make_memory_service())
+
+        # Claims only — not full enrichment — so the assertion is about who won
+        # each document rather than about what enrichment then did with it.
+        claims_a = [await worker_a._claim_one() for _ in range(2)]
+        claims_b = [await worker_b._claim_one() for _ in range(2)]
+
+        won_a = {c["_id"] for c in claims_a if c}
+        won_b = {c["_id"] for c in claims_b if c}
+        assert len(won_a) == 2, "first worker should claim both available memories"
+        assert won_b == set(), (
+            "second worker claimed memories the first already owns — this is the "
+            "duplicate-enrichment bug the claim exists to prevent"
+        )
+
+    async def test_a_claimed_memory_is_not_reclaimed_within_the_lease(self):
+        doc = _claimable()
+        col = _ClaimableCollection([doc])
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service()
+        )
+        assert await worker._claim_one() is not None
+        assert await worker._claim_one() is None
+
+    async def test_the_claim_stamps_the_document(self):
+        doc = _claimable()
+        col = _ClaimableCollection([doc])
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service()
+        )
+        await worker._claim_one()
+        assert isinstance(doc["enrichment_claimed_at"], datetime)
+
+    async def test_the_claim_returns_the_document_as_it_was(self):
+        """`ReturnDocument.BEFORE`: the caller needs the memory's content, and the
+        claim's own write is the only difference between the two versions."""
+        doc = _claimable()
+        col = _ClaimableCollection([doc])
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service()
+        )
+        claimed = await worker._claim_one()
+        assert claimed["content"] == LONG_CONTENT
+        assert claimed["enrichment_status"] == "pending"
+
+    async def test_process_batch_stops_at_the_first_empty_claim(self):
+        """The batch size is a ceiling, not a target. A queue of two must not cost
+        fifty round trips."""
+        col = _ClaimableCollection([_claimable(), _claimable()])
+        worker = EnrichmentWorker(
+            col, _make_config(enrichment_batch_size=50),
+            _make_providers(), _make_memory_service(),
+        )
+        count = await worker.process_batch()
+        assert count == 2
+        assert len(col.claim_filters) == 3, (
+            "expected two winning claims plus one that finds the queue empty"
+        )
+
+    async def test_an_empty_queue_costs_one_claim(self):
+        col = _ClaimableCollection([])
+        worker = EnrichmentWorker(
+            col, _make_config(enrichment_batch_size=50),
+            _make_providers(), _make_memory_service(),
+        )
+        assert await worker.process_batch() == 0
+        assert len(col.claim_filters) == 1
+
+    async def test_merge_pending_is_claimed_too(self):
+        """Both queue states go through the same claim. `merge_pending` is the more
+        expensive one to duplicate — it writes merged content and soft-deletes a
+        target, so two workers racing it can delete two memories for one merge."""
+        col = _ClaimableCollection([_claimable(enrichment_status="merge_pending")])
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service()
+        )
+        claimed = await worker._claim_one()
+        assert claimed is not None
+        assert claimed["enrichment_status"] == "merge_pending"
+
+    async def test_terminal_states_are_not_claimed(self):
+        col = _ClaimableCollection([
+            _claimable(enrichment_status="complete"),
+            _claimable(enrichment_status="failed"),
+            _claimable(enrichment_status="not_applicable"),
+        ])
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service()
+        )
+        assert await worker._claim_one() is None
+
+
+class TestAStrandedClaimIsRecoverable:
+    """A lease, not a lock.
+
+    A worker that is SIGKILLed mid-LLM-call leaves its claim on the document. With
+    a plain lock that memory is never enriched again — it sits in `pending`
+    forever, invisible except as a number in the admin status breakdown. The
+    expiry is what makes losing a worker a delay rather than data left unenriched.
+    """
+
+    async def test_an_expired_lease_can_be_taken_over(self):
+        stale = datetime.now(timezone.utc) - timedelta(seconds=601)
+        col = _ClaimableCollection([_claimable(enrichment_claimed_at=stale)])
+        worker = EnrichmentWorker(
+            col, _make_config(enrichment_lease_seconds=300),
+            _make_providers(), _make_memory_service(),
+        )
+        assert await worker._claim_one() is not None, (
+            "a memory whose owner died is stranded forever unless the claim expires"
+        )
+
+    async def test_a_live_lease_is_left_alone(self):
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=10)
+        col = _ClaimableCollection([_claimable(enrichment_claimed_at=fresh)])
+        worker = EnrichmentWorker(
+            col, _make_config(enrichment_lease_seconds=300),
+            _make_providers(), _make_memory_service(),
+        )
+        assert await worker._claim_one() is None
+
+    async def test_the_lease_length_is_configurable(self):
+        """An operator whose provider is slow needs a longer lease; the alternative
+        is a second worker starting work the first has not finished."""
+        claimed_at = datetime.now(timezone.utc) - timedelta(seconds=400)
+        long_lease = _ClaimableCollection([_claimable(enrichment_claimed_at=claimed_at)])
+        short_lease = _ClaimableCollection([_claimable(enrichment_claimed_at=claimed_at)])
+
+        patient = EnrichmentWorker(
+            long_lease, _make_config(enrichment_lease_seconds=900),
+            _make_providers(), _make_memory_service(),
+        )
+        impatient = EnrichmentWorker(
+            short_lease, _make_config(enrichment_lease_seconds=60),
+            _make_providers(), _make_memory_service(),
+        )
+        assert await patient._claim_one() is None
+        assert await impatient._claim_one() is not None
+
+    async def test_a_document_predating_the_field_is_claimable(self):
+        """Every memory written before this change, and every one written by
+        `store_ltm`, has no `enrichment_claimed_at` at all. Treating a missing
+        field as "claimed" would freeze the existing queue on upgrade."""
+        doc = _claimable()
+        doc.pop("enrichment_claimed_at", None)
+        col = _ClaimableCollection([doc])
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service()
+        )
+        assert await worker._claim_one() is not None
+
+
+class TestTheClaimIsReleasedWhenWorkEnds:
+    """A finished document must not keep its lease.
+
+    `consolidation` puts memories back into `pending` to be re-enriched. A
+    leftover claim would make that re-enrichment wait out the lease for no
+    reason, and on failure it would delay the retry the counter was just
+    incremented for.
+    """
+
+    async def test_success_releases_the_claim(self):
+        doc = _claimable()
+        col = _ClaimableCollection([doc])
+        worker = EnrichmentWorker(
+            col, _make_config(), _make_providers(), _make_memory_service()
+        )
+        await worker.process_batch()
+        assert doc["enrichment_status"] == "complete"
+        assert "enrichment_claimed_at" not in doc
+
+    async def test_failure_releases_the_claim_so_the_retry_is_immediate(self):
+        doc = _claimable()
+        col = _ClaimableCollection([doc])
+        providers = _make_providers()
+        providers.llm.assess_importance = AsyncMock(side_effect=Exception("LLM down"))
+        worker = EnrichmentWorker(
+            col, _make_config(enrichment_max_retries=3), providers,
+            _make_memory_service(),
+        )
+        await worker.process_batch()
+        assert doc["enrichment_status"] == "pending"
+        assert doc["enrichment_retries"] == 1
+        assert "enrichment_claimed_at" not in doc, (
+            "the memory is retryable but would wait a full lease to be picked up"
+        )
+
+    async def test_the_retry_is_actually_claimable_again(self):
+        """The end-to-end version of the previous test: fail once, then confirm a
+        fresh poll picks the same memory back up rather than skipping it."""
+        doc = _claimable()
+        col = _ClaimableCollection([doc])
+        providers = _make_providers()
+        providers.llm.assess_importance = AsyncMock(side_effect=Exception("LLM down"))
+        worker = EnrichmentWorker(
+            col, _make_config(enrichment_max_retries=3), providers,
+            _make_memory_service(),
+        )
+        await worker.process_batch()
+        assert await worker._claim_one() is not None
+
+    async def test_exhausted_retries_release_the_claim_too(self):
+        doc = _claimable(enrichment_retries=2)
+        col = _ClaimableCollection([doc])
+        providers = _make_providers()
+        providers.llm.assess_importance = AsyncMock(side_effect=Exception("LLM down"))
+        worker = EnrichmentWorker(
+            col, _make_config(enrichment_max_retries=3), providers,
+            _make_memory_service(),
+        )
+        await worker.process_batch()
+        assert doc["enrichment_status"] == "failed"
+        assert "enrichment_claimed_at" not in doc
+
+    async def test_every_terminal_write_unsets_the_claim(self):
+        """A structural check over the source, not a behavioural one.
+
+        There are four places the worker writes a final `enrichment_status`, and a
+        fifth added later would silently strand a lease. Each is expected to carry
+        an `$unset` of the claim field.
+        """
+        import re
+        from pathlib import Path
+
+        source = Path(
+            EnrichmentWorker.__module__.replace(".", "/") + ".py"
+        ).read_text()
+        status_writes = re.findall(
+            r'"enrichment_status":\s*(?:status|"[a-z_]+")', source
+        )
+        # One per terminal write plus the claim filter's `$in`, which is a read.
+        unsets = source.count('"$unset": {"enrichment_claimed_at": ""}')
+        assert unsets == len(status_writes), (
+            f"{len(status_writes)} writes set enrichment_status but only {unsets} "
+            "release the claim; a write that keeps the lease strands the document "
+            "for a full lease period after it is already finished"
+        )

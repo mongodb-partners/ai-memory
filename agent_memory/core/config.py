@@ -108,6 +108,17 @@ class MCPConfig(BaseSettings):
     enrichment_batch_size: int = 50
     enrichment_concurrency: int = 5
     enrichment_max_retries: int = 3
+    # How long a claimed enrichment stays claimed. A worker that dies mid-LLM-call
+    # leaves its claim behind, and without an expiry that document would never be
+    # enriched again — so the claim is a lease, not a lock, and any worker may take
+    # over one this old.
+    #
+    # The floor is the slowest legitimate enrichment: a merge makes an LLM call and
+    # then an embedding call, so a lease shorter than that would let a second worker
+    # start work the first is still doing. 300s is roughly an order of magnitude
+    # above a normal completion, which buys recovery within five minutes of a crash
+    # while leaving no realistic chance of stealing live work.
+    enrichment_lease_seconds: int = 300
 
     # Importance Scoring
     # "llm" (default) makes one LLM call per long-term memory. "local" evaluates

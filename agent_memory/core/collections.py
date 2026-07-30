@@ -52,7 +52,21 @@ STANDARD_INDEXES: list[dict] = [
     },
     {
         "collection": MEMORIES,
-        "keys": [("enrichment_status", 1), ("created_at", 1)],
+        # The enrichment worker's claim query: equality on `enrichment_status`, an
+        # `$or` over `enrichment_claimed_at`, then the `created_at` sort that makes
+        # the queue FIFO.
+        #
+        # `enrichment_claimed_at` sits between them because a claim runs on every
+        # poll of a busy queue and the alternative is scanning every pending
+        # document to find the unclaimed ones. It cannot serve the `$or` as an index
+        # bound — MongoDB will scan the `enrichment_status` prefix and filter — but
+        # it keeps the field in the index, so the filter is applied without fetching
+        # each document.
+        "keys": [
+            ("enrichment_status", 1),
+            ("enrichment_claimed_at", 1),
+            ("created_at", 1),
+        ],
         "name": "ix_memories_enrichment_queue",
     },
     {
