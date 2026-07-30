@@ -191,6 +191,48 @@ of the command line: that `ci.yml` passes no narrowing path, and that ruff's own
 catches an `extend-exclude` that narrows it back while the workflow still looks
 correct. 5 tests; 14 mutations, 14 caught.
 
+**One embedding call per episodic batch, not one per turn — and step assignment
+stays serial on purpose.** `EpisodicWorker._write_batch` awaited two round trips
+per document in a loop: the durable step counter, then the embedding. For the
+default `episodic_batch_size=20` that is forty sequential awaits for twenty
+turns, measured at 0.672s against a 10ms counter and a 20ms embedder.
+
+The two halves look symmetrical and are not, which is the substance of this
+change:
+
+- **The embeddings are now one `generate_embeddings_batch` call** for the whole
+  batch, checked with `check_batch`. 0.672s → 0.258s, and twenty provider
+  requests → one. Not `gather` over the single-text call, which collapses the
+  same wall clock while spending twenty times the rate-limit budget on twenty
+  round trips to learn the same thing — and which would have to re-implement the
+  vector-count check that `check_batch` already does.
+- **The step counter is still serial**, and gathering it would have been a
+  correctness bug rather than an optimisation. `$inc` is atomic, so concurrent
+  calls do get distinct sequence numbers — the reason it is unsafe is subtler.
+  Sequence numbers are handed out in *arrival* order, and a connection-pool wait
+  reorders arrivals: five turns behind one slow acquisition are numbered
+  `[4, 0, 1, 2, 3]`. `get_thread` orders by `step`, so turn 0 replays last and
+  the stored conversation is not the conversation that happened. Distinctness was
+  never the risk; order was. The module docstring and REQ-E-103 now say so, since
+  the next reader will see the same easy win.
+
+Batching widens one failure: a provider error now degrades every turn in the call
+rather than one. That is the deliberate trade — `embed_failures` counts documents
+rather than calls, so the number reads exactly as it did before, while the
+alternative (retrying one text at a time) turns an outage into `batch_size`
+further requests at the moment the provider can least serve them. A short reply —
+two vectors for three texts — degrades all three instead of `zip`ping the first
+two and leaving the third silently unsearchable.
+
+9 tests, including one that pins vector-to-document alignment when some documents
+in the batch have no search text (the arrangement where an off-by-one attaches
+turn 2's vector to turn 1 and every other assertion still passes). 13 mutations,
+13 caught — after a first run in which the mutation that gathers the step counter
+*survived*, because the test's fake counter delayed the provider's *reply* and
+reply latency reorders nothing: `gather` starts its coroutines in order and each
+claims its sequence number on arrival. The fake now waits for a connection before
+claiming, which is where the delay actually is, and the reordering appears.
+
 ### Fixed
 
 **A concurrent audit flush could let an erased user's record survive the wipe.**

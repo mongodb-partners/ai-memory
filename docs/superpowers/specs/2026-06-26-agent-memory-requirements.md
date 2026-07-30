@@ -224,13 +224,29 @@ the agent *did*, as distinct from what it *knows*. Ported from
 - **REQ-E-102:** WHEN the bounded queue is full THE SYSTEM SHALL evict the
   oldest pending turn, count the eviction, and retain the newest turn.
 - **REQ-E-103:** THE SYSTEM SHALL assign a durable monotonic `step` per thread
-  and set `parent_step` to `step - 1`, or to `null` at step zero.
+  and set `parent_step` to `step - 1`, or to `null` at step zero. THE SYSTEM
+  SHALL assign steps within a batch serially, in enqueue order. Concurrent
+  assignment is not equivalent: `$inc` is atomic and so yields distinct
+  sequence numbers, but it yields them in *arrival* order, and a
+  connection-pool wait reorders arrivals — five turns behind one slow
+  acquisition are numbered `[4, 0, 1, 2, 3]`, and since `get_thread` orders by
+  `step` (REQ-E-111) the replayed conversation is reordered.
 - **REQ-E-104:** IF the durable step counter fails THEN THE SYSTEM SHALL insert
   the document with `step` and `parent_step` set to `null` rather than dropping
   the turn.
 - **REQ-E-105:** WHEN a turn is a final step THE SYSTEM SHALL generate the
   embedding before assigning `search_text`, so an embedding failure leaves
   neither field present.
+- **REQ-E-108:** THE SYSTEM SHALL embed a batch's search texts in a single
+  provider call rather than one call per document, and SHALL attach each vector
+  to the document that supplied its text. `gather` over the single-text call is
+  not equivalent: it collapses the same wall clock while spending
+  `episodic_batch_size` times the rate-limit budget.
+- **REQ-E-109:** IF the provider returns a different number of vectors than
+  there were texts THEN THE SYSTEM SHALL degrade every document in that call to
+  text-only and count each of them as an embedding failure, rather than zipping
+  the short reply and leaving the unmatched turns silently unsearchable. The
+  failure counter counts documents, not calls.
 - **REQ-E-106:** THE SYSTEM SHALL swallow and count every write and embedding
   failure, exposing them through `stats()`, and SHALL NOT propagate an exception
   to the caller of `log_activity`.

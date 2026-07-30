@@ -7,9 +7,14 @@ the embedding round trip, the insert — happens here, off the caller's path.
 
 Design decisions worth keeping if this is ever rewritten:
 
-- **A single consumer.** FIFO per thread holds trivially with one consumer, so
-  ``step`` stays monotonic. Multiple consumers would need per-thread
-  partitioning for no throughput win at these queue depths.
+- **A single consumer, and serial step assignment within it.** FIFO per thread
+  holds trivially with one consumer, so ``step`` stays monotonic. Multiple
+  consumers would need per-thread partitioning for no throughput win at these
+  queue depths — and so would concurrent step assignment *inside* one consumer:
+  ``$inc`` is atomic, but it hands out sequence numbers in arrival order, and a
+  connection-pool wait reorders arrivals. See ``_write_batch``.
+- **One embedding call per batch, not per document.** The provider round trip is
+  the expensive part of a batch, so it is made once. See ``_attach_embeddings``.
 - **Drop the oldest, never the newest.** A full queue means the writer is behind;
   the freshest turn is the one worth keeping.
 - **Every failure is a counter, not an exception.** Logging is not the product.
@@ -28,7 +33,7 @@ from typing import Any
 from pymongo import ReturnDocument
 from pymongo.errors import BulkWriteError, PyMongoError
 
-from agent_memory.core.embedding_check import check_one, expected_dimension
+from agent_memory.core.embedding_check import check_batch, expected_dimension
 from agent_memory.core.redaction import redact_error
 
 logger = logging.getLogger(__name__)
@@ -169,11 +174,34 @@ class EpisodicWorker:
         return batch
 
     async def _write_batch(self, batch: list[dict[str, Any]]) -> None:
-        """Resolve steps and embeddings, then insert. Never raises."""
+        """Resolve steps and embeddings, then insert. Never raises.
+
+        The two phases are deliberately asymmetric, and the asymmetry is the
+        whole point of this method:
+
+        - **Steps stay serial**, one round trip per document. That looks like the
+          obvious thing to parallelise and is the one thing here that cannot be.
+          ``$inc`` is atomic, so concurrent calls do get distinct sequence
+          numbers — but they get them in *arrival* order, and a connection-pool
+          wait reorders arrivals. Gathering five turns behind one slow pool
+          acquisition assigns ``[4, 0, 1, 2, 3]``: turn 0 is recorded as having
+          happened after the four that followed it, and ``get_thread`` sorts by
+          ``step``, so the replayed conversation is simply wrong. Distinctness
+          was never the risk; order was.
+        - **Embeddings are one call for the whole batch**, where before there
+          were ``episodic_batch_size`` of them — twenty separate round trips to
+          the provider for twenty turns, which measured as two thirds of the
+          batch's wall clock.
+
+        A batch API rather than ``gather`` over the single-text call, which would
+        collapse the same wall clock: twenty concurrent requests spend twenty
+        times the rate-limit budget to learn the same thing, and ``check_batch``
+        gives the "did the provider return a vector per input" check for free.
+        """
         try:
             for doc in batch:
                 await self._assign_durable_step(doc)
-                await self._attach_embedding(doc)
+            await self._attach_embeddings(batch)
             await self._insert(batch)
         except Exception:  # pragma: no cover - last-resort guard
             logger.warning("Episodic batch write failed unexpectedly.", exc_info=True)
@@ -213,33 +241,61 @@ class EpisodicWorker:
             doc["parent_step"] = None
             logger.warning("Episodic step assignment failed: %s", exc)
 
-    async def _attach_embedding(self, doc: dict[str, Any]) -> None:
-        """Embed the search text, then attach both fields.
+    async def _attach_embeddings(self, batch: list[dict[str, Any]]) -> None:
+        """Embed every document that has search text, in one provider call.
 
-        Order matters: the embedding is generated first, so a provider failure
-        leaves *neither* ``embedding`` nor ``search_text`` on the document. A
-        document with searchable text but no vector would rank inconsistently
-        between the two branches of hybrid recall.
+        Order matters: the vectors are generated first, so a provider failure
+        leaves *neither* ``embedding`` nor ``search_text`` on the affected
+        documents. A document with searchable text but no vector would rank
+        inconsistently between the two branches of hybrid recall.
 
         A vector of the wrong width counts as a failure for the same reason, and
         it has to be checked here rather than left to Atlas: Atlas accepts it,
         stores it, and then never returns it from ``$vectorSearch``. The turn
         would look logged and be unfindable. Degrading to text-only — which is
         what the ``except`` below does — is the honest outcome.
+
+        Failure is all-or-nothing across the documents in this call, and that is
+        a deliberate widening of what it used to be. One text per request meant
+        one turn degraded per failure; one request for twenty means twenty turns
+        degrade together. The trade is worth taking because the failure is
+        *visible* either way — ``embed_failures`` counts documents, not calls, so
+        the number reads the same as before — while the alternative, retrying the
+        batch one text at a time, turns a single provider outage into
+        ``batch_size`` further requests at exactly the moment the provider is
+        least able to serve them.
         """
-        search_text = doc.pop(_KEY_SEARCH_TEXT, None)
-        if not search_text:
+        texts: list[str] = []
+        pending: list[dict[str, Any]] = []
+        for doc in batch:
+            search_text = doc.pop(_KEY_SEARCH_TEXT, None)
+            if not search_text:
+                continue
+            texts.append(search_text)
+            pending.append(doc)
+        if not pending:
             return
         try:
-            doc["embedding"] = check_one(
-                await self.providers.embedding.generate_embedding(search_text),
+            # The batch call, not `gather` over the single-text one, and not a
+            # single-text fallback if the provider lacks it: `generate_embeddings_batch`
+            # is abstract on `EmbeddingProvider`, so every real provider has it,
+            # and a fallback branch would let a stub that silently embeds one
+            # text at a time pass the tests that exist to pin this.
+            vectors = check_batch(
+                await self.providers.embedding.generate_embeddings_batch(texts),
+                texts,
                 expected=self._expected_dimension,
                 operation="episodic",
             )
-            doc["search_text"] = search_text
         except Exception as exc:
-            self._embed_failures += 1
-            logger.warning("Episodic embedding failed: %s", exc)
+            self._embed_failures += len(pending)
+            logger.warning(
+                "Episodic embedding failed for %d turn(s): %s", len(pending), exc
+            )
+            return
+        for doc, text, vector in zip(pending, texts, vectors, strict=True):
+            doc["embedding"] = vector
+            doc["search_text"] = text
 
     async def _insert(self, batch: list[dict[str, Any]]) -> None:
         started = datetime.now(UTC)

@@ -22,10 +22,18 @@ def _counters(seq: int = 1):
 
 
 def _providers(embedding=None):
+    """A provider stack whose batch call returns one copy of ``embedding`` per text.
+
+    Only ``generate_embeddings_batch`` is stubbed as an ``AsyncMock``. The
+    single-text ``generate_embedding`` is left as a plain ``MagicMock`` attribute
+    on purpose: the worker must not call it, and if it ever does, awaiting a
+    ``MagicMock`` result fails loudly rather than quietly returning a vector.
+    """
+    vector = embedding if embedding is not None else [0.1, 0.2]
     providers = MagicMock()
     providers.embedding = MagicMock()
-    providers.embedding.generate_embedding = AsyncMock(
-        return_value=embedding if embedding is not None else [0.1, 0.2]
+    providers.embedding.generate_embeddings_batch = AsyncMock(
+        side_effect=lambda texts: [list(vector) for _ in texts]
     )
     return providers
 
@@ -271,7 +279,7 @@ class TestEmbedding:
         col = _collection()
         providers = MagicMock()
         providers.embedding = MagicMock()
-        providers.embedding.generate_embedding = AsyncMock(
+        providers.embedding.generate_embeddings_batch = AsyncMock(
             side_effect=RuntimeError("provider down")
         )
         worker = _worker(col, providers=providers)
@@ -292,7 +300,7 @@ class TestEmbedding:
         worker.enqueue({"user_id": "u1"})
 
         await _run_until_drained(worker)
-        providers.embedding.generate_embedding.assert_not_awaited()
+        providers.embedding.generate_embeddings_batch.assert_not_awaited()
 
 
 class TestAWrongWidthVectorIsAnEmbeddingFailure:
@@ -301,7 +309,7 @@ class TestAWrongWidthVectorIsAnEmbeddingFailure:
     The width has to be checked here, because nothing downstream will object:
     Atlas stores a 1024-wide vector in a 1536-wide index, ``find`` returns the
     document, and ``$vectorSearch`` never does. The turn would read as logged and
-    be unfindable — the one outcome ``_attach_embedding``'s fail-closed ordering
+    be unfindable — the one outcome ``_attach_embeddings``'s fail-closed ordering
     exists to prevent.
     """
 
@@ -351,6 +359,190 @@ class TestAWrongWidthVectorIsAnEmbeddingFailure:
         doc = col.insert_one.await_args.args[0]
         assert doc["embedding"] == [0.1] * 7
         assert worker.stats()["embed_failures"] == 0
+
+
+class TestOneEmbeddingCallPerBatch:
+    """REQ-E-108: a batch costs one provider round trip, not one per document.
+
+    It used to be one per document — twenty round trips for a twenty-turn batch,
+    which measured as two thirds of the batch's wall clock.
+    """
+
+    async def test_twenty_turns_are_one_provider_call(self):
+        # TC-EP-WRK-050. The count is the assertion: `gather` over the
+        # single-text call would collapse the same wall clock while still
+        # spending twenty times the rate-limit budget.
+        col = _collection()
+        providers = _providers([0.1] * 4)
+        worker = _worker(col, providers=providers, episodic_batch_size=20)
+        for i in range(20):
+            worker.enqueue({"user_id": "u1", "__search_text": f"turn {i}"})
+
+        await _run_until_drained(worker)
+        assert providers.embedding.generate_embeddings_batch.await_count == 1
+        assert col.insert_many.await_count == 1
+        assert len(col.insert_many.await_args.args[0]) == 20
+
+    async def test_every_document_keeps_its_own_text_and_vector(self):
+        # The paired case, and the one that catches the real hazard in batching:
+        # texts and documents are two lists that must stay aligned. Distinct
+        # vectors per text, so a transposition cannot pass.
+        col = _collection()
+        providers = MagicMock()
+        providers.embedding = MagicMock()
+        providers.embedding.generate_embeddings_batch = AsyncMock(
+            side_effect=lambda texts: [[float(len(t))] * 2 for t in texts]
+        )
+        worker = _worker(col, providers=providers, episodic_batch_size=10)
+        for text in ("a", "bb", "cccc"):
+            worker.enqueue({"user_id": "u1", "__search_text": text})
+
+        await _run_until_drained(worker)
+        docs = col.insert_many.await_args.args[0]
+        assert [d["search_text"] for d in docs] == ["a", "bb", "cccc"]
+        assert [d["embedding"] for d in docs] == [[1.0] * 2, [2.0] * 2, [4.0] * 2]
+
+    async def test_documents_without_text_do_not_shift_the_alignment(self):
+        # A doc with no `__search_text` is skipped, so `texts` is shorter than
+        # the batch. Zipping the vectors against the *batch* rather than against
+        # the documents that contributed a text would attach turn 2's vector to
+        # turn 1 — and every assertion above would still pass.
+        col = _collection()
+        providers = MagicMock()
+        providers.embedding = MagicMock()
+        providers.embedding.generate_embeddings_batch = AsyncMock(
+            side_effect=lambda texts: [[float(len(t))] * 2 for t in texts]
+        )
+        worker = _worker(col, providers=providers, episodic_batch_size=10)
+        worker.enqueue({"user_id": "u1", "n": 0})  # no text
+        worker.enqueue({"user_id": "u1", "n": 1, "__search_text": "bb"})
+        worker.enqueue({"user_id": "u1", "n": 2})  # no text
+        worker.enqueue({"user_id": "u1", "n": 3, "__search_text": "cccc"})
+
+        await _run_until_drained(worker)
+        docs = {d["n"]: d for d in col.insert_many.await_args.args[0]}
+        assert "embedding" not in docs[0] and "search_text" not in docs[0]
+        assert "embedding" not in docs[2] and "search_text" not in docs[2]
+        assert docs[1]["search_text"] == "bb"
+        assert docs[1]["embedding"] == [2.0] * 2
+        assert docs[3]["search_text"] == "cccc"
+        assert docs[3]["embedding"] == [4.0] * 2
+
+    async def test_a_short_reply_degrades_every_turn_rather_than_dropping_one(self):
+        # The provider returns two vectors for three texts. `zip` would attach
+        # both and silently leave the third turn unsearchable; `check_batch`
+        # refuses the whole reply, so all three degrade to text-only and the
+        # counter says three.
+        col = _collection()
+        providers = MagicMock()
+        providers.embedding = MagicMock()
+        providers.embedding.generate_embeddings_batch = AsyncMock(
+            return_value=[[0.1] * 2, [0.2] * 2]
+        )
+        worker = _worker(col, providers=providers, episodic_batch_size=10)
+        for text in ("a", "bb", "ccc"):
+            worker.enqueue({"user_id": "u1", "__search_text": text})
+
+        await _run_until_drained(worker)
+        docs = col.insert_many.await_args.args[0]
+        assert len(docs) == 3
+        assert all("embedding" not in d and "search_text" not in d for d in docs)
+        # Documents, not calls: the number reads the same as it did when each
+        # document had its own request.
+        assert worker.stats()["embed_failures"] == 3
+
+    async def test_the_single_text_call_is_not_used(self):
+        # `generate_embeddings_batch` is abstract on `EmbeddingProvider`, so
+        # there is no provider that needs the one-at-a-time path, and a fallback
+        # to it would let this whole class pass while nothing was batched.
+        col = _collection()
+        providers = _providers([0.1] * 4)
+        providers.embedding.generate_embedding = AsyncMock(return_value=[0.9] * 4)
+        worker = _worker(col, providers=providers, episodic_batch_size=5)
+        for i in range(3):
+            worker.enqueue({"user_id": "u1", "__search_text": f"turn {i}"})
+
+        await _run_until_drained(worker)
+        providers.embedding.generate_embedding.assert_not_awaited()
+
+
+class TestStepAssignmentStaysSerial:
+    """REQ-E-103: ``step`` follows enqueue order, so the replay is the conversation.
+
+    The counter round trips are the other half of a batch's cost and look like
+    the obvious thing to parallelise. They are not. ``$inc`` is atomic, so
+    concurrent calls do get *distinct* sequence numbers — but in arrival order,
+    and a connection-pool wait reorders arrivals. Gathering five turns behind one
+    slow acquisition assigns ``[4, 0, 1, 2, 3]``, and ``get_thread`` sorts by
+    ``step``: turn 0 replays last.
+    """
+
+    @staticmethod
+    def _ordered_counters():
+        """An atomic ``$inc`` behind a connection-pool wait on the first call.
+
+        Two details make this the model that catches concurrent assignment, and
+        an earlier version of this helper had both wrong:
+
+        - The sequence is claimed **after** the wait and **before** any further
+          suspension, because that is where MongoDB claims it: server-side, when
+          the request arrives. A fake that increments before sleeping is not
+          modelling ``$inc``, it is modelling a client-side read-modify-write,
+          and it reports duplicate steps that the real server would never emit.
+        - The wait is on **acquiring the connection**, not on the reply. Reply
+          latency does not reorder anything under ``gather``, since ``gather``
+          starts its coroutines in order and each claims on arrival — so a fake
+          that delays the reply lets concurrent assignment pass. A pool wait
+          happens before the request goes out, which is exactly what lets the
+          four later turns overtake the first.
+        """
+        seq = {"n": 0}
+        waits = iter([0.02, 0.0, 0.0, 0.0, 0.0])
+
+        async def find_one_and_update(flt, update, **kw):
+            await asyncio.sleep(next(waits, 0.0))  # waiting for a pool slot
+            seq["n"] += 1  # the server's atomic $inc, on arrival
+            return {"_id": flt["_id"], "seq": seq["n"]}
+
+        counters = MagicMock()
+        counters.find_one_and_update = find_one_and_update
+        return counters
+
+    async def test_steps_follow_enqueue_order_under_a_pool_wait(self):
+        # TC-EP-WRK-051
+        col = _collection()
+        worker = _worker(
+            col, counters=self._ordered_counters(), episodic_batch_size=5
+        )
+        for i in range(5):
+            worker.enqueue(
+                {"user_id": "u1", "n": i, "__assign_step": {"user_id": "u1", "thread_id": "t1"}}
+            )
+
+        await _run_until_drained(worker)
+        docs = col.insert_many.await_args.args[0]
+        steps = [d["step"] for d in sorted(docs, key=lambda d: d["n"])]
+        assert steps == [0, 1, 2, 3, 4], (
+            f"steps {steps} do not follow enqueue order; `get_thread` sorts by "
+            "step, so the replayed conversation would be reordered"
+        )
+
+    async def test_parent_step_chains_the_turns_in_that_order(self):
+        # The pairing: monotonic steps are only useful if `parent_step` agrees
+        # with them, since that is what makes the thread a chain rather than a
+        # set of numbered rows.
+        col = _collection()
+        worker = _worker(
+            col, counters=self._ordered_counters(), episodic_batch_size=5
+        )
+        for i in range(3):
+            worker.enqueue(
+                {"user_id": "u1", "n": i, "__assign_step": {"user_id": "u1", "thread_id": "t1"}}
+            )
+
+        await _run_until_drained(worker)
+        docs = sorted(col.insert_many.await_args.args[0], key=lambda d: d["n"])
+        assert [d["parent_step"] for d in docs] == [None, 0, 1]
 
 
 class TestFailureCounting:
