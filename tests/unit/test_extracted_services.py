@@ -57,7 +57,9 @@ class TestHybridSearch:
             ["pipelines"]["vectorPipeline"][0]["$vectorSearch"]["filter"]
         )
         assert vs_filter["memory_type"] == "episodic"
-        assert vs_filter["tags"] == {"$all": ["work"]}
+        # Equality, not `$all` — an unsupported pre-filter operator matches nothing
+        # rather than erroring. See `tag_filter`.
+        assert vs_filter["tags"] == "work"
 
 
 class TestAdminService:
@@ -74,17 +76,29 @@ class TestAdminService:
         assert out["enrichment_stats"] == {"pending": 2, "done": 3}
 
     async def test_wipe_deletes_across_collections(self):
-        db = {
-            "memories": MagicMock(),
-            "semantic_cache": MagicMock(),
-            "audit_log": MagicMock(),
+        """Every user-scoped collection, not the three it used to clear.
+
+        Episodic turns, decisions, rate-limit records, and step counters used to
+        survive a wipe that reported success — see
+        ``test_admin_scope.py::TestWipeIsComplete`` for the per-collection cases.
+        """
+        counts = {
+            "memories": 5, "semantic_cache": 2, "audit_log": 1,
+            "episodes": 7, "decisions": 3, "rate_limits": 4,
+            "episodes_counters": 2,
         }
-        db["memories"].delete_many = AsyncMock(return_value=MagicMock(deleted_count=5))
-        db["semantic_cache"].delete_many = AsyncMock(return_value=MagicMock(deleted_count=2))
-        db["audit_log"].delete_many = AsyncMock(return_value=MagicMock(deleted_count=1))
+        db = {}
+        for name, count in counts.items():
+            db[name] = MagicMock()
+            db[name].delete_many = AsyncMock(
+                return_value=MagicMock(deleted_count=count)
+            )
         svc = AdminService(db)
         out = await svc.wipe_user_data("u1")
         assert out == {
             "user_id": "u1", "memories_deleted": 5,
             "cache_deleted": 2, "audit_deleted": 1,
+            "episodes_deleted": 7, "decisions_deleted": 3,
+            "rate_limits_deleted": 4, "episode_counters_deleted": 2,
+            "complete": True,
         }

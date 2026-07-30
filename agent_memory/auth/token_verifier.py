@@ -108,9 +108,38 @@ class MemoryMCPTokenVerifier(TokenVerifier):
                 self._secret,
                 algorithms=[_JWT_ALGORITHM],
                 issuer=self._issuer,
+                # `exp` is required, not merely honoured when present.
+                #
+                # PyJWT validates `exp` if the claim exists and ignores its absence
+                # otherwise, so a token minted without one was accepted forever.
+                # `create_token` always sets it, which is what made this easy to
+                # miss — but the verifier's job is to police tokens it did not
+                # mint, and anyone holding the shared secret (a second service, a
+                # test fixture, an old script) could produce an immortal one. The
+                # downstream code then treated `expires_at=None` as "no expiry"
+                # rather than "unknown", so the token never came back for
+                # revocation and there is no other revocation path here: a leaked
+                # HS256 token with no `exp` is valid until the secret is rotated.
+                #
+                # `iat` is required too. Without it a token carries no issue time,
+                # so nothing can distinguish one minted a minute ago from one
+                # minted last year, and "reject everything issued before the
+                # breach" stops being available as an incident response.
+                options={"require": ["exp", "iat", "sub"]},
             )
         except jwt.ExpiredSignatureError:
             logger.debug("JWT expired")
+            return None
+        except jwt.MissingRequiredClaimError as exc:
+            # Its own branch because this one is worth distinguishing in a log: a
+            # token that is correctly signed but missing `exp` is a minting bug in
+            # whatever produced it, not a forgery attempt, and the operator needs
+            # to know which of the two they are looking at.
+            logger.warning(
+                "JWT rejected: %s. A token signed with this secret but lacking an "
+                "expiry would never expire; whatever minted it must set exp/iat.",
+                exc,
+            )
             return None
         except jwt.InvalidTokenError as exc:
             logger.debug("JWT validation failed: %s", exc)
@@ -124,11 +153,20 @@ class MemoryMCPTokenVerifier(TokenVerifier):
         scopes_str = claims.get("scope", "")
         scopes = scopes_str.split() if scopes_str else []
 
-        exp = claims.get("exp")
+        try:
+            expires_at = int(claims["exp"])
+        except (KeyError, TypeError, ValueError):
+            # `require` above means this is unreachable for a well-formed claim, so
+            # reaching it means `exp` is present but not an integer. Refuse rather
+            # than fall back to None, which is the very "never expires" state the
+            # requirement exists to prevent.
+            logger.warning("JWT rejected: 'exp' is present but not an integer.")
+            return None
+
         return AccessToken(
             token=token,
             client_id=str(sub),
             scopes=scopes,
-            expires_at=int(exp) if exp else None,
+            expires_at=expires_at,
             claims=claims,
         )

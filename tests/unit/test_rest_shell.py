@@ -27,6 +27,12 @@ def _app():
     app.set_activity_retention = AsyncMock(return_value={"ttl_seconds": 7200})
     # activity_stats is synchronous on the facade — /health must not await it.
     app.activity_stats = MagicMock(return_value={"enqueued": 3, "queue_depth": 0})
+    # So is worker_status, and for the same reason: a health probe must not have to
+    # queue behind the very event loop whose workers it is asking about.
+    app.worker_status = MagicMock(return_value={
+        "enabled": True, "running": True,
+        "workers": {"enrichment": {"done": False, "cancelled": False}},
+    })
     return app
 
 
@@ -165,12 +171,61 @@ class TestActivityRoutes:
         assert body["episodic"]["enqueued"] == 3
 
     def test_health_still_200_when_stats_are_unavailable(self):
-        """A probe that 500s because a counter is missing is worse than useless."""
+        """A probe that 500s because a counter is missing is worse than useless.
+
+        The assertion is that `episodic` is *absent* and the status is still `ok`,
+        rather than that the body equals one exact dict — the latter made adding
+        any new probe field a test failure, which is a test asserting that /health
+        never learns anything new.
+        """
         facade = _app()
         facade.activity_stats = MagicMock(side_effect=RuntimeError("not wired"))
         r = _client(facade).get("/health")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
+        assert r.json()["status"] == "ok"
+        assert "episodic" not in r.json()
+
+    def test_health_still_200_when_worker_status_is_unavailable(self):
+        """Same guarantee for the other optional section."""
+        facade = _app()
+        facade.worker_status = MagicMock(side_effect=RuntimeError("not wired"))
+        r = _client(facade).get("/health")
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert "workers" not in r.json()
+
+    def test_health_degrades_when_a_worker_has_died(self):
+        """TC-REST-HEALTH-004: a dead worker must be visible to a probe.
+
+        This is the whole reason `workers` is in the body. The workers do the
+        *reactive* half of the system, so when enrichment or consolidation crashes,
+        reads and writes keep working perfectly and `/health` kept returning a
+        cheerful 200 — the only symptom is that memories are never scored,
+        promoted, or forgotten, which looks like a quiet system rather than a
+        broken one.
+        """
+        facade = _app()
+        facade.worker_status = MagicMock(return_value={
+            "enabled": True, "running": False,
+            "workers": {"enrichment": {"done": True, "cancelled": False,
+                                       "error": "RuntimeError('boom')"}},
+        })
+        body = _client(facade).get("/health").json()
+        assert body["status"] == "degraded"
+        assert body["workers"]["workers"]["enrichment"]["done"] is True
+
+    def test_health_stays_ok_when_workers_are_intentionally_out_of_process(self):
+        """`workers_in_process=False` is a deployment choice, not a fault.
+
+        Without the `enabled` check this would report every REST-only process as
+        permanently degraded, and an alert that is always firing is an alert nobody
+        reads.
+        """
+        facade = _app()
+        facade.worker_status = MagicMock(return_value={
+            "enabled": False, "running": False, "workers": {},
+        })
+        assert _client(facade).get("/health").json()["status"] == "ok"
 
     def test_activity_denial_maps_to_403(self):
         facade = _app()

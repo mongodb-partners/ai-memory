@@ -59,3 +59,49 @@ class TestAPIKeyManagerLoad:
             mgr = APIKeyManager()
         assert mgr.resolve_user("key1") == "alice"
         assert mgr.resolve_user("key2") == "bob"
+
+
+class TestConstantTimeLookup:
+    """REQ-E-086: key resolution must not vary with the submitted secret."""
+
+    def test_the_raw_key_is_not_retained_anywhere(self):
+        """TC-AUTH-KEY-020: keys are stored as SHA-256 fingerprints.
+
+        Two properties follow. The dict is keyed on fixed-length digests, so the
+        lookup does uniform work regardless of the submitted key's length or
+        content — where a dict keyed on the raw secret falls back to a
+        short-circuiting `==` on collision. And the process holds no plaintext key
+        after construction, so it cannot leak one in a heap dump, a traceback repr,
+        or a debugger session.
+        """
+        with patch.dict(os.environ, {"MEMORY_MCP_API_KEYS": "sup3rs3cr3t=alice"}):
+            mgr = APIKeyManager()
+
+        stored = repr(mgr.__dict__)
+        assert "sup3rs3cr3t" not in stored
+        # …and it still resolves.
+        assert mgr.resolve_user("sup3rs3cr3t") == "alice"
+
+    def test_a_wrong_key_of_any_length_resolves_to_nothing(self):
+        """TC-AUTH-KEY-021: no near-miss shortcut.
+
+        A prefix of a valid key must be as unresolvable as a completely different
+        string — the case a byte-by-byte comparison distinguishes by timing.
+        """
+        with patch.dict(os.environ, {"MEMORY_MCP_API_KEYS": "sup3rs3cr3t=alice"}):
+            mgr = APIKeyManager()
+
+        for wrong in ("", "s", "sup3rs3cr3", "sup3rs3cr3T", "sup3rs3cr3tt", "z" * 400):
+            assert mgr.resolve_user(wrong) is None
+            assert mgr.is_valid(wrong) is False
+
+    def test_is_valid_and_resolve_user_agree(self):
+        """TC-AUTH-KEY-022: one code path, so the two cannot disagree.
+
+        `is_valid` used `in` while `resolve_user` used `.get`; they now share an
+        implementation, which is what stops a future fix landing in only one.
+        """
+        with patch.dict(os.environ, {"MEMORY_MCP_API_KEYS": "k1=alice"}):
+            mgr = APIKeyManager()
+        assert mgr.is_valid("k1") is True and mgr.resolve_user("k1") == "alice"
+        assert mgr.is_valid("k2") is False and mgr.resolve_user("k2") is None

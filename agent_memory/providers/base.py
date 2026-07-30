@@ -1,8 +1,11 @@
 """Abstract base classes for embedding and LLM providers."""
 
+import logging
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 # Matches an integer or a decimal. The decimal branch has to come first —
 # alternation is ordered, so `\d+|\d*\.\d+` would match the "0" of "0.9" and stop.
@@ -98,6 +101,37 @@ def is_usable_summary(summary: str | None, content: str) -> bool:
     return not any(marker in lowered for marker in _NON_SUMMARY_MARKERS)
 
 
+def render_prompt(prompt: str | None, content: str, fallback: str) -> str:
+    """Render a prompt template, falling back rather than raising.
+
+    Templates come from the prompt library, which means they come from the
+    database and are editable at runtime by whoever can write to it. ``str.format``
+    on such a string is a liability: a template carrying a stray brace, or naming a
+    placeholder other than ``{content}``, raises ``KeyError``/``IndexError``/
+    ``ValueError`` mid-enrichment. The worker catches everything, so the outcome is
+    a memory retried to ``failed`` and a log line — the same silent failure mode as
+    the missing ``prompt`` argument, reached a different way.
+
+    A prompt that does not mention ``{content}`` is also a mistake worth absorbing:
+    formatting succeeds and yields a template with the memory nowhere in it, so the
+    model scores the instructions rather than the memory. Treated as unusable.
+    """
+    if not prompt:
+        return fallback
+    if "{content}" not in prompt:
+        logger.warning(
+            "Prompt template has no {content} placeholder; using the built-in."
+        )
+        return fallback
+    try:
+        return prompt.format(content=content)
+    except (KeyError, IndexError, ValueError):
+        logger.warning(
+            "Prompt template failed to render; using the built-in.", exc_info=True
+        )
+        return fallback
+
+
 class EmbeddingProvider(ABC):
     @abstractmethod
     async def generate_embedding(self, text: str) -> list[float]:
@@ -162,14 +196,15 @@ class LLMProvider(ABC):
 
     @abstractmethod
     async def assess_importance(self, content: str, prompt: str | None = None) -> float:
-        """Score `content` 0.0-1.0, optionally with a caller-supplied template.
+        """Score `content` 0.0–1.0, optionally with a caller-supplied template.
 
-        ``prompt`` is part of the interface because ``LLMScorer`` passes it
-        whenever a custom template is configured. Leaving it off two of the three
-        implementations made that path raise ``TypeError`` at call binding on
-        OpenAI and Anthropic — swallowed by the enrichment worker's ``except``,
-        retried to ``failed``, and invisible in tests that mock the LLM with a
-        bare ``AsyncMock``, which accepts any keyword. Declaring it here makes
+        ``prompt`` is part of the interface because the enrichment worker always
+        passes it: the prompt library falls back to a hardcoded template on every
+        path, so the argument is never absent in practice. Leaving it off two of
+        the three implementations made enrichment raise ``TypeError`` at call
+        binding on those providers — swallowed by the worker's ``except``, retried
+        to ``failed``, and invisible because the tests mocked the LLM with a bare
+        ``AsyncMock`` that accepts any keyword. Declaring it here is what makes
         that class of drift a signature error instead of a silent outage.
 
         Implementations must accept it. Ignoring its value is acceptable; not
@@ -178,5 +213,8 @@ class LLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def generate_summary(self, content: str, max_length: int = 100) -> str:
+    async def generate_summary(
+        self, content: str, max_length: int = 100, prompt: str | None = None
+    ) -> str:
+        """Summarize `content`. See :meth:`assess_importance` re: ``prompt``."""
         ...

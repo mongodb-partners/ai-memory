@@ -149,6 +149,140 @@ change than this fix, and the three `F841` unused locals were checked by hand �
 they are throwaway assignments in tests that assert on mock call args, not dropped
 assertions.
 
+### Security
+
+A further review of the 4.1.0 hardening, which found that two of its fixes had a
+reachable way around them and that three subsystems were failing silently. As
+before, none of these crashed: each returned something plausible. Every fix below
+was confirmed by mutation — the new tests were run against the vulnerable code and
+observed to fail, then against the fix and observed to pass.
+
+- **A refused MCP call could still write into another tenant.** `tools.py` resolved
+  identity through `resolve_caller` and refused a request naming someone else — and
+  then returned that refusal as `{"error": ...}` rather than raising, because that
+  is the MCP convention. The auto-capture middleware wrapped the tool, saw a normal
+  return, and persisted the turn using `params["user_id"]`: the attacker-supplied
+  value the tool had just rejected. So the guarded path was guarded and the
+  capture path beside it was not, and the write landed in the victim's tenant.
+  Capture now resolves its own identity from the same token through the same
+  function — `resolve_capture_identity` — and a mismatch drops the capture instead
+  of writing it. The identity is passed to `spawn()` as its own argument rather
+  than re-read from the params, so the unsafe value is not in reach at the write
+  site. `tools.py`'s module docstring states the trap for the next author: a refusal
+  here is a *return value*, not an exception, so "returned without raising" does
+  not mean "was authorised".
+
+- **Any authenticated caller could change retention for every tenant.**
+  `set_activity_retention` is collection-wide by nature — a TTL index belongs to the
+  collection — and was categorised `admin` to withhold it from `power_user`. But
+  that categorisation is enforced by the governance service, which is
+  `governance_enabled: bool = False`. On a stock multi-tenant deployment the
+  `admin` category bought nothing, and the operation was reachable through a public
+  REST endpoint. Shortening every other tenant's retention is the destructive
+  direction and it happens quietly: Atlas expires the documents on the TTL
+  monitor's own schedule, so the caller sees `{"scope": "collection"}` and the data
+  goes away later. `_require_admin_for_global_mutation` is now a floor underneath
+  the category, independent of governance being switched on. An authorisation rule
+  that exists only when an optional subsystem is enabled is a default-open rule.
+
+- **Every tag-filtered and type-filtered search silently returned the wrong
+  results.** Three compounding faults, all silent:
+
+  `memory_type` and `tags` were used as `$vectorSearch` pre-filters and declared in
+  neither index. An undeclared filter path does not raise — the branch matches
+  nothing — so a filtered recall returned zero results while the memories sat in
+  the collection, and the failure read as "this user has no memories of that type".
+
+  Tag filtering additionally used `{"tags": {"$all": [...]}}`. `$all` is not among
+  the operators `$vectorSearch` supports, and an unsupported operator in a
+  pre-filter also does not raise. Declaring the fields alone would have left tag
+  search exactly as broken. All-of is now an `$and` of equalities, which works
+  because filter fields accept arrays and match when any element matches. The
+  supported operator set is pinned in a test, and a separate test rejects `$in`/`$or`
+  — the mechanical "fix" that is supported and silently widens all-of to any-of.
+
+  `hybrid_search` applied its narrowings to the vector branch only. `$rankFusion`
+  merges two ranked lists, so a restriction on one branch is not a restriction: the
+  unfiltered branch contributed matches that ignored it, and fusion mixed them in
+  by relevance. A search scoped to one `memory_type` returned documents of every
+  other type, indistinguishable from correct hits — wrong results rather than
+  missing ones. `user_id` was always in both, so this was never an isolation bug.
+  The new contract test asserts against the *built pipelines* and the *shipped
+  index definitions* rather than a copied list, and asserts the generic invariant:
+  both fusion branches restrict the same fields, with soft-delete the one
+  documented asymmetry.
+
+- **An erasure recreated the user it erased.** `wipe_user_data` deletes every
+  `audit_log` row matching the user's id, and was then audited through `_run`,
+  which writes its success record *after* the service call. The last thing the
+  erasure did was write that identifier back into the collection it had just
+  cleared — not a leftover it failed to catch, but a row it created, dated a
+  millisecond later, which survived every subsequent wipe because each one
+  recreated it. The audit buffer was a second path to the same place:
+  `audit_flush_on_write` defaults to False, so this user's pending entries flushed
+  to Atlas *after* `delete_many` had swept the collection.
+
+  Deleting the record is not the fix — a total irreversible deletion is precisely
+  the operation that must leave a trace. So the trace is kept and the subject
+  dropped: the record is filed against a reserved `ERASURE_PRINCIPAL`, carries the
+  per-collection counts, and names nobody. The buffer is flushed before the delete
+  and the record after it. What the audit log deliberately cannot answer is "was
+  user X erased?", which is not a question anyone who has genuinely stopped holding
+  X can answer. The reserved principal is refused as a wipe target, so the erasure
+  trail cannot be deleted by asking to be forgotten under that name. A *denied*
+  wipe is still audited against the real user: it erased nothing, so there is no
+  erasure to respect, and an attempt to wipe a tenant is exactly what an auditor
+  needs attributed.
+
+  Relatedly, a **partial wipe was audited as a success.** Per-collection failures
+  were collected and *returned*; `_run` derives its status from whether the
+  coroutine raised, so a wipe that cleared three collections and failed on four
+  recorded `"success"` — and an operator who reads a success has no reason to
+  retry. It now raises `PartialWipeError`, carrying the counts so the audit record
+  and the MCP client can both see how far it got. Every remaining collection is
+  still attempted; raising early would leave the most data behind.
+
+- **A definition change to an Atlas index could never reach an existing cluster.**
+  Stage 2 compared only `numDimensions` on vector indexes and `continue`d past
+  every existing full-text index, so an index built by an earlier version kept that
+  version's definition for the life of the deployment. Only a fresh cluster ever ran
+  the current schema — which means the `memory_type`/`tags` fix above would have
+  passed every test, because tests start empty, and changed nothing on the
+  deployments that needed it. This fix is the delivery mechanism for that one.
+
+  Existing indexes are now reconciled: a `numDimensions` change still drops and
+  recreates, and anything else is an in-place `update_search_index`, which
+  preserves the built index and keeps serving the old definition while Atlas
+  rebuilds. Dropping would take vector search offline for minutes on every
+  deployment, for a change that does not require it. The comparison is deliberately
+  a *subset* check, because Atlas echoes definitions back enriched with its own
+  defaults — an equality test would find a difference on a perfectly current
+  cluster and rebuild every index on every startup. A failed update leaves the
+  working index in place rather than dropping it.
+
+- **MCP authentication failed open on a context error.** `tools.py` wrapped
+  `get_access_token()` in a bare `except Exception` and treated *any* failure as
+  "auth is off", which is the single-tenant path that honours the caller-supplied
+  `user_id`. So on an auth-enabled deployment, a token the server could not read —
+  an incompatible `AccessToken` type, which FastMCP converts to a `TypeError` —
+  downgraded the request to the exact posture tenant binding exists to prevent.
+
+  Whether auth is *configured* is now read from the config rather than inferred
+  from whether a token turned up. The catch stays broad, because the import and
+  the context lookup have several legitimate failure modes, but with auth on it
+  raises `IdentityError` and logs at warning instead of falling through. With auth
+  off the behaviour is unchanged. A `None` token with auth on is still accepted and
+  deliberately so: over HTTP that state is unreachable — FastMCP rejects an
+  unauthenticated request before any tool runs — so it means there is no request at
+  all (stdio, or an in-process call), and refusing it would break a documented
+  single-tenant transport without closing anything a remote caller can reach.
+
+- **Auto-capture shutdown draining existed and was never wired up.** The
+  middleware grew a `drain()` in 4.1.0 to wait for in-flight captures, and
+  `mcp/server.py` discarded the middleware object after registering it, so nothing
+  could call it. Captures in flight at shutdown were dropped exactly as before the
+  fix. The server now retains it and drains on shutdown.
+
 ## [4.1.0] — 2026-07-29
 
 ### Added

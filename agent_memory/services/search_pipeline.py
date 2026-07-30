@@ -43,6 +43,7 @@ def rank_fusion_pipeline(
     num_candidates: int = DEFAULT_NUM_CANDIDATES,
     branch_limit: int = DEFAULT_BRANCH_LIMIT,
     project: dict[str, Any] | None = None,
+    post_fusion_stages: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build a `$rankFusion` aggregation over one vector and one full-text branch.
 
@@ -54,6 +55,30 @@ def rank_fusion_pipeline(
 
     ``project`` defaults to excluding ``embedding``, which is otherwise the
     largest field in the response by an order of magnitude.
+
+    ``post_fusion_stages`` are inserted **between fusion and ``$limit``**, and the
+    position is the whole point. A narrowing stage appended after the pipeline
+    instead — which is what episodic ``since`` filtering did — runs on an
+    already-truncated result set: fusion ranks across all time, ``$limit`` keeps
+    the top *N*, and only then does the date filter run. Ask for the 5 most
+    relevant turns since yesterday and you get however many of the 5
+    best-all-time happen to be recent, which is frequently zero while the
+    collection holds plenty of matching recent turns. Empty, not wrong-looking,
+    so nothing draws attention to it.
+
+    Use this for restrictions that cannot go in a branch pre-filter — typically a
+    field not declared as a vector-index ``filter`` field, where declaring a
+    high-cardinality value like a timestamp would bloat the index for a rarely
+    used narrowing.
+
+    This is a real improvement but not a complete substitute for a pre-filter, and
+    the difference is worth knowing. Each branch contributes at most
+    ``branch_limit`` documents, so a post-fusion narrowing selects from that depth
+    rather than from the collection: if every matching document ranks below the
+    branch cutoff, the result is still short. Raise ``branch_limit`` when a
+    narrowing is both selective and routine. A pre-filter has no such ceiling
+    because the engine applies it during the search — which is why ``user_id``
+    lives in both branch filters and never here.
     """
     return [
         {
@@ -98,6 +123,8 @@ def rank_fusion_pipeline(
                 },
             }
         },
+        # Narrow before truncating. See `post_fusion_stages` above.
+        *(post_fusion_stages or []),
         {"$limit": limit},
         # $rankFusion does not project its fused rank; without this the caller
         # gets ranked documents carrying no score at all, and any consumer that

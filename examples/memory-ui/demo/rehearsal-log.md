@@ -94,6 +94,60 @@ Query: `what can't I eat?`, user `ai4-demo`. Re-verified after the reset above a
 unchanged — row counts and both top scores identical, which is what makes them
 usable as a pre-flight check rather than just a record.
 
+## Session — Thu Jul 30, ~04:15 (after the Medium/Low fix batch)
+
+**Why this session happened:** the :8100 server had been running since 01:14 on
+pre-fix code. It held the *old* promotion logic, so every LTM document it had
+written carried the 24-hour STM TTL. Restarting before re-seeding is not hygiene
+here, it is the fix taking effect.
+
+**What was actually wrong on disk.** Before the restart, `ai4-demo` held 12 LTM
+documents and **5 of them expired in 21.7 hours** — around 01:45 on **Fri Jul 31**,
+four days *before* the Tuesday talk. The TTL index would have deleted them quietly:
+no error, no log line, just a demo where "long-term memory" recalls less each day.
+The other 7 were already at 90 days, so a spot check of one document would have
+looked fine. After restart + re-seed: **11 LTM, all at 2160.0h (90 days, into late
+October), 0 expiring before Aug 5.**
+
+To be clear about what is correct: LTM is *supposed* to carry a 90-day TTL
+(`ltm_retention_standard_days`). The bug was LTM carrying the 24-hour *STM* TTL,
+not LTM having a TTL at all.
+
+**STM is a per-morning concern, by design.** The 7 STM documents expire ~24h after
+seeding. That is correct behaviour and it is also why **the seed must be re-run on
+each demo morning** — seed Monday and the Wednesday demo has no short-term tier to
+show. Tuesday morning and Wednesday morning, both.
+
+### Verification #10 — the toggle is honest (the demo-breaking failure mode)
+
+Run OFF **first** on a query never asked before, then ON on the same query. If ON
+gets a cache hit, the only place it came from is the OFF run.
+
+| Check | Result |
+|---|---|
+| OFF performed recall | no — zero `recall` frames |
+| OFF wrote to the response cache | no — cache docs 2 → 2 |
+| ON saw a cached answer | no — `cache_hit: false` |
+| ON recalled across tiers | yes — `ltm` + `stm` + `episodic` |
+| ON wrote back | yes — `ltm` (queued for scoring) + `episodic` (turn logged) |
+| Answers differ materially | yes |
+
+The contrast, verbatim from the run — this is the talk's core moment:
+
+- **OFF:** "Happy to help! To plan this well, could you tell me: any dietary
+  restrictions or allergies among your guests…"
+- **ON:** "I'd scale the lemon-herb chicken… plus a chickpea and spinach stew or
+  stuffed portobellos **for the vegetarian option**…"
+
+ON never had to ask. It already knew about the shellfish allergy and the vegetarian
+guest, from two different tiers.
+
+**Probe runs pollute the state.** Each verification turn writes STM + an episode +
+a cache entry, so the seed was re-run afterwards to restore determinism. Final
+state: `stm 7 · ltm 11 · episodes 3 · cache 0`. Do the same after any rehearsal
+turns — check `cache 0` in particular, because a leftover cache entry is what makes
+a live OFF/ON demo silently prove nothing.
+
 ## Still outstanding
 
 The **recorded 60–90s OFF-vs-ON screen capture** is not done, and it is the item

@@ -162,3 +162,61 @@ class TestRoundTrip:
         assert result is not None
         assert result.expires_at is not None
         assert result.expires_at > int(time.time())
+
+
+class TestExpiryIsMandatory:
+    """REQ-E-085: a token with no expiry must be refused, not accepted forever."""
+
+    @staticmethod
+    def _mint(**payload):
+        """Sign a payload directly, bypassing `create_token`.
+
+        Necessary because `create_token` always sets `exp` — which is exactly why
+        this gap survived review. The verifier's job is to police tokens it did not
+        mint, and anyone holding the shared secret can produce these.
+        """
+        base = {"sub": "u1", "iss": "memory-mcp", "iat": int(time.time())}
+        base.update(payload)
+        return jwt.encode(base, _TEST_SECRET, algorithm="HS256")
+
+    async def test_a_token_without_exp_is_refused(self):
+        """TC-AUTH-JWT-020: PyJWT ignores a missing `exp` rather than failing.
+
+        Before `options={"require": [...]}`, this token verified successfully and
+        produced `expires_at=None`, which downstream code reads as "no expiry"
+        rather than "unknown". There is no revocation path for an HS256 token here,
+        so a leaked one stayed valid until the operator rotated the secret — an
+        action nobody takes until they know there is a reason to.
+        """
+        verifier = _make_verifier()
+        assert await verifier.verify_token(self._mint()) is None
+
+    async def test_a_token_without_iat_is_refused(self):
+        """TC-AUTH-JWT-021: no issue time means no "revoke everything before X".
+
+        Without `iat` a token cannot be placed in time, so the cheapest incident
+        response available for a shared-secret scheme — reject anything minted
+        before the breach — is not available at all.
+        """
+        verifier = _make_verifier()
+        token = jwt.encode(
+            {"sub": "u1", "iss": "memory-mcp", "exp": int(time.time()) + 3600},
+            _TEST_SECRET, algorithm="HS256",
+        )
+        assert await verifier.verify_token(token) is None
+
+    async def test_a_non_integer_exp_is_refused_rather_than_nulled(self):
+        """TC-AUTH-JWT-022: the fallback must not recreate the hole it closed.
+
+        `int(exp) if exp else None` turned an unparseable expiry into "never
+        expires" — the failure mode is the same one, reached by a different route.
+        """
+        verifier = _make_verifier()
+        token = self._mint(exp="not-a-timestamp")
+        assert await verifier.verify_token(token) is None
+
+    async def test_a_well_formed_token_still_verifies(self):
+        """TC-AUTH-JWT-023: `create_token` output must remain acceptable."""
+        verifier = _make_verifier()
+        result = await verifier.verify_token(verifier.create_token("u1"))
+        assert result is not None and result.expires_at > int(time.time())

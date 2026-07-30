@@ -28,7 +28,10 @@ def _patched(monkeypatch):
     create = AsyncMock(return_value=facade)
     monkeypatch.setattr(runner.AsyncMemory, "create", create)
     monkeypatch.setattr(runner, "create_mcp", lambda config, app: ("mcp", app))
-    monkeypatch.setattr(runner, "create_app", lambda app: ("rest", app))
+    # `config` is captured, not ignored: `build_shells` used to call
+    # `create_app(app)` with no config, which silently disabled REST auth. The
+    # stub accepts it so a regression to the positional-only call fails here.
+    monkeypatch.setattr(runner, "create_app", lambda app, config=None: ("rest", app, config))
     return runner, facade, create
 
 
@@ -41,6 +44,19 @@ class TestBuildShells:
         # both shells bound to the same facade instance
         assert shells["mcp"][1] is facade
         assert shells["rest"][1] is facade
+
+    async def test_rest_shell_receives_the_config(self, _patched):
+        """Without the config, `create_app` builds a no-op auth dependency.
+
+        That made `TRANSPORT=rest` serve every route unauthenticated regardless of
+        `AUTH_ENABLED`, while the MCP shell built from the same config enforced it.
+        """
+        runner, facade, create = _patched
+        cfg = _config("rest")
+        shells = await runner.build_shells(cfg)
+        assert shells["rest"][2] is cfg, (
+            "build_shells must pass config to create_app, or REST auth is disabled"
+        )
 
     async def test_mcp_only(self, _patched):
         runner, facade, create = _patched

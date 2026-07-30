@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import MIN_SUMMARIZABLE_CHARS, is_usable_summary
+from agent_memory.services.memory import PROMOTED_RETENTION_TIER, retention_ttl
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +159,18 @@ class ConsolidationWorker:
                     {
                         "$set": {
                             "tier": "ltm",
-                            "retention_tier": "standard",
+                            "retention_tier": PROMOTED_RETENTION_TIER,
                             "enrichment_status": "pending",
                             "updated_at": now,
+                            # Re-stamp the expiry against the new tier. Without
+                            # this the document keeps the `expires_at` it was
+                            # given as short-term memory — ~24 hours out — so the
+                            # TTL index deletes it the next day even though every
+                            # other field says it is long-term. Promotion is
+                            # precisely the moment the retention window changes;
+                            # leaving the field alone silently un-promotes it.
+                            "expires_at": now
+                            + retention_ttl(self.config, PROMOTED_RETENTION_TIER),
                         }
                     },
                 )

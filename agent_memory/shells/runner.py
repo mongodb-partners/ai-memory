@@ -33,7 +33,12 @@ async def build_shells(config: MemoryConfig) -> dict:
     if transport in ("mcp", "both"):
         shells["mcp"] = create_mcp(config, app=app)
     if transport in ("rest", "both"):
-        shells["rest"] = create_app(app)
+        # `config` is not optional here. Omitting it built the REST app with
+        # `config=None`, which makes `_build_auth_dependency` return the no-op —
+        # so `TRANSPORT=rest` served every route unauthenticated no matter what
+        # AUTH_ENABLED said, while the MCP shell built from the same config
+        # enforced it.
+        shells["rest"] = create_app(app, config=config)
     if not shells:
         raise ValueError(f"Unknown TRANSPORT: {config.transport!r}")
     return shells

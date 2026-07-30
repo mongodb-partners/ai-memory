@@ -65,8 +65,16 @@ that should be.
   screen: this fact started as a turn and earned durability.
 - `enrichment_status: "complete"` — a background worker did this, after the turn
   returned. The user never waited for it.
-- No `expires_at`. Long-term memory has no TTL. That absence, next to Tab 1's
-  date, is the tier distinction in one glance.
+- `expires_at` — **~90 days out, where Tab 1's was ~24 hours.** Same field, same
+  TTL index, different `retention_tier`. That contrast is the tier distinction in
+  one glance, and it is a stronger line than "long-term has no expiry" because it
+  shows retention as a *value* rather than an exception: one mechanism, tuned per
+  tier, no second system for the durable case.
+
+**Do not say long-term memory has no `expires_at`.** Every LTM document carries
+one — `retention_tier: "standard"` resolves to 90 days at write time. An earlier
+version of this file claimed the field was absent; it is on screen with a date in
+it, and the audience can read it.
 
 Note: `summary` is absent on this data. That is correct, not missing — these
 memories are single sentences, already shorter than any summary of them, so the

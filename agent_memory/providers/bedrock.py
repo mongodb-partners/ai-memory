@@ -14,6 +14,7 @@ from agent_memory.providers.base import (
     EmbeddingProvider,
     LLMProvider,
     parse_importance,
+    render_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,15 +101,14 @@ class BedrockLLMProvider(LLMProvider):
 
     async def assess_importance(self, content: str, prompt: str | None = None) -> float:
         """Ask the LLM to rate importance on a 1-10 scale, normalize to 0.1-1.0."""
-        if prompt:
-            text = prompt.format(content=content)
-        else:
-            text = (
-                "Rate the importance of the following memory on a scale of 1-10, "
-                "where 1 is trivial and 10 is critically important. "
-                "Respond with ONLY a single integer.\n\n"
-                f"Memory: {content}"
-            )
+        text = render_prompt(
+            prompt,
+            content,
+            "Rate the importance of the following memory on a scale of 1-10, "
+            "where 1 is trivial and 10 is critically important. "
+            "Respond with ONLY a single integer.\n\n"
+            f"Memory: {content}",
+        )
         response = await self.complete(text)
         # Handles both scales, because `prompt` may ask for either. See
         # `parse_importance` — a naive `\d+` silently floors every 0.0-1.0 reply.
@@ -116,14 +116,13 @@ class BedrockLLMProvider(LLMProvider):
 
     async def generate_summary(self, content: str, max_length: int = 100, prompt: str | None = None) -> str:
         """Ask the LLM to summarize content."""
-        if prompt:
-            text = prompt.format(content=content)
-        else:
-            text = (
-                f"Summarize the following text in {max_length} words or fewer. "
-                "Be concise and capture the key points.\n\n"
-                f"Text: {content}"
-            )
+        text = render_prompt(
+            prompt,
+            content,
+            f"Summarize the following text in {max_length} words or fewer. "
+            "Be concise and capture the key points.\n\n"
+            f"Text: {content}",
+        )
         return await self.complete(text)
 
     async def chat_stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:

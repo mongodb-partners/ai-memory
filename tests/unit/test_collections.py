@@ -143,6 +143,11 @@ class TestSearchIndexes:
         assert "user_id" in filter_paths
         assert "tier" in filter_paths
         assert "deleted_at" in filter_paths
+        # `recall` and `hybrid_search` both pre-filter on these. The stronger
+        # assertion — every path the built pipelines actually use is declared —
+        # lives in test_search_filter_contract.py.
+        assert "memory_type" in filter_paths
+        assert "tags" in filter_paths
 
     def test_fts_index_has_content_and_summary(self):
         idx = [i for i in SEARCH_INDEXES if i["name"] == "memories_fts_index"][0]

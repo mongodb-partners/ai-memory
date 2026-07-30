@@ -136,8 +136,11 @@ class EpisodicService:
             # in the (user_id, correlation_id) index.
             "correlation_id": correlation_id or "",
             # The worker resolves this into step/parent_step from the durable
-            # counter, keeping that round trip off this call.
-            "__assign_step": thread_id,
+            # counter, keeping that round trip off this call. Scoped by user as
+            # well as thread: `thread_id` alone is caller-supplied and not
+            # namespaced, so two tenants that both call their thread "main"
+            # would share one sequence — each of them seeing steps skip.
+            "__assign_step": {"user_id": user_id, "thread_id": thread_id},
         }
 
         self._maybe_attach_search_text(doc, messages_proj, thread_id)
@@ -201,9 +204,18 @@ class EpisodicService:
         goes into both branches, so isolation is enforced by the engine rather
         than by the caller remembering to add it.
 
-        ``since`` is applied after fusion: ``ts`` is not a vector-index filter
-        field, and declaring a high-cardinality date as one would bloat the index
-        for a rarely-used narrowing.
+        ``since`` is applied after fusion but *before* the limit: ``ts`` is not a
+        vector-index filter field, and declaring a high-cardinality date as one
+        would bloat the index for a rarely-used narrowing.
+
+        The ordering is load-bearing. This used to append the ``$match`` after the
+        whole pipeline, so it ran on an already-truncated list: fusion ranked
+        across all time, ``$limit`` kept the top ``limit``, and the date filter
+        then removed whatever was too old. "The 5 most relevant turns since
+        yesterday" returned only those of the 5 best-all-time that happened to be
+        recent — often none, while the collection held plenty of matching recent
+        turns. The failure looks like "no activity found", which is a plausible
+        enough answer that nobody questions it.
         """
         limit = min(limit, self.config.max_results_per_query)
         query_embedding = await self.providers.embedding.generate_embedding(query)
@@ -234,9 +246,10 @@ class EpisodicService:
             limit=limit,
             vector_weight=self.config.rrf_vector_weight,
             text_weight=self.config.rrf_text_weight,
+            post_fusion_stages=(
+                [{"$match": {"ts": {"$gte": since}}}] if since is not None else None
+            ),
         )
-        if since is not None:
-            pipeline.append({"$match": {"ts": {"$gte": since}}})
 
         cursor = await self.episodes.aggregate(pipeline)
         results = await cursor.to_list(None)
@@ -255,11 +268,28 @@ class EpisodicService:
         """Return a thread's turns in step order — the replay read.
 
         ``user_id`` is required, not optional: a thread id is not a capability.
+
+        Sorted on ``ts`` first, with ``step`` as the tie-break — the reverse of
+        what it looks like it should be, and deliberate. ``step`` is *usually*
+        authoritative and monotonic, but the worker writes ``step: null`` rather
+        than dropping a turn when the durable counter round trip fails ("a logged
+        turn beats a lost one", ``episodic_worker``). Sorting on ``step`` first
+        puts every one of those nulls at one end of the thread in MongoDB's BSON
+        type ordering — null sorts below every number — so an Atlas hiccup during
+        turn 4 of 40 does not lose that turn, it *relocates* it to the front of the
+        replay. The reader sees a coherent conversation in the wrong order and has
+        no way to tell, because nothing about the output says a step is missing.
+
+        Timestamps are always present and always monotonic per thread (the worker
+        is a single consumer, and ``ts`` is stamped at ``log_activity`` on the
+        caller's path, before any queueing). They are the reliable spine. ``step``
+        then orders turns that share a timestamp, which is the case ``ts`` alone
+        cannot resolve at millisecond granularity.
         """
         direction = 1 if ascending else -1
         return await self._read(
             {"user_id": user_id, "thread_id": thread_id},
-            sort=[("step", direction), ("ts", direction)],
+            sort=[("ts", direction), ("step", direction)],
             limit=limit,
         )
 
@@ -298,21 +328,39 @@ class EpisodicService:
     # ─── Retention ───────────────────────────────────────────────
 
     async def set_retention(self, ttl_seconds: int | None) -> dict[str, Any]:
-        """Change episodic retention in place. Never raises.
+        """Change episodic retention **for the whole collection**. Never raises.
 
         ``collMod`` mutates ``expireAfterSeconds`` without dropping the index,
         so retention is a runtime knob rather than a redeploy. ``None`` removes
         the TTL index, making the log permanent.
 
         Falls back to ``create_index`` on deployments without ``collMod``.
+
+        **Scope.** A TTL index belongs to a collection, not to a tenant, so this
+        retunes retention for *every* user's turns. The facade takes a ``user_id``
+        because the call still has to be authorised and audited against a
+        principal — not because the effect is scoped to them. Every return value
+        therefore carries ``scope: "collection"``, and it is why the operation is
+        in the ``admin`` category and withheld from ``power_user``: one tenant
+        must not be able to shorten another's retention, and the honest way to
+        say that is to make it an operator action.
+
+        Per-user retention would need a per-document ``expires_at`` and a TTL
+        index on that field instead of ``ts``. That is a document-shape change,
+        not a knob, and it is deliberately not pretended to be one here.
         """
         if ttl_seconds is None:
             try:
                 await self.episodes.drop_index(TTL_INDEX)
-                return {"status": "removed", "ttl_seconds": None}
+                return {"status": "removed", "ttl_seconds": None, "scope": "collection"}
             except Exception as exc:
                 logger.warning("Episodic TTL removal failed: %s", exc)
-                return {"status": "error", "ttl_seconds": None, "error": str(exc)}
+                return {
+                    "status": "error",
+                    "ttl_seconds": None,
+                    "scope": "collection",
+                    "error": str(exc),
+                }
 
         try:
             await self.episodes.database.command(
@@ -324,7 +372,11 @@ class EpisodicService:
                     },
                 }
             )
-            return {"status": "updated", "ttl_seconds": ttl_seconds}
+            return {
+                "status": "updated",
+                "ttl_seconds": ttl_seconds,
+                "scope": "collection",
+            }
         except Exception as exc:
             logger.warning(
                 "Episodic set_retention: collMod unavailable (%s); creating the "
@@ -336,10 +388,19 @@ class EpisodicService:
             await self.episodes.create_index(
                 [("ts", 1)], name=TTL_INDEX, expireAfterSeconds=ttl_seconds
             )
-            return {"status": "created", "ttl_seconds": ttl_seconds}
+            return {
+                "status": "created",
+                "ttl_seconds": ttl_seconds,
+                "scope": "collection",
+            }
         except Exception as exc:
             logger.warning("Episodic TTL creation failed: %s", exc)
-            return {"status": "error", "ttl_seconds": ttl_seconds, "error": str(exc)}
+            return {
+                "status": "error",
+                "ttl_seconds": ttl_seconds,
+                "scope": "collection",
+                "error": str(exc),
+            }
 
 
 __all__ = ["EpisodicService"]

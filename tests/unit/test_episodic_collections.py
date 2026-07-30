@@ -30,9 +30,18 @@ class TestStandardIndexes:
         }
 
     def test_thread_step_index_supports_ordered_replay(self):
-        # TC-EP-COLL-002
+        """TC-EP-COLL-002: the index mirrors what `get_thread` actually issues.
+
+        Equality prefix `(user_id, thread_id)` then the sort `(ts, step)`. This
+        replaced `[("thread_id", 1), ("step", 1)]`, which matched neither half:
+        it omitted the tenant filter that every episodic read carries, so
+        isolation became a residual predicate applied after the scan, and it led
+        on `step`, which is not the sort the read issues and can be null.
+        """
         ix = _by_name(_episode_indexes(), "ix_episodes_thread_step")
-        assert ix["keys"] == [("thread_id", 1), ("step", 1)]
+        assert ix["keys"] == [
+            ("user_id", 1), ("thread_id", 1), ("ts", 1), ("step", 1),
+        ]
 
     def test_user_ts_index_is_descending_for_recency(self):
         # TC-EP-COLL-003
@@ -42,7 +51,9 @@ class TestStandardIndexes:
     def test_correlation_index_is_user_scoped(self):
         # TC-EP-COLL-004: a correlation id alone must not cross tenants.
         ix = _by_name(_episode_indexes(), "ix_episodes_correlation")
-        assert ix["keys"] == [("user_id", 1), ("correlation_id", 1)]
+        assert ix["keys"][:2] == [("user_id", 1), ("correlation_id", 1)]
+        # …and covers the sort the read issues, so a wide trace does not blocking-sort.
+        assert ix["keys"][2:] == [("ts", 1), ("step", 1)]
 
     def test_ttl_index_expires_on_ts(self):
         # TC-EP-COLL-005

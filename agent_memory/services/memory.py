@@ -3,6 +3,7 @@
 import logging
 import math
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from bson import ObjectId
 
@@ -10,6 +11,35 @@ from agent_memory.core.config import MCPConfig
 from agent_memory.services.search_pipeline import rank_fusion_pipeline
 
 logger = logging.getLogger(__name__)
+
+# The retention tier a promoted memory lands in. Named rather than inlined because
+# promotion sets `retention_tier` and `expires_at` and the two must agree — a
+# document claiming `standard` while carrying an STM expiry is how long-term
+# memories came to be deleted on a 24-hour schedule.
+PROMOTED_RETENTION_TIER = "standard"
+
+
+def retention_ttl(config: MCPConfig, retention_tier: str) -> timedelta:
+    """TTL for a retention tier. Unknown tiers fall back to standard.
+
+    Module-level rather than a `MemoryService` method because the consolidation
+    worker needs exactly this mapping when it promotes STM→LTM, and it holds no
+    `MemoryService`. Duplicating the table there is what let promotion change
+    `tier` and `retention_tier` while leaving `expires_at` on its short-term
+    schedule: the promoted memory kept the 24-hour TTL it was born with, so the
+    TTL index deleted it a day later despite it being long-term by every field
+    that describes it. One table, one meaning.
+    """
+    tier_map = {
+        "critical": timedelta(days=config.ltm_retention_critical_days),
+        "reference": timedelta(days=config.ltm_retention_reference_days),
+        "standard": timedelta(days=config.ltm_retention_standard_days),
+        "temporary": timedelta(days=config.ltm_retention_temporary_days),
+        "ephemeral": timedelta(hours=config.stm_ttl_hours),
+    }
+    return tier_map.get(
+        retention_tier, timedelta(days=config.ltm_retention_standard_days)
+    )
 
 
 def _sanitize_value(val):
@@ -24,6 +54,41 @@ def _sanitize_value(val):
     if isinstance(val, list):
         return [_sanitize_value(item) for item in val]
     return val
+
+
+def tag_filter(tags: list[str]) -> dict:
+    """An all-of tag restriction expressed in operators ``$vectorSearch`` supports.
+
+    ``{"tags": {"$all": [...]}}`` is the obvious spelling and the wrong one here.
+    A ``$vectorSearch`` pre-filter accepts only ``$eq``/``$ne``, the range
+    operators, ``$in``/``$nin``, ``$exists``, and ``$and``/``$or``/``$not``/``$nor``
+    — ``$all`` is not among them, and an unsupported operator in a pre-filter does
+    not raise. The branch matches nothing, so every tag-filtered search came back
+    empty and read as "no memories carry those tags".
+
+    ``filter`` fields may be arrays, and an array field matches when *any* element
+    matches. So all-of is an ``$and`` of single-value equalities: each clause
+    requires that one tag be present, and together they require all of them. This
+    is the same semantics ``$all`` has, in operators the engine will actually
+    evaluate.
+
+    A single tag needs no wrapper, which keeps the common filter simple enough to
+    read in a log.
+    """
+    if len(tags) == 1:
+        return {"tags": tags[0]}
+    return {"$and": [{"tags": t} for t in tags]}
+
+
+def tag_fts_clauses(tags: list[str]) -> list[dict]:
+    """The same all-of tag restriction as Atlas Search ``equals`` clauses.
+
+    ``compound.filter`` is itself an AND, so one ``equals`` per tag gives all-of
+    without further nesting. ``equals`` matches an array field when any element
+    matches, and requires the field to be indexed as ``token`` — see
+    ``memories_fts_index``.
+    """
+    return [{"equals": {"path": "tags", "value": t}} for t in tags]
 
 
 def _sanitize_doc(doc: dict) -> None:
@@ -51,14 +116,7 @@ class MemoryService:
 
     def _retention_ttl(self, retention_tier: str) -> timedelta:
         """Return TTL for a given retention tier."""
-        tier_map = {
-            "critical": timedelta(days=self.config.ltm_retention_critical_days),
-            "reference": timedelta(days=self.config.ltm_retention_reference_days),
-            "standard": timedelta(days=self.config.ltm_retention_standard_days),
-            "temporary": timedelta(days=self.config.ltm_retention_temporary_days),
-            "ephemeral": timedelta(hours=self.config.stm_ttl_hours),
-        }
-        return tier_map.get(retention_tier, timedelta(days=self.config.ltm_retention_standard_days))
+        return retention_ttl(self.config, retention_tier)
 
     def _base_filter(self, user_id: str, **extra) -> dict:
         """Base filter injecting user isolation and soft-delete exclusion."""
@@ -160,7 +218,14 @@ class MemoryService:
         tags: list[str] | None = None,
         limit: int | None = None,
     ) -> list[dict]:
-        """Semantic search with calibrated ranking and STM/LTM dedup."""
+        """Semantic search with calibrated ranking and STM/LTM dedup.
+
+        ``memory_type`` and ``tags`` are ``$vectorSearch`` *pre-filters*, so both
+        paths have to be declared as ``filter`` fields in
+        ``memories_vector_index`` — see ``core.collections``. An undeclared path
+        silently matches nothing rather than erroring, so the two narrowing
+        arguments this method advertises used to guarantee an empty result.
+        """
         limit = min(limit or 10, self.config.max_results_per_query)
         query_embedding = await self.providers.embedding.generate_embedding(query)
 
@@ -171,7 +236,9 @@ class MemoryService:
         if memory_type:
             vs_filter["memory_type"] = memory_type
         if tags:
-            vs_filter["tags"] = {"$all": tags}
+            # `tag_filter`, not `{"$all": tags}`: `$all` is not a supported
+            # pre-filter operator and fails silently. See `tag_filter`.
+            vs_filter.update(tag_filter(tags))
 
         pipeline = [
             {
@@ -349,6 +416,14 @@ class MemoryService:
         Returns raw fused-relevance matches (with scores), no curation — the
         ``search`` primitive. Extracted from the former ``hybrid_search`` MCP
         tool so the facade stays a thin orchestration layer.
+
+        ``memory_type`` and ``tags`` are applied to **both** branches. Applying a
+        narrowing to only one is worse than not applying it: the vector branch
+        honoured it, the full-text branch did not, and ``$rankFusion`` fused the two
+        ranked lists — so a search scoped to one ``memory_type`` returned documents
+        of other types, mixed in by relevance and indistinguishable from correct
+        hits. ``user_id`` was always in both, so this was never an isolation bug,
+        but the caller's filter meant whatever the fusion happened to produce.
         """
         limit = min(limit, self.config.max_results_per_query)
         tiers = tier or ["stm", "ltm"]
@@ -358,7 +433,7 @@ class MemoryService:
         if memory_type:
             vs_filter["memory_type"] = memory_type
         if tags:
-            vs_filter["tags"] = {"$all": tags}
+            vs_filter.update(tag_filter(tags))
 
         fts_filter_clauses = [
             {"equals": {"path": "user_id", "value": user_id}},
@@ -366,6 +441,12 @@ class MemoryService:
         ]
         if tiers:
             fts_filter_clauses.append({"in": {"path": "tier", "value": tiers}})
+        if memory_type:
+            fts_filter_clauses.append(
+                {"equals": {"path": "memory_type", "value": memory_type}}
+            )
+        if tags:
+            fts_filter_clauses.extend(tag_fts_clauses(tags))
 
         pipeline = rank_fusion_pipeline(
             query=query,
@@ -387,17 +468,39 @@ class MemoryService:
         return results
 
     async def evolve_memory(
-        self, user_id: str, content: str, embedding: list[float]
+        self,
+        user_id: str,
+        content: str,
+        embedding: list[float],
+        *,
+        exclude_id: Any = None,
     ) -> str:
-        """Check for similar memories and reinforce/merge/create."""
-        pipeline = [
+        """Check for similar memories and reinforce/merge/create.
+
+        ``exclude_id`` is the memory this call is evolving, and passing it matters.
+        The only caller is the enrichment worker, which runs *after* the document
+        is already stored — so a search for "memories similar to this content"
+        found the document itself, at a similarity of essentially 1.0. That is
+        above ``reinforce_threshold`` by construction, so every enrichment pass
+        took the reinforce branch against its own ``_id``: it multiplied its own
+        importance by 1.1, incremented its own ``access_count``, and returned
+        "reinforced" without ever looking at the real duplicates ranked below it.
+
+        Two things were wrong at once. Genuine near-duplicates were never merged,
+        because the self-match consumed the decision; and importance drifted upward
+        on nothing — a memory that no one had read became "important" purely by
+        being enriched, which then biased ranking and promotion in its favour.
+        """
+        pipeline: list[dict[str, Any]] = [
             {
                 "$vectorSearch": {
                     "index": "memories_vector_index",
                     "path": "embedding",
                     "queryVector": embedding,
                     "numCandidates": 50,
-                    "limit": 5,
+                    # One extra candidate, so excluding the self-match below still
+                    # leaves five real ones to consider.
+                    "limit": 6 if exclude_id is not None else 5,
                     "filter": {
                         "user_id": user_id,
                         "tier": "ltm",
@@ -407,6 +510,11 @@ class MemoryService:
             },
             {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
         ]
+        if exclude_id is not None:
+            # A `$match` after the search rather than a `$vectorSearch` filter:
+            # filter fields have to be declared in the index definition and `_id`
+            # is not one of them, so putting it there would be silently ignored.
+            pipeline.append({"$match": {"_id": {"$ne": exclude_id}}})
 
         cursor = await self.memories.aggregate(pipeline)
         similar = await cursor.to_list(None)

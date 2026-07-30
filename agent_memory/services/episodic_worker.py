@@ -26,7 +26,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pymongo import ReturnDocument
-from pymongo.errors import PyMongoError
+from pymongo.errors import BulkWriteError, PyMongoError
+
+from agent_memory.core.redaction import redact_error
 
 logger = logging.getLogger(__name__)
 
@@ -183,12 +185,19 @@ class EpisodicWorker:
         Durable rather than in-memory so ``step`` keeps counting across process
         restarts — a turn log whose numbering resets is misleading about order.
         """
-        thread_id = doc.pop(_KEY_ASSIGN_STEP, None)
-        if thread_id is None:
+        key = doc.pop(_KEY_ASSIGN_STEP, None)
+        if key is None:
             return
+        # `_id` is the composite {user_id, thread_id} rather than the bare
+        # thread_id. Two things depend on it: sequences cannot collide across
+        # tenants that pick the same thread name, and `wipe_user_data` can
+        # actually find a user's counters to delete. A str is tolerated for
+        # documents enqueued by an older build mid-upgrade.
+        if isinstance(key, str):
+            key = {"user_id": doc.get("user_id") or "", "thread_id": key}
         try:
             result = await self.counters.find_one_and_update(
-                {"_id": thread_id},
+                {"_id": key},
                 {"$inc": {"seq": 1}},
                 upsert=True,
                 return_document=ReturnDocument.AFTER,
@@ -230,15 +239,69 @@ class EpisodicWorker:
             else:
                 # ordered=False so one bad document does not abort the rest.
                 await self.collection.insert_many(batch, ordered=False)
+        except BulkWriteError as exc:
+            # The whole point of ordered=False is that this is a *partial*
+            # failure: the good documents are already in the collection and the
+            # exception reports which ones were not. Treating it as a total
+            # failure — which the previous handler did — got both halves of the
+            # telemetry wrong at once. One malformed document in a batch of 20
+            # added 20 to `write_failures` and 0 to `written`, so the counter a
+            # `/health` probe watches reported a total outage during what was
+            # really a 5% error rate, and the audit trail recorded 19 users'
+            # successfully stored turns as errors against their own ids.
+            await self._record_partial(batch, exc, started)
+            return
         except Exception as exc:
             self._write_failures += len(batch)
             logger.warning("Episodic insert failed (%d docs): %s", len(batch), exc)
-            await self._audit(batch, "error", started, error=str(exc))
+            await self._audit(batch, "error", started, error=redact_error(exc))
             return
         self._written += len(batch)
         self._batches += 1
         self._last_write_ts = datetime.now(UTC)
         await self._audit(batch, "success", started)
+
+    async def _record_partial(
+        self, batch: list[dict[str, Any]], exc: BulkWriteError, started: datetime
+    ) -> None:
+        """Split a partially-failed batch and account for each half separately.
+
+        ``writeErrors[].index`` positions each failure within the batch we
+        submitted, so the successes are exactly the complement — this is
+        recoverable precisely, not estimated. ``nInserted`` is used as the
+        authority for the counters because a driver that reports a failure
+        without an index (a duplicate-key report on a retried write, for
+        instance) would otherwise be silently counted as a success.
+        """
+        details = getattr(exc, "details", None) or {}
+        write_errors = details.get("writeErrors") or []
+        failed_idx = {
+            e["index"] for e in write_errors
+            if isinstance(e, dict) and isinstance(e.get("index"), int)
+        }
+        failed = [d for i, d in enumerate(batch) if i in failed_idx]
+        ok = [d for i, d in enumerate(batch) if i not in failed_idx]
+
+        # Prefer the driver's own count; fall back to the partition when the
+        # details payload is absent or malformed.
+        inserted = details.get("nInserted")
+        inserted = len(ok) if not isinstance(inserted, int) else inserted
+        n_failed = max(0, len(batch) - inserted)
+
+        self._written += inserted
+        self._write_failures += n_failed
+        if inserted:
+            self._batches += 1
+            self._last_write_ts = datetime.now(UTC)
+
+        logger.warning(
+            "Episodic insert partially failed: %d of %d documents rejected (%s).",
+            n_failed, len(batch), redact_error(exc),
+        )
+        if ok:
+            await self._audit(ok, "success", started)
+        if failed:
+            await self._audit(failed, "error", started, error=redact_error(exc))
 
     async def _audit(
         self,

@@ -1,5 +1,6 @@
 """Semantic cache service — check, store, invalidate (hard delete)."""
 
+import re
 from datetime import UTC, datetime
 
 from agent_memory.core.config import MCPConfig
@@ -69,12 +70,29 @@ class CacheService:
         pattern: str | None = None,
         invalidate_all: bool = False,
     ) -> int:
-        """Hard-delete cached entries. No soft-delete for cache."""
+        """Hard-delete cached entries. No soft-delete for cache.
+
+        ``pattern`` is a **literal substring**, not a regular expression. It used
+        to be interpolated into ``$regex`` verbatim, which handed every caller —
+        including an MCP client and an untrusted REST body — the regex engine:
+
+        - ``.*`` deletes the user's entire cache while asking for one entry, so a
+          typo silently does far more than the caller intended.
+        - a catastrophically backtracking pattern such as ``(a+)+$`` is evaluated
+          server-side against every cached query, which is a denial of service
+          against the cluster rather than just this collection.
+        - anchors and character classes make the effective scope of a request
+          impossible to predict from reading it.
+
+        ``re.escape`` makes the input mean what it says. Callers who genuinely
+        wanted "clear everything" have ``invalidate_all``, which is explicit,
+        already exists, and is the honest way to ask for it.
+        """
         if invalidate_all:
             result = await self.cache.delete_many({"user_id": user_id})
         elif pattern:
             result = await self.cache.delete_many(
-                {"user_id": user_id, "query": {"$regex": pattern}}
+                {"user_id": user_id, "query": {"$regex": re.escape(pattern)}}
             )
         else:
             return 0

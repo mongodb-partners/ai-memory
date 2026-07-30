@@ -20,6 +20,7 @@ from agent_memory.config import MemoryConfig
 from agent_memory.core.redaction import redact_error
 from agent_memory.core.response_limit import cap_results
 from agent_memory.exceptions import AccessError, ConfigError, RateLimitError
+from agent_memory.services.audit import ERASURE_PRINCIPAL
 
 logger = logging.getLogger(__name__)
 
@@ -684,14 +685,59 @@ class AsyncMemory:
         ``scope: "collection"`` to say so at the call site. This is an ``admin``
         operation and is withheld from ``power_user`` precisely because one tenant
         must not be able to shorten another's retention.
+
+        That withholding is enforced by the governance service, which is
+        **optional and off by default** — so on a default multi-tenant deployment
+        the `"admin"` category above bought nothing, and any authenticated caller
+        could shorten every other tenant's retention (or set it to keep-forever)
+        through a public REST endpoint. Deleting other tenants' turns is the
+        destructive direction, and it happens quietly: Atlas expires the documents
+        later, so the caller sees only ``{"scope": "collection"}`` and the data
+        goes away on the TTL monitor's schedule.
+
+        Hence :meth:`_require_admin_for_global_mutation` below, which does not
+        depend on governance being switched on. Every other ``admin``-category
+        operation is scoped to one ``user_id``; this is the only one that reaches
+        across tenants, which is why the guard lives here rather than in
+        ``_check_access``.
         """
         async def _do():
+            # Inside the factory, so the refusal runs within `_run` and is audited
+            # as `denied` like every other access failure. Raising before `_run`
+            # would leave the one cross-tenant attempt worth seeing unlogged.
+            self._require_admin_for_global_mutation("set_activity_retention", role)
             return await self.episodic_service.set_retention(ttl_seconds)
 
         return await self._run(
             user_id, "set_activity_retention", "admin", _do, role=role,
             ttl_seconds=ttl_seconds,
         )
+
+    def _require_admin_for_global_mutation(self, operation: str, role: str | None) -> None:
+        """Refuse a cross-tenant mutation to anyone who is not an admin.
+
+        Deliberately independent of ``governance_service``. Governance is opt-in,
+        and an authorisation rule that only exists when an optional subsystem is
+        enabled is not an authorisation rule — it is a default-open one. The
+        ``admin`` category on the ``_run`` call is still correct and still applies
+        when governance *is* on; this is the floor underneath it.
+
+        With auth off there is no role claim and no way to tell callers apart, but
+        there is also only one tenant: that is the documented single-tenant
+        posture, ``require_auth_for_multi_tenant`` exists to forbid it where it is
+        unacceptable, and "collection-wide" means "the only tenant's own data". So
+        the guard applies only when auth is on, where a role claim is available and
+        `"every tenant"` means something.
+        """
+        if not getattr(self.config, "auth_enabled", False):
+            return
+        effective_role = role or self.config.auth_default_role
+        if effective_role != "admin":
+            raise AccessError(
+                f"Operation '{operation}' changes retention for every tenant and "
+                f"requires the 'admin' role; this token's role is "
+                f"'{effective_role}'"
+            )
 
     def activity_stats(self) -> dict:
         """Episodic queue and throughput counters. Synchronous, no round trip."""
@@ -744,16 +790,90 @@ class AsyncMemory:
         return await self._run(user_id, "memory_health", "admin", _do, role=role)
 
     async def wipe_user_data(self, user_id: str, confirm: bool = False, *, role=None) -> dict:
+        """Permanently delete every document this user owns. Irreversible.
+
+        Audited against :data:`ERASURE_PRINCIPAL` rather than ``user_id``, which is
+        the whole reason this method does not simply call ``_run``.
+
+        ``_run`` audits *after* the service call, and the service call deletes
+        every ``audit_log`` row matching this ``user_id``. So the success record
+        was written into the collection the wipe had just cleared, under the
+        identifier it had just erased — a user who asked to be forgotten was left
+        with a row naming them, dated a millisecond after the deletion, and that
+        row was the only thing standing between the operation and doing what it
+        said. Worse than a leftover: it was created *by* the erasure, so it
+        survived every subsequent wipe too, each one recreating it.
+
+        Deleting the record instead is not the fix. A total, irreversible deletion
+        is precisely the operation that must leave a trace. So the trace is kept
+        and the subject dropped: what ran, when, how long it took, and how many
+        documents left each collection, filed against a reserved principal that is
+        not a tenant. See :data:`ERASURE_PRINCIPAL`.
+
+        The access check still runs against the real ``user_id`` — authorisation is
+        about who is asking, and that decision has to be made before anything is
+        deleted. Only the audit subject changes.
+        """
         if not confirm:
             return {
                 "error": "wipe_user_data requires confirm=true. "
                 "This will permanently delete ALL user data."
             }
 
-        async def _do():
-            return await self.admin_service.wipe_user_data(user_id)
+        start = time.time()
+        # `_check_access` against the real identity, and its refusals audited the
+        # ordinary way: a *denied* wipe deleted nothing, so there is no erasure to
+        # respect and the attempt is worth attributing. Only a wipe that actually
+        # ran needs the subject withheld.
+        try:
+            await self._check_access(user_id, "wipe_user_data", role=role)
+        except AccessError as e:
+            status = "throttled" if isinstance(e, RateLimitError) else "denied"
+            await self.audit_service.log(
+                user_id, "admin", "wipe_user_data", status,
+                int((time.time() - start) * 1000), error=redact_error(e),
+            )
+            raise
 
-        return await self._run(user_id, "wipe_user_data", "admin", _do, role=role)
+        # Any buffered entry naming this user is flushed *before* the delete, so
+        # the delete sees it and removes it. `audit_flush_on_write` defaults to
+        # False, so up to `audit_buffer_size` of this user's records normally sit
+        # in memory; without this they would be written to Atlas after the wipe
+        # had already swept the collection, restoring exactly the rows it removed.
+        # An audit buffer is a pending write, and a wipe has to account for it.
+        await self.audit_service.flush()
+
+        try:
+            result = await self.admin_service.wipe_user_data(user_id)
+        except Exception as e:
+            duration_ms = int((time.time() - start) * 1000)
+            fields = {"error": redact_error(e)}
+            # A partial wipe deleted real data; what survived is the only thing
+            # that makes a retry possible, so it goes in the record. The counts
+            # are per-collection integers and name no one.
+            counts = getattr(e, "counts", None)
+            if isinstance(counts, dict):
+                fields["deleted"] = {k: v for k, v in counts.items()
+                                     if k != "user_id"}
+                fields["failed_collections"] = sorted(getattr(e, "errors", {}))
+            await self.audit_service.log(
+                ERASURE_PRINCIPAL, "admin", "wipe_user_data", "error",
+                duration_ms, **fields,
+            )
+            raise
+
+        duration_ms = int((time.time() - start) * 1000)
+        # `result` minus `user_id`: the counts describe the erasure without
+        # re-identifying its subject, which is the point of the whole method.
+        await self.audit_service.log(
+            ERASURE_PRINCIPAL, "admin", "wipe_user_data", "success", duration_ms,
+            deleted={k: v for k, v in result.items() if k != "user_id"},
+        )
+        # Flushed immediately rather than left buffered: this record is the only
+        # evidence the operation happened, and the process could exit before the
+        # buffer fills or its interval elapses.
+        await self.audit_service.flush()
+        return result
 
 
 async def _ensure_search_indexes_bg(db, embedding_dimension: int = 1536, ensure=None) -> None:

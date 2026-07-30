@@ -597,6 +597,14 @@ class TestRecallFilters:
         assert vs_filter["memory_type"] == "factual"
 
     async def test_recall_with_tags_filter(self):
+        """A single tag is a plain equality, not `$all`.
+
+        This assertion used to require `{"$all": [...]}`, which is the defect: a
+        `$vectorSearch` pre-filter does not support `$all` and does not reject it
+        either, so the branch matched nothing and every tag-filtered recall came
+        back empty. An array `filter` field matches when any element matches, so
+        equality is both correct and supported.
+        """
         col = _make_collection()
         config = _make_config()
         providers = _make_providers()
@@ -609,7 +617,8 @@ class TestRecallFilters:
         await service.recall("user1", "query", tags=["topic:test"])
         pipeline = col.aggregate.call_args[0][0]
         vs_filter = pipeline[0]["$vectorSearch"]["filter"]
-        assert vs_filter["tags"] == {"$all": ["topic:test"]}
+        assert vs_filter["tags"] == "topic:test"
+        assert "$all" not in str(vs_filter)
 
 
 class TestDeduplication:

@@ -65,11 +65,21 @@ STANDARD_INDEXES: list[dict] = [
         },
     },
     # -- episodes --
-    # Thread replay in step order; the primary read path for "show me this
-    # conversation's turns".
+    # Thread replay; the primary read path for "show me this conversation's
+    # turns". The key order mirrors `get_thread` exactly: equality on
+    # (user_id, thread_id), then the sort on (ts, step).
+    #
+    # `user_id` leads because every episodic read is tenant-scoped — a thread id
+    # is not a capability — so an index keyed on thread_id alone leaves the
+    # isolation filter as a residual predicate the server applies after the scan.
+    # `ts` precedes `step` because that is the sort `get_thread` issues, and the
+    # sort order is itself deliberate: `step` can be null when the durable counter
+    # failed, and null sorts below every number, so leading on it would relocate a
+    # turn to the front of the replay rather than keep it in place. See
+    # `EpisodicService.get_thread`.
     {
         "collection": EPISODES,
-        "keys": [("thread_id", 1), ("step", 1)],
+        "keys": [("user_id", 1), ("thread_id", 1), ("ts", 1), ("step", 1)],
         "name": "ix_episodes_thread_step",
     },
     {
@@ -82,10 +92,13 @@ STANDARD_INDEXES: list[dict] = [
         "keys": [("thread_id", 1), ("ts", -1)],
         "name": "ix_episodes_thread_ts",
     },
-    # Join a logged turn back to a trace or support ticket.
+    # Join a logged turn back to a trace or support ticket. Same shape as the
+    # thread index: equality prefix, then the (ts, step) sort the read issues.
     {
         "collection": EPISODES,
-        "keys": [("user_id", 1), ("correlation_id", 1)],
+        "keys": [
+            ("user_id", 1), ("correlation_id", 1), ("ts", 1), ("step", 1),
+        ],
         "name": "ix_episodes_correlation",
     },
     {
@@ -170,7 +183,13 @@ def get_search_indexes(embedding_dimension: int = _DEFAULT_EMBEDDING_DIMENSION) 
     embedding provider (e.g. 1536 for Bedrock Titan, 1024 for Voyage).
     """
     return [
-        # Vector search on memories
+        # Vector search on memories.
+        #
+        # `memory_type` and `tags` are here because `recall` and `hybrid_search`
+        # both pre-filter on them. An undeclared filter path is not an error — the
+        # branch just matches nothing — so a filtered recall returned zero results
+        # while the memories sat in the collection. The failure looks like "the user
+        # has no memories of that type", which is indistinguishable from the truth.
         {
             "collection": MEMORIES,
             "name": "memories_vector_index",
@@ -186,10 +205,17 @@ def get_search_indexes(embedding_dimension: int = _DEFAULT_EMBEDDING_DIMENSION) 
                     {"type": "filter", "path": "user_id"},
                     {"type": "filter", "path": "tier"},
                     {"type": "filter", "path": "deleted_at"},
+                    {"type": "filter", "path": "memory_type"},
+                    # An array of strings. `filter` fields accept arrays of the
+                    # scalar types, matching when any element matches — which is
+                    # what lets an all-of tag query be expressed as an `$and` of
+                    # equalities. See `tag_filter` in services/memory.py.
+                    {"type": "filter", "path": "tags"},
                 ]
             },
         },
-        # Full-text search on memories
+        # Full-text search on memories. The scoping fields are `token`, not
+        # `string`: an analyzed field cannot back an exact `equals` filter.
         {
             "collection": MEMORIES,
             "name": "memories_fts_index",
@@ -203,6 +229,15 @@ def get_search_indexes(embedding_dimension: int = _DEFAULT_EMBEDDING_DIMENSION) 
                         "user_id": {"type": "token"},
                         "tier": {"type": "token"},
                         "is_deleted": {"type": "token"},
+                        # Declared in *both* indexes on purpose. A pre-filter that
+                        # only one branch of a `$rankFusion` applies is not a
+                        # filter: the unfiltered branch contributes matches that
+                        # ignore it, and fusion mixes them into the same ranked
+                        # list, so a `memory_type`-scoped search returned documents
+                        # of every other type — visibly wrong results rather than
+                        # missing ones.
+                        "memory_type": {"type": "token"},
+                        "tags": {"type": "token"},
                     },
                 }
             },

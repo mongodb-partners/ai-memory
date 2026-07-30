@@ -147,7 +147,10 @@ class TestLogActivityDocument:
         svc = _service()
         svc.log_activity("u1", "t1", _turn())
         doc = svc.worker.enqueue.call_args.args[0]
-        assert doc["__assign_step"] == "t1"
+        # Composite, not the bare thread_id: `thread_id` is caller-supplied and
+        # not namespaced, so two tenants both calling a thread "main" shared one
+        # step sequence and each saw its own numbering skip.
+        assert doc["__assign_step"] == {"user_id": "u1", "thread_id": "t1"}
         assert "step" not in doc
 
     def test_messages_are_projected_and_capped(self):
@@ -366,12 +369,49 @@ class TestSearch:
         assert len(clauses) == 3
 
     async def test_since_is_applied_after_fusion(self):
-        # TC-EP-SVC-044: ts is not a declared vector filter field.
+        # TC-EP-SVC-044: ts is not a declared vector filter field, so the
+        # narrowing has to happen in the pipeline rather than a branch pre-filter.
         col = _collection()
         cutoff = datetime.now(timezone.utc) - timedelta(days=1)
         await _service(col).search("u1", "q", since=cutoff)
 
-        assert col.aggregate.await_args.args[0][-1] == {"$match": {"ts": {"$gte": cutoff}}}
+        stages = col.aggregate.await_args.args[0]
+        assert {"$match": {"ts": {"$gte": cutoff}}} in stages
+        assert "$rankFusion" in stages[0]
+
+    async def test_since_narrows_before_the_limit_truncates(self):
+        """TC-EP-SVC-044b: the `$match` must precede `$limit`, not follow it.
+
+        This assertion replaces one that required the opposite. The old test
+        asserted `args[0][-1] == {"$match": ...}` — the `$match` as the *final*
+        stage — which is precisely the bug: fusion ranked across all time, `$limit`
+        kept the top N, and only then did the date filter run. Asking for the 5
+        most relevant turns since yesterday returned however many of the 5
+        best-all-time happened to be recent, frequently zero, while the collection
+        held plenty of matching recent turns.
+
+        The old test passed. It was pinning the defect in place, which is why the
+        ordering is now asserted as an index comparison rather than a position.
+        """
+        col = _collection()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+        await _service(col).search("u1", "q", since=cutoff)
+
+        stages = col.aggregate.await_args.args[0]
+        match_at = next(i for i, s in enumerate(stages) if "$match" in s)
+        limit_at = next(i for i, s in enumerate(stages) if "$limit" in s)
+        assert match_at < limit_at, (
+            "since filtered an already-truncated result set; recent matches "
+            "ranked below the cutoff are silently unreachable"
+        )
+
+    async def test_no_match_stage_when_since_is_absent(self):
+        """TC-EP-SVC-044c: the common path stays exactly as it was."""
+        col = _collection()
+        await _service(col).search("u1", "q")
+
+        stages = col.aggregate.await_args.args[0]
+        assert not any("$match" in s for s in stages)
 
     async def test_limit_is_clamped_to_the_configured_maximum(self):
         # TC-EP-SVC-045
@@ -403,13 +443,34 @@ class TestGetThread:
         await _service(col).get_thread("u1", "t1")
 
         assert col.find.call_args.args[0] == {"user_id": "u1", "thread_id": "t1"}
-        assert col.find.return_value.sort.call_args.args[0] == [("step", 1), ("ts", 1)]
+        assert col.find.return_value.sort.call_args.args[0] == [("ts", 1), ("step", 1)]
+
+    async def test_ts_leads_the_sort_so_a_null_step_stays_in_place(self):
+        """TC-EP-SVC-050b: `step` must not be the primary sort key.
+
+        The worker writes `step: null` rather than dropping a turn when the durable
+        counter round trip fails — "a logged turn beats a lost one". Null sorts
+        below every number in BSON, so with `step` leading, an Atlas hiccup during
+        turn 4 of 40 moved that turn to the *front* of the replay. The turn was not
+        lost; it was relocated, and nothing in the output says so. A reader gets a
+        coherent-looking conversation in the wrong order.
+
+        This assertion replaces one that required `[("step", 1), ("ts", 1)]`.
+        """
+        col = _collection([{"step": None}])
+        await _service(col).get_thread("u1", "t1")
+
+        keys = [k for k, _ in col.find.return_value.sort.call_args.args[0]]
+        assert keys.index("ts") < keys.index("step"), (
+            "a turn whose durable step counter failed sorts to the front of the "
+            "thread instead of staying where it happened"
+        )
 
     async def test_descending_reverses_both_sort_keys(self):
         # TC-EP-SVC-051
         col = _collection()
         await _service(col).get_thread("u1", "t1", ascending=False)
-        assert col.find.return_value.sort.call_args.args[0] == [("step", -1), ("ts", -1)]
+        assert col.find.return_value.sort.call_args.args[0] == [("ts", -1), ("step", -1)]
 
     async def test_limit_is_applied_when_given(self):
         # TC-EP-SVC-052
@@ -470,7 +531,13 @@ class TestRetention:
         col = _collection()
         result = await _service(col).set_retention(7200)
 
-        assert result == {"status": "updated", "ttl_seconds": 7200}
+        # `scope` is part of the contract: a TTL index belongs to the collection,
+        # so this retunes retention for every tenant. The facade takes a user_id
+        # to authorise against, not to scope by, and saying so at the call site is
+        # the fix for that mismatch.
+        assert result == {
+            "status": "updated", "ttl_seconds": 7200, "scope": "collection",
+        }
         command = col.database.command.await_args.args[0]
         assert command["collMod"] == "episodes"
         assert command["index"] == {
@@ -484,7 +551,9 @@ class TestRetention:
         col = _collection()
         result = await _service(col).set_retention(None)
 
-        assert result == {"status": "removed", "ttl_seconds": None}
+        assert result == {
+            "status": "removed", "ttl_seconds": None, "scope": "collection",
+        }
         col.drop_index.assert_awaited_once_with("ix_episodes_ttl")
 
     async def test_it_falls_back_to_create_index(self):
@@ -493,7 +562,9 @@ class TestRetention:
         col.database.command = AsyncMock(side_effect=RuntimeError("no collMod"))
         result = await _service(col).set_retention(3600)
 
-        assert result == {"status": "created", "ttl_seconds": 3600}
+        assert result == {
+            "status": "created", "ttl_seconds": 3600, "scope": "collection",
+        }
         assert col.create_index.await_args.kwargs["expireAfterSeconds"] == 3600
         assert col.create_index.await_args.kwargs["name"] == "ix_episodes_ttl"
 

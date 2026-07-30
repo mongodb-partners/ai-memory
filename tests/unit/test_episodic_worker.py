@@ -330,6 +330,129 @@ class TestFailureCounting:
         assert stats["written"] == 1
 
 
+class TestPartialBatchFailure:
+    """REQ-E-106: `ordered=False` means partial, and the accounting must say so."""
+
+    @staticmethod
+    def _bulk_error(batch_size, failed_indexes):
+        from pymongo.errors import BulkWriteError
+
+        inserted = batch_size - len(failed_indexes)
+        return BulkWriteError({
+            "writeErrors": [
+                {"index": i, "code": 11000, "errmsg": "duplicate key"}
+                for i in failed_indexes
+            ],
+            "nInserted": inserted,
+        })
+
+    async def _drain(self, col, n, audit=None):
+        worker = EpisodicWorker(
+            col, _counters(), _providers(), _config(episodic_batch_size=64),
+            audit_service=audit,
+        )
+        for i in range(n):
+            worker.enqueue({"user_id": f"u{i}", "n": i})
+        await _run_until_drained(worker)
+        return worker
+
+    async def test_only_the_rejected_documents_count_as_failures(self):
+        """TC-EP-WRK-055: one bad doc in twenty is a 5% error rate, not an outage.
+
+        `insert_many(ordered=False)` inserts every valid document and *then* raises
+        `BulkWriteError` describing the ones it rejected. The previous handler
+        caught it as a total failure: `write_failures += len(batch)` and `written`
+        untouched. So a single malformed document made `/health` report twenty
+        failed writes and zero successes — the counter an operator alerts on said
+        the episodic tier was completely down while nineteen turns were sitting in
+        the collection.
+        """
+        col = _collection()
+        col.insert_many = AsyncMock(side_effect=self._bulk_error(20, [7]))
+        stats = (await self._drain(col, 20)).stats()
+
+        assert stats["write_failures"] == 1
+        assert stats["written"] == 19
+        # The batch did land, so the throughput counters must reflect it.
+        assert stats["batches"] == 1
+        assert stats["last_write_ts"] is not None
+
+    async def test_the_audit_trail_splits_successes_from_failures(self):
+        """TC-EP-WRK-056: a stored turn must not be audited as an error.
+
+        The old handler audited the whole batch as `"error"` against each user's own
+        id. A batch spans users, so nineteen tenants got an audit record saying
+        their turn failed to store when it had stored fine — and the audit log is
+        the artifact you consult precisely when you no longer trust the data.
+        """
+        audit = MagicMock()
+        audit.log = AsyncMock()
+        col = _collection()
+        col.insert_many = AsyncMock(side_effect=self._bulk_error(4, [2]))
+        await self._drain(col, 4, audit=audit)
+
+        by_status: dict[str, set[str]] = {}
+        for call in audit.log.await_args_list:
+            user_id, _category, _op, status = call.args[:4]
+            by_status.setdefault(status, set()).add(user_id)
+
+        assert by_status["error"] == {"u2"}
+        assert by_status["success"] == {"u0", "u1", "u3"}
+
+    async def test_a_total_failure_is_still_counted_in_full(self):
+        """TC-EP-WRK-057: the fix must not under-count a genuine total failure."""
+        col = _collection()
+        col.insert_many = AsyncMock(side_effect=self._bulk_error(5, [0, 1, 2, 3, 4]))
+        stats = (await self._drain(col, 5)).stats()
+
+        assert stats["write_failures"] == 5
+        assert stats["written"] == 0
+        # Nothing landed, so this was not a batch.
+        assert stats["batches"] == 0
+        assert stats["last_write_ts"] is None
+
+    async def test_a_malformed_details_payload_falls_back_to_the_partition(self):
+        """TC-EP-WRK-058: never trust the driver's payload shape blindly.
+
+        A `BulkWriteError` with no usable `details` must not crash the consumer or
+        silently record every document as written.
+        """
+        from pymongo.errors import BulkWriteError
+
+        col = _collection()
+        col.insert_many = AsyncMock(side_effect=BulkWriteError(None))
+        stats = (await self._drain(col, 3)).stats()
+
+        assert stats["written"] == 3
+        assert stats["write_failures"] == 0
+
+    async def test_the_audit_error_string_is_redacted(self):
+        """TC-EP-WRK-059: a duplicate-key error quotes the key's value.
+
+        On the episodic path that value is projected turn content, so an
+        unredacted message copies user text out of the tenant-scoped tier into an
+        admin-readable audit collection.
+        """
+        audit = MagicMock()
+        audit.log = AsyncMock()
+        col = _collection()
+        col.insert_many = AsyncMock(side_effect=PyMongoError(
+            "connection to mongodb+srv://svc:s3cr3t-pw@cluster0.abc.mongodb.net failed"
+        ))
+        worker = EpisodicWorker(
+            col, _counters(), _providers(), _config(episodic_batch_size=64),
+            audit_service=audit,
+        )
+        worker.enqueue({"user_id": "u1"})
+        worker.enqueue({"user_id": "u2"})
+        await _run_until_drained(worker)
+
+        errors = [c.kwargs.get("error", "") for c in audit.log.await_args_list]
+        assert errors and all("s3cr3t-pw" not in e for e in errors)
+        # The type survives, because that is what makes the entry actionable.
+        assert all("PyMongoError" in e for e in errors)
+
+
 class TestLifecycle:
     """REQ-E-107: bounded flush, idempotent close, neither raises."""
 

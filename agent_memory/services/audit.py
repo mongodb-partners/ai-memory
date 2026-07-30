@@ -10,6 +10,28 @@ from agent_memory.core.config import MCPConfig
 
 logger = logging.getLogger(__name__)
 
+# The principal an erasure is recorded against, in place of the erased user.
+#
+# A wipe deletes every ``audit_log`` document matching ``{"user_id": <them>}``,
+# and the operation then has to be audited — a total, irreversible deletion is
+# the last thing that should happen without a record. Auditing it the ordinary
+# way writes that identifier straight back into the collection the wipe just
+# cleared, so the answer to "delete everything you hold about me" ended with a
+# fresh row naming them, timestamped a millisecond later.
+#
+# Recording nothing is not the alternative; accountability for a destructive
+# operation is the other half of the same obligation. So the record is kept and
+# the subject is dropped: what happened, when, how long it took, and how many
+# documents went from each collection, filed against this reserved id. What it
+# deliberately cannot answer is "was user X erased?" — that question cannot be
+# answered by anyone who has genuinely stopped holding X.
+#
+# The leading underscore keeps it out of the space of real identifiers, which
+# come from a token claim. ``wipe_user_data`` additionally refuses it as a
+# target, so an erasure trail cannot be deleted by asking to be forgotten under
+# this name.
+ERASURE_PRINCIPAL = "_erased"
+
 
 class AuditService:
     """Buffered audit log writes with configurable flush strategy."""

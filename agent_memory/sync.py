@@ -5,11 +5,27 @@ async facade method gets a blocking twin that is safe to call from plain scripts
 *and* from inside an already-running event loop (Jupyter/notebook) — the
 "loop already running" trap is avoided because the core's loop lives on another
 thread. Mirrors mem0's ``Memory`` / ``AsyncMemory`` split.
+
+Every twin delegates through ``*a, **k`` and then adopts its async counterpart's
+signature and docstring (see ``_adopt_async_signatures``). Both halves matter:
+delegating positionally means a new keyword argument on the async method works on
+the sync one with no edit here, and adopting the signature means ``help(Memory.add)``
+and every IDE report the real parameters instead of ``(*a, **k)``. Without the
+adoption the sync class — which the README presents first, because it is the one
+a script reaches for — was the half of the API with no discoverable signature and
+no arity checking: ``Memory.add()`` with no arguments raised ``TypeError`` from
+inside the coroutine rather than at the call.
+
+``_adopt_async_signatures`` also asserts each twin exists on the async core, so a
+method renamed there fails at import rather than surviving as a twin that
+delegates to nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import threading
 from concurrent.futures import Future
 
@@ -129,3 +145,55 @@ class Memory:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def _adopt_async_signatures() -> None:
+    """Give each blocking twin its async counterpart's signature and docstring.
+
+    Called once at import. For every ``Memory`` method that names a coroutine on
+    ``AsyncMemory``, this copies ``__doc__``, ``__annotations__``, and
+    ``__signature__`` across, so introspection, ``help()``, IDE completion, and
+    generated docs describe the real parameters instead of ``(*a, **k)``.
+
+    To be precise about the limit: this fixes *description*, not enforcement.
+    ``__signature__`` is metadata — the interpreter still dispatches on the real
+    ``*a, **k``, so a wrong-arity call is caught by the async method, not here. The
+    win is that a caller can now discover the parameters at all, which on the class
+    the README presents first was previously impossible without reading the source
+    of a different class.
+
+    The bodies stay ``*a, **k``. That is deliberate: it is what keeps a new keyword
+    argument on an async method working here without a matching edit, which is the
+    property that stopped the two surfaces drifting in the first place. Only the
+    *description* is copied, never the calling convention.
+
+    ``close`` is skipped — the sync version does strictly more than await the async
+    one (it also stops the loop and joins the thread), so its own docstring is the
+    accurate one. ``activity_stats`` is skipped because it is already sync on the
+    core and hops no loop.
+    """
+    from agent_memory.memory import AsyncMemory
+
+    skip = {"close", "activity_stats"}
+    for name, twin in list(vars(Memory).items()):
+        if name.startswith("_") or name in skip or not callable(twin):
+            continue
+        target = getattr(AsyncMemory, name, None)
+        if target is None:
+            # A twin delegating to a method that no longer exists would raise
+            # AttributeError on first call, in whatever code happened to use it.
+            # Import time is a much better place to find out.
+            raise AttributeError(
+                f"Memory.{name} has no counterpart on AsyncMemory. Rename or "
+                f"remove the blocking twin."
+            )
+        if not inspect.iscoroutinefunction(target):
+            continue
+        functools.update_wrapper(twin, target, assigned=("__doc__", "__annotations__"))
+        # Drop the coroutine's `-> Coroutine[...]` framing: the twin returns the
+        # awaited value, so the async return annotation is already correct.
+        twin.__signature__ = inspect.signature(target)
+        twin.__wrapped__ = target
+
+
+_adopt_async_signatures()

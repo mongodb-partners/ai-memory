@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.exceptions import ConfigError
-from agent_memory.providers.base import LLMProvider, parse_importance
+from agent_memory.providers.base import LLMProvider, parse_importance, render_prompt
 
 try:  # optional dependency
     from anthropic import AsyncAnthropic
@@ -62,24 +62,27 @@ class AnthropicLLMProvider(LLMProvider):
                 yield text
 
     async def assess_importance(self, content: str, prompt: str | None = None) -> float:
-        if prompt:
-            text = prompt.format(content=content)
-        else:
-            text = (
-                "Rate the importance of the following memory on a scale of 1-10, "
-                "where 1 is trivial and 10 is critically important. "
-                "Respond with ONLY a single integer.\n\n"
-                f"Memory: {content}"
-            )
+        text = render_prompt(
+            prompt,
+            content,
+            "Rate the importance of the following memory on a scale of 1-10, "
+            "where 1 is trivial and 10 is critically important. "
+            "Respond with ONLY a single integer.\n\n"
+            f"Memory: {content}",
+        )
         response = await self.complete(text)
         # Handles both the 1-10 scale prompted above and a 0.0-1.0 reply, which a
         # custom prompt may ask for. See `parse_importance`.
         return parse_importance(response)
 
-    async def generate_summary(self, content: str, max_length: int = 100) -> str:
-        text = (
+    async def generate_summary(
+        self, content: str, max_length: int = 100, prompt: str | None = None
+    ) -> str:
+        text = render_prompt(
+            prompt,
+            content,
             f"Summarize the following text in {max_length} words or fewer. "
             "Be concise and capture the key points.\n\n"
-            f"Text: {content}"
+            f"Text: {content}",
         )
         return await self.complete(text)
