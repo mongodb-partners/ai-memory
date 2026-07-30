@@ -206,8 +206,23 @@ to fix; just don't script a specific split onto a slide.
 
 **State drift reproduced exactly as documented above.** After the run, `alex` held
 2 memories · 1 episode · 1 cache entry — including the isolation beat's own question.
-`--wipe-only` cleared it and `ai4-demo` was re-seeded to `stm 12 · ltm 6 · episodes 3
-· candidates 5`. Both users are at presentation state as of this entry.
+`--wipe-only` cleared it and `ai4-demo` was re-seeded.
+
+**And one more, worth its own line: Compass pipeline 03 empties itself.** A while
+after the re-seed, with the server still up, `ai4-demo` had drifted to `stm 7 ·
+ltm 12` and **promotion candidates were 0** — the consolidation worker had promoted
+all five. Pipeline 03 *is* the promotion criteria stated as a query, so it returns
+no rows, and nothing about the UI or the logs says so. This is the library working
+correctly; it is also a screen that goes blank on its own between the pre-flight
+check and the talk.
+
+So the rule is tighter than "re-seed each morning": **re-seed last, immediately
+before presenting**, and treat `candidates 5` in the seed output as the number to
+read. The LTM TTLs were re-checked at the same time and are correct — 12 documents,
+all at ~2160h (90 days), none expiring before the talk.
+
+Final state as of this entry: `ai4-demo` at `stm 12 · ltm 6 · episodes 3 ·
+candidates 5`, `alex` at zero across every collection.
 
 ## Still outstanding
 
