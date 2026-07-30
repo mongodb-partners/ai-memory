@@ -3,7 +3,7 @@
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from agent_memory.core.config import MCPConfig
@@ -35,7 +35,7 @@ class AuditService:
             "tool_name": tool_name,
             "status": status,
             "duration_ms": duration_ms,
-            "timestamp": datetime.now(timezone.utc),
+            "timestamp": datetime.now(UTC),
             "metadata": metadata if metadata else {},
         }
         self._buffer.append(entry)

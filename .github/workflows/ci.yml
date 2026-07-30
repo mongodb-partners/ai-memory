@@ -32,8 +32,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --python ${{ matrix.python-version }}
 
+      # `ruff` is pinned in the `dev` extra, so `uv sync --all-extras` above
+      # installs it. It used to be undeclared, which made this step resolve
+      # whatever ruff was on PATH — a developer's Homebrew build locally, and
+      # nothing at all here, where `uv run ruff` exits 2 with "Failed to spawn".
+      # `--no-sync` keeps that honest: it fails rather than quietly installing.
+      # Scope is `agent_memory/` only; tests/ and scripts/ are not yet clean.
       - name: Lint
-        run: uv run ruff check agent_memory/
+        run: uv run --no-sync ruff check agent_memory/
 
       # The unit suite is fully mocked — no Atlas, no cloud credentials. The
       # integration tier gates on server reachability and is intentionally not

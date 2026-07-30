@@ -5,7 +5,7 @@ Stores decisions in MongoDB ``decisions`` collection with upsert by
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from agent_memory.core.config import MCPConfig
 
@@ -33,7 +33,7 @@ class DecisionService:
     ) -> str:
         """Store or update a decision. Returns 'stored' or 'updated'."""
         ttl = ttl_days if ttl_days is not None else self.config.decision_default_ttl_days
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = now + timedelta(days=ttl)
 
         result = await self.collection.update_one(
@@ -59,7 +59,7 @@ class DecisionService:
 
     async def recall(self, user_id: str, key: str) -> dict | None:
         """Recall a decision by key. Returns None if not found or expired."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = await self.collection.find_one(
             {
                 "user_id": user_id,

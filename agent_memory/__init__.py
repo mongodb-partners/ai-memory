@@ -22,13 +22,13 @@ from agent_memory.sync import Memory
 from agent_memory.version import __version__
 
 __all__ = [
-    "Memory",
+    "AccessError",
     "AsyncMemory",
+    "ConfigError",
+    "Memory",
     "MemoryConfig",
     "MemoryError",
-    "AccessError",
-    "RateLimitError",
     "NotFoundError",
-    "ConfigError",
+    "RateLimitError",
     "__version__",
 ]

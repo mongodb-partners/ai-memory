@@ -114,6 +114,41 @@ independently, so a badly trained artifact cannot emit the value that means
 - The importance prompt lookup moved from the worker into `LLMScorer` — the local
   scorer has no prompt, so the worker could not keep the branch.
 
+### Fixed
+
+**CI's lint job could not pass.** The workflow runs `uv run ruff check
+agent_memory/`, but `ruff` was declared in neither `pyproject.toml` nor `uv.lock`.
+Locally that resolved to whatever ruff happened to be on `PATH` — a developer's
+Homebrew build — so the gate looked green; on a clean runner `uv run ruff` exits 2
+with `Failed to spawn: ruff`. Verified by running the step with an empty `PATH`.
+`ruff>=0.14,<0.17` is now in the `dev` extra, which `uv sync --all-extras` installs.
+
+**The lint gate had no configuration, so its verdict depended on the linter's
+release date rather than on the diff.** With no `[tool.ruff]` section, both the
+enabled rule set and `target-version` came from whatever ruff was installed: 0.9.10
+reported the package clean while 0.16.0 flagged 28 findings, no source change in
+between. In the other direction, 0.9.10 demanded five UP038 rewrites of
+`isinstance(x, (A, B))` to `A | B` — a rule newer ruff *removed*, because the
+rewrite is slower at runtime. `select = ["E4","E7","E9","F","I","UP","RUF"]` and
+`target-version = "py311"` are now explicit, and the 67 findings that surfaced are
+fixed (`datetime.UTC` for `timezone.utc`, unquoted annotations, sorted imports, one
+stale `noqa`). `BLE001`/`S110` are deliberately unselected: the `except Exception:
+pass` blocks they flag are health-probe and migration handlers marked `# pragma: no
+cover - a probe must never 500`, where the rule is pointing at the intent.
+`B008` likewise — `Depends(...)` in an argument default is how FastAPI works.
+
+`TestLintGateIsRunnable` in `test_packaging.py` now asserts ruff is declared, is
+upper-bounded, has an explicit `select` and pinned `target-version`, and that the
+package passes the gate — running the project's pinned ruff rather than PATH's, so
+the test cannot start demanding what the pinned linter does not want. All four
+guards were verified against mutations.
+
+Not addressed: `tests/` and `scripts/` sit outside CI's lint scope and carry ~118
+findings (mostly `UP017`, `F401`, `I001`). Widening the gate is a larger mechanical
+change than this fix, and the three `F841` unused locals were checked by hand —
+they are throwaway assignments in tests that assert on mock call args, not dropped
+assertions.
+
 ## [4.1.0] — 2026-07-29
 
 ### Added

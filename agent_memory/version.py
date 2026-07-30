@@ -6,7 +6,8 @@ run from a source tree that was never installed (a plain ``git clone`` + ``PYTHO
 where ``importlib.metadata`` has nothing to find.
 """
 
-from importlib.metadata import PackageNotFoundError, version as _dist_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 
 _FALLBACK = "4.1.0"
 

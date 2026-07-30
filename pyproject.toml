@@ -82,6 +82,15 @@ dev = [
     "anthropic>=0.39.0",
     # The demo server has tests, so its transport must be importable here too.
     "sse-starlette>=2.1.0",
+    # CI runs `uv run ruff check agent_memory/`. Undeclared, that resolved to
+    # whatever ruff happened to be on PATH — a developer's Homebrew build locally,
+    # and *nothing* on a clean runner, where `uv run ruff` exits 2 with "Failed to
+    # spawn: ruff" and the lint job fails for a reason unrelated to the code.
+    # Pinned to a minor range because the default rule set and `target-version`
+    # inference change between releases: ruff 0.9 reported this package clean while
+    # 0.16 flagged 28 findings, so an unpinned linter makes CI's verdict depend on
+    # its release date rather than on the diff.
+    "ruff>=0.14,<0.17",
 ]
 
 # PyPI metadata is immutable per release, so these point at the repository's
@@ -126,3 +135,44 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["-v", "--tb=short"]
 testpaths = ["tests"]
+
+# Pinned so CI's verdict depends on the diff rather than on which ruff the runner
+# happened to have. With no config at all, ruff's default selection is whatever the
+# installed version defaults to *and* `target-version` is inferred from
+# `requires-python`; those two together moved this package from "clean" on 0.9 to
+# 28 findings on 0.16 without a line of source changing.
+[tool.ruff]
+target-version = "py311"
+extend-exclude = [".ruff_cache", "docs"]
+
+[tool.ruff.lint]
+# Beyond ruff's default `E4,E7,E9,F`:
+#   I   — import order, so a rebase cannot quietly reorder imports
+#   UP  — pyupgrade; the floor is 3.11, so `datetime.UTC` and PEP 604 apply
+#   RUF — ruff's own checks, including RUF100, which catches `noqa` directives
+#         that stopped suppressing anything (a stale one hides a live finding)
+select = ["E4", "E7", "E9", "F", "I", "UP", "RUF"]
+
+# Not selected, each for a reason rather than for convenience:
+#   BLE001/S110 — `except Exception: pass` in the health probe and the migration
+#                 path is deliberate and marked `# pragma: no cover - a probe must
+#                 never 500`. A probe that raises is worse than one that omits a
+#                 field, so selecting these would mean adding 15 noqa comments to
+#                 the code they are pointing at correctly.
+#   B008        — `Depends(...)` in an argument default is how FastAPI declares
+#                 dependencies. The rule is right about Python in general and wrong
+#                 about this framework.
+#   SIM103      — flags an early-return style the surrounding code uses on purpose.
+ignore = [
+    # Flags en dashes and curly quotes in *prose docstrings* as possible homoglyph
+    # attacks. The threat is real in identifiers and string literals; in a
+    # paragraph of English explaining why a threshold is 0.1 it is noise, and
+    # "fixing" it would mean degrading the punctuation of every docstring in the
+    # package. RUF001/RUF003 stay enabled, so an ambiguous character in an
+    # identifier or an inline comment is still caught.
+    "RUF002",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Trainer-only: `scripts/` is not shipped and not importable by the library.
+"scripts/*" = ["T201"]  # printing is the trainer's entire user interface

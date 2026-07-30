@@ -153,6 +153,86 @@ class TestLibraryStaysDependencyFree:
         )
 
 
+class TestLintGateIsRunnable:
+    """CI's lint step is `uv run ruff check agent_memory/`.
+
+    Undeclared, that command resolved to whatever `ruff` happened to be on PATH:
+    a developer's Homebrew build locally, and *nothing* on a clean runner, where
+    `uv run ruff` exits 2 with "Failed to spawn: ruff". The job cannot pass, and it
+    fails for a reason that has nothing to do with the diff under review — the
+    failure mode a lint gate is supposed to be immune to.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _load(self):
+        with open(ROOT / "pyproject.toml", "rb") as f:
+            self.data = tomllib.load(f)
+
+    def _dev_specs(self) -> list[str]:
+        return self.data["project"]["optional-dependencies"]["dev"]
+
+    def test_ruff_is_declared(self):
+        """`uv sync --all-extras` must install the linter CI then invokes."""
+        names = [
+            s.split(">")[0].split("=")[0].split("<")[0].split("[")[0].strip().lower()
+            for s in self._dev_specs()
+        ]
+        assert "ruff" in names, (
+            "ruff is not declared in the dev extra, so CI's `uv run ruff check` has "
+            "nothing to resolve and exits 2 rather than linting"
+        )
+
+    def test_ruff_is_pinned_to_a_bounded_range(self):
+        """An unpinned linter makes CI's verdict depend on its release date. Ruff's
+        default rule selection and `target-version` inference both change between
+        releases: 0.9 reported this package clean where 0.16 flagged 28 findings,
+        with no source change in between."""
+        spec = next(s for s in self._dev_specs() if s.lower().startswith("ruff"))
+        assert "<" in spec, (
+            f"ruff spec {spec!r} has no upper bound: a new release can turn CI red "
+            "without a code change"
+        )
+
+    def test_lint_rules_are_configured_explicitly(self):
+        """Without `[tool.ruff.lint].select`, the enabled rules are whatever the
+        installed ruff defaults to — which is version-dependent, so the pin above
+        is only half the fix."""
+        select = self.data["tool"]["ruff"]["lint"]["select"]
+        assert select, "[tool.ruff.lint].select is empty"
+        assert self.data["tool"]["ruff"]["target-version"] == "py311", (
+            "target-version must be pinned; ruff otherwise infers it from "
+            "requires-python, and the inference has changed between releases"
+        )
+
+    def test_the_package_actually_passes_the_gate(self):
+        """The end-to-end assertion: run the gate.
+
+        Deliberately the *project's* ruff (`.venv/bin/ruff`) rather than whatever
+        `shutil.which` finds. An earlier draft of this test used PATH and failed
+        against a developer's Homebrew ruff 0.9.10 on five UP038 findings — a rule
+        newer ruff removed, because rewriting `isinstance(x, (A, B))` to `A | B` is
+        slower at runtime. Asserting against an arbitrary PATH ruff would make this
+        test demand changes the pinned linter does not want, which is the drift the
+        pin exists to prevent.
+        """
+        import subprocess
+        import sys
+
+        ruff = pathlib.Path(sys.executable).parent / "ruff"
+        if not ruff.exists():
+            pytest.skip(
+                "ruff not installed in this interpreter's environment; "
+                "run `uv sync --all-extras`"
+            )
+        result = subprocess.run(
+            [str(ruff), "check", "agent_memory/"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"`ruff check agent_memory/` failed:\n{result.stdout}{result.stderr}"
+        )
+
+
 class TestDockerfile:
     @pytest.fixture(autouse=True)
     def _load(self):

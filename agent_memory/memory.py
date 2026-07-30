@@ -35,7 +35,7 @@ class AsyncMemory:
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
     @classmethod
-    async def create(cls, config: MemoryConfig) -> "AsyncMemory":
+    async def create(cls, config: MemoryConfig) -> AsyncMemory:
         """Initialize Atlas, providers, services, and (optionally) workers.
 
         Equivalent to the former FastMCP ``lifespan`` startup, lifted out and
@@ -323,7 +323,7 @@ class AsyncMemory:
             await self._db_manager.close()
         logger.info("AsyncMemory closed.")
 
-    async def __aenter__(self) -> "AsyncMemory":
+    async def __aenter__(self) -> AsyncMemory:
         return self
 
     async def __aexit__(self, *exc) -> None:

@@ -6,7 +6,7 @@ Falls back to hardcoded defaults when ``prompt_experiment_enabled=False``.
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agent_memory.core.config import MCPConfig
 
@@ -85,7 +85,7 @@ class PromptLibrary:
             )
             version = (latest["version"] + 1) if latest else 1
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = {
             "name": name,
             "template": template,
@@ -112,7 +112,7 @@ class PromptLibrary:
         for name, template in _HARDCODED_PROMPTS.items():
             existing = await self.collection.find_one({"name": name})
             if not existing:
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 doc = {
                     "name": name,
                     "template": template,

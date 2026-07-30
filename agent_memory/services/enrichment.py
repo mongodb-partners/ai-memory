@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import MIN_SUMMARIZABLE_CHARS, is_usable_summary
@@ -108,7 +108,7 @@ class EnrichmentWorker:
                     "$set": {
                         "enrichment_status": status,
                         "enrichment_retries": new_retries,
-                        "updated_at": datetime.now(timezone.utc),
+                        "updated_at": datetime.now(UTC),
                     }
                 },
             )
@@ -158,7 +158,7 @@ class EnrichmentWorker:
         update = {
             "enrichment_status": "complete",
             "importance": importance,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(UTC),
         }
         # Only set `summary` when there is one worth setting. Absent is the safe
         # state: readers fall back to `content`, which is the memory itself.
@@ -222,7 +222,7 @@ class EnrichmentWorker:
                 {
                     "$set": {
                         "enrichment_status": "complete",
-                        "updated_at": datetime.now(timezone.utc),
+                        "updated_at": datetime.now(UTC),
                     }
                 },
             )
@@ -263,7 +263,7 @@ class EnrichmentWorker:
             merged_content
         )
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Update the new memory with merged content
         await self.memories.update_one(

@@ -80,7 +80,7 @@ class MemoryConfig(MCPConfig):
     episodic_shutdown_timeout_seconds: float = 5.0
 
     @classmethod
-    def from_env(cls, **overrides) -> "MemoryConfig":
+    def from_env(cls, **overrides) -> MemoryConfig:
         """Build a config from environment variables (deployed-shell path).
 
         Pydantic ``BaseSettings`` already reads the environment; this classmethod

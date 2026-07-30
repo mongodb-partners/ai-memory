@@ -6,7 +6,7 @@ with in-memory caching.
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agent_memory.core.config import MCPConfig
 
@@ -96,7 +96,7 @@ class GovernanceService:
         for role, profile in _DEFAULT_PROFILES.items():
             existing = await self.collection.find_one({"role": role})
             if not existing:
-                doc = {**profile, "created_at": datetime.now(timezone.utc)}
+                doc = {**profile, "created_at": datetime.now(UTC)}
                 await self.collection.insert_one(doc)
                 count += 1
                 continue
@@ -112,7 +112,7 @@ class GovernanceService:
                 {"role": role},
                 {
                     "$addToSet": {"allowed_operations": {"$each": missing}},
-                    "$set": {"updated_at": datetime.now(timezone.utc)},
+                    "$set": {"updated_at": datetime.now(UTC)},
                 },
             )
             # The cached copy is now stale in exactly the direction that denies
