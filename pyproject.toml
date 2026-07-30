@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-memory"
-version = "4.1.0"
+version = "4.2.0"
 description = "MongoDB Atlas-backed agent memory: short-term, long-term, episodic, and semantic cache in one cluster"
 readme = "README.md"
 license = "Apache-2.0"
@@ -59,6 +59,18 @@ demo = [
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
     "sse-starlette>=2.1.0",
+]
+# Offline training for the local importance scorer (`scripts/train_importance.py`).
+# Deliberately not in `all`, for the same reason as `demo`: nothing under
+# agent_memory/ imports any of these, the script runs on a developer machine or in
+# CI, and adding ~200MB of transitive weight to the ordinary install would undo the
+# reason the runtime scorer is pure Python. A grep test in test_packaging.py keeps
+# that honest.
+training = [
+    "scikit-learn>=1.5.0",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "datasets>=2.19.0",
 ]
 dev = [
     "pytest>=9.0.3",

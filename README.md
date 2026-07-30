@@ -259,7 +259,7 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `mongodb_connection_string` | — | The only required field |
 | `mongodb_database_name` | `agent_memory` | |
 | `embedding_provider` / `llm_provider` | `bedrock` | `voyage`, `openai`, `anthropic` |
-| `embedding_dimension` | `1536` | Auto-aligned to the model for Voyage |
+| `embedding_dimension` | `1536` | Auto-aligned to the model for Voyage while left at the default; a mismatch raises at startup |
 | `stm_ttl_hours` | `24` | Short-term retention |
 | `episodic_enabled` | `True` | `False` accepts and discards, so callers need no conditionals |
 | `episodic_queue_size` | `1000` | Bounded; full → drop oldest |
@@ -268,6 +268,52 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `episodic_embed_final_steps_only` | `True` | A mid-turn step has no answer worth embedding |
 | `workers_in_process` | `True` | `False` → an external runtime owns background work |
 | `await_search_indexes` | `False` | Set `True` in short-lived scripts, or the process can exit before indexes are queryable |
+| `importance_scorer` | `llm` | `local` scores in-process instead of calling the LLM |
+| `importance_model_path` | — | Explicit coefficient artifact; unset auto-selects a bundled one |
+
+### Importance scoring without the LLM
+
+Importance decides three things: whether a memory is eventually forgotten, whether
+it is promoted to long-term memory, and how it ranks in recall. By default it costs
+one LLM round trip per long-term memory, on the enrichment worker's path.
+
+`IMPORTANCE_SCORER=local` replaces that call with a logistic model evaluated
+in-process — microseconds, no network, no tokens. It works because the embedding
+already exists by the time enrichment runs, so scoring is a dot product over a
+vector the worker was already holding. No encoder, no new dependency; the scorer is
+pure Python.
+
+Which artifact loads, when `importance_model_path` is unset:
+
+| `embedding_provider` / model / dimension | Artifact |
+|---|---|
+| `bedrock` / `amazon.titan-embed-text-v1` / 1536 | `titan-1536` |
+| `voyage` / `voyage-3` / 1024 | `voyage-3-1024` |
+| anything else | `lexical` |
+
+Selection is on the whole triple, not the provider: `voyage-3` emits 1024
+dimensions and `voyage-3-lite` emits 512, and coefficients are positional. The
+`lexical` fallback scores seven bounded text features instead of the embedding —
+weaker than a trained embedding head, and much better than a constant.
+
+**Check calibration before switching a production deployment.** Consolidation
+compares importance against *absolute* thresholds: below `forgetting_score_threshold`
+(0.1) a memory is deleted, at or above `promotion_importance_threshold` (0.6) it is
+promoted. So a model that ranks memories perfectly but sits systematically low will
+forget more and promote less than the LLM did — and the symptom is degraded recall
+weeks later, not an error. Read `forget_agreement` and `promote_agreement` from the
+artifact's `training.metrics` and compare against your own thresholds first.
+
+Two failure modes are deliberately loud rather than quiet. An embedding whose
+dimension does not match the artifact raises instead of scoring the overlapping
+prefix; the affected memories land in `enrichment_status: "failed"`, where they can
+be counted and re-run. And a `importance_model_path` pointing at a missing file
+refuses to start rather than falling back to a bundled artifact the operator did
+not ask for.
+
+Retraining is offline and optional: `pip install 'agent-memory[training]'` then
+`python scripts/train_importance.py --help`. Nothing under `agent_memory/` imports
+scikit-learn or numpy, and a packaging test enforces it.
 
 ### Two Voyage endpoints, and the key decides which
 
@@ -288,12 +334,29 @@ VOYAGE_BASE_URL=https://ai.mongodb.com/v1/embeddings
 VOYAGE_MODEL=voyage-4
 ```
 
-Every gateway model is **1024** dimensions, against the `1536` default. That is
-handled — `ProviderManager` aligns `embedding_dimension` to the model, unless you
-pinned a non-default value — but it is baked into the vector indexes at creation.
-Switching a provider after documents exist means re-creating
-`memories_vector_index`, `episodes_vector_index`, and `cache_vector_index` at the
-new dimension. A dimension mismatch does not raise; recall just returns nothing.
+The gateway models are **1024** dimensions (`voyage-3-lite` is 512), against the
+`1536` default. That is handled: `ProviderManager` aligns `embedding_dimension` to
+the model — but *only* while `embedding_dimension` is still the default. Pin it
+explicitly and you own it, alignment is skipped, and a wrong value is your value.
+
+The dimension is baked into the vector indexes at creation, so switching provider
+or model after documents exist means re-creating `memories_vector_index`,
+`episodes_vector_index`, and `cache_vector_index` at the new dimension.
+
+**A mismatch is caught at startup, not at recall.** `AsyncMemory.create()` compares
+the declared `embedding_dimension` against the model's documented output and raises
+`ConfigError` if they disagree — from a built-in table for known models, so the
+check works even when the embedding endpoint is down, and by probing the embedder
+otherwise. If neither can answer, it logs a warning saying so rather than passing
+quietly. This matters because the underlying failure is silent: Atlas accepts a
+1024-dim vector into a 1536-dim index without complaint and simply never returns
+that document from `$vectorSearch`, so recall goes empty and every write until
+someone notices has to be re-embedded.
+
+The realistic way to hit this is a model upgrade within one provider —
+`amazon.titan-embed-text-v1` is 1536 and `amazon.titan-embed-text-v2:0` is 1024.
+When the guard fires, set `embedding_dimension` to the value it names and
+re-provision the index `numDimensions` to match.
 
 ### One caveat about `workers_in_process=False`
 
