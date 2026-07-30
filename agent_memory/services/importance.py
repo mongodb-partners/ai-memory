@@ -379,7 +379,10 @@ class LocalScorer:
     """
 
     def __init__(self, artifact: Artifact) -> None:
-        self._artifact = artifact
+        # Public: "which model is actually loaded" is the first question anyone
+        # debugging importance drift asks, and the Artifact is frozen, so exposing
+        # it costs nothing.
+        self.artifact = artifact
 
     def _validated_embedding(self, embedding: Sequence[float] | None) -> Sequence[float]:
         """Reject a vector this artifact cannot score. REQ-E-165.
@@ -390,7 +393,7 @@ class LocalScorer:
         Raising lands in ``_enrich_memory``'s retry path, which parks the affected
         memories in ``enrichment_status: "failed"`` — countable, queryable, fixable.
         """
-        expected = self._artifact.dimension or len(self._artifact.coefficients)
+        expected = self.artifact.dimension or len(self.artifact.coefficients)
         if not embedding:
             raise ConfigError(
                 "Local importance model of kind 'embedding_linear' requires an "
@@ -401,7 +404,7 @@ class LocalScorer:
             raise ConfigError(
                 f"Embedding dimension {len(embedding)} does not match importance "
                 f"model dimension {expected} "
-                f"(model trained for {self._artifact.provider}/{self._artifact.model}). "
+                f"(model trained for {self.artifact.provider}/{self.artifact.model}). "
                 "Scoring a truncated vector would return a plausible wrong number, "
                 "so this refuses instead."
             )
@@ -420,9 +423,9 @@ class LocalScorer:
         tags: Sequence[str] | None = None,
         message_type: str | None = None,
     ) -> float:
-        coefficients = self._artifact.coefficients
+        coefficients = self.artifact.coefficients
 
-        if self._artifact.kind == "embedding_linear":
+        if self.artifact.kind == "embedding_linear":
             features: Sequence[float] = self._validated_embedding(embedding)
         else:
             # The lexical head never touches the embedding: its coefficients are
@@ -430,7 +433,7 @@ class LocalScorer:
             # the wrong weights and return a plausible number.
             features = lexical_features(content)
 
-        total = self._artifact.intercept
+        total = self.artifact.intercept
         for weight, value in zip(coefficients, features):
             total += weight * value
 
