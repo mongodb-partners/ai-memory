@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from agent_memory.config import MemoryConfig
 from agent_memory.core.correlation import derive_correlation_id
 from agent_memory.memory import AsyncMemory
+from agent_memory.services.admin import PartialWipeError
 
 from .cache_key import DemoResponseCache
 from .history import ConversationHistory
@@ -217,16 +218,30 @@ def create_app() -> FastAPI:
         cache = _require("cache")
         history = _require("history")
 
-        result = await memory.wipe_user_data(body.user_id, confirm=True)
-        db = memory._db_manager.db
-        episodes = await db["episodes"].delete_many({"user_id": body.user_id})
+        # `wipe_user_data` covers every user-scoped collection the library owns,
+        # `episodes` among them — this route used to delete `episodes` itself and
+        # then overwrite the library's real count with its own zero, so a reset that
+        # cleared nine episodes reported none. The demo's own response cache and the
+        # in-process thread history are not the library's, so they are still cleared
+        # here.
+        try:
+            result = await memory.wipe_user_data(body.user_id, confirm=True)
+        except PartialWipeError as exc:
+            # A 500 would say "the server is broken" when what happened is that
+            # some data is still there. 409 with the counts, so a rehearsal knows
+            # to retry rather than to start seeding on top of a half-cleared user.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": str(exc),
+                    "complete": False,
+                    **{k: v for k, v in exc.counts.items() if k != "user_id"},
+                    "failed_collections": sorted(exc.errors),
+                },
+            ) from exc
         cached = await cache.clear(body.user_id)
         history.clear(body.user_id)
-        return {
-            **result,
-            "episodes_deleted": episodes.deleted_count,
-            "demo_cache_deleted": cached,
-        }
+        return {**result, "demo_cache_deleted": cached}
 
     @api.get("/health")
     async def health():

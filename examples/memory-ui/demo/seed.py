@@ -58,6 +58,7 @@ load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
 
 from agent_memory.config import MemoryConfig  # noqa: E402
 from agent_memory.memory import AsyncMemory  # noqa: E402
+from agent_memory.services.admin import PartialWipeError  # noqa: E402
 from agent_memory.services.consolidation import ConsolidationWorker  # noqa: E402
 
 log = logging.getLogger("seed")
@@ -149,20 +150,23 @@ def _oneline(text: str | None) -> str:
 
 
 async def _wipe(memory: AsyncMemory, db, user_id: str) -> None:
-    """Remove every trace of `user_id` across all three collections.
+    """Remove every trace of `user_id`, in the library and in the demo's own store.
 
-    `wipe_user_data` covers `memories`, but `episodes` and the demo's response
-    cache are outside the library's user-data contract and have to be named
-    explicitly. Missing either one is not a visible error — it is a stale document
-    that surfaces mid-demo.
+    `wipe_user_data` now covers every user-scoped collection the library owns —
+    `episodes` included, which this used to delete itself. `demo_response_cache` is
+    the demo's table, not the library's, so it still has to be named here. Missing
+    it is not a visible error; it is a stale document that surfaces mid-demo.
+
+    A partial wipe raises, and a seed that plants data on top of a half-cleared
+    user is the failure this is guarding against: the stale documents are exactly
+    the ones a recall beat can surface. So the error stops the seed.
     """
     result = await memory.wipe_user_data(user_id, confirm=True)
-    episodes = await db["episodes"].delete_many({"user_id": user_id})
     cache = await db["demo_response_cache"].delete_many({"user_id": user_id})
     log.info(
         "wiped %s: memories=%s episodes=%s cache=%s",
         user_id, result.get("memories_deleted", "?"),
-        episodes.deleted_count, cache.deleted_count,
+        result.get("episodes_deleted", "?"), cache.deleted_count,
     )
 
 
@@ -429,8 +433,23 @@ def main() -> int:
     if args.wipe_only:
         if args.keep:
             parser.error("--wipe-only and --keep contradict each other")
-        return asyncio.run(wipe_only(args.user))
-    return asyncio.run(seed(args.user, keep=args.keep, promote=args.promote))
+
+    # A half-cleared user is the one state this script must not report as ready:
+    # the documents left behind are exactly the ones a recall beat can surface.
+    # Reported through the same channel as the other pre-flight failures, because
+    # a traceback on the morning of a talk reads as a broken script rather than as
+    # an instruction.
+    try:
+        if args.wipe_only:
+            return asyncio.run(wipe_only(args.user))
+        return asyncio.run(seed(args.user, keep=args.keep, promote=args.promote))
+    except PartialWipeError as exc:
+        print("\nNOT READY TO PRESENT:", file=sys.stderr)
+        print(f"  - {exc}", file=sys.stderr)
+        print(f"  - collections still holding data: "
+              f"{', '.join(sorted(exc.errors))}", file=sys.stderr)
+        print("  - re-run this command; the wipe is safe to repeat", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

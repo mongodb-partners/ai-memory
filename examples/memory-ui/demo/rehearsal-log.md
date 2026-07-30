@@ -148,6 +148,67 @@ state: `stm 7 · ltm 11 · episodes 3 · cache 0`. Do the same after any rehears
 turns — check `cache 0` in particular, because a leftover cache entry is what makes
 a live OFF/ON demo silently prove nothing.
 
+## 2026-07-30, later — re-run on the post-security-fix build
+
+**Why this session happened:** every measurement above was taken against code that
+predates the seven security fixes in 4.2.0. Two of those fixes touch paths the demo
+actually walks, so the numbers needed re-taking rather than re-reading:
+
+- `wipe_user_data` now clears **every** user-scoped collection, `episodes`
+  included, and now *raises* on a partial failure instead of returning it. Both
+  `demo/seed.py` and the server's `/reset` predated that and were fixed in this
+  session — `/reset` had been deleting `episodes` itself and then overwriting the
+  library's real count with its own zero, so a reset that cleared nine episodes
+  reported `episodes_deleted: 0` on stage.
+- The search-index reconciliation now updates existing indexes in place. That
+  raised the question of whether the first startup on the new build would rebuild
+  the demo cluster's indexes. **It does not** — see below.
+
+**No index rebuild on startup.** The config's default `embedding_dimension` is
+1536, but `ProviderManager` aligns it to the configured embedding model before
+migrations run, so all five indexes reconcile as up to date at voyage-4's 1024:
+
+```
+memories_vector_index   dims=1024 READY -> skip (up to date)
+memories_fts_index                READY -> skip (up to date)
+episodes_vector_index   dims=1024 READY -> skip (up to date)
+episodes_fts_index                READY -> skip (up to date)
+cache_vector_index      dims=1024 READY -> skip (up to date)
+```
+
+Worth keeping in mind for a *different* cluster: an index whose definition has
+drifted gets an in-place `update_search_index`, which keeps serving queries while
+it rebuilds. Only a `numDimensions` change drops and recreates, and that is the
+one case that would take vector search offline mid-demo. Changing the embedding
+model before a talk is therefore a rebuild, not a config edit.
+
+### The beats, re-measured
+
+| Beat | Then | Now | Result |
+|---|---|---|---|
+| A1 · state the constraint, OFF | 3.4s | 4.0s | 0 recall frames. |
+| A3 · new thread, same question, OFF | 2.5s | 2.9s | 0 recall frames. Asks about dietary restrictions — two beats after being told. |
+| B5 · same message, ON | 11.0s | 12.2s | Recalls **ltm 3 · stm 1 · episodic 3**. |
+| B7 · new thread, same question, ON | 12.7s | 7.7s | Recalls **ltm 1 · stm 3 · episodic 3**. Does not re-ask. |
+| C · repeat B7 verbatim | 0.3s | 0.9s | `cache_hit=true`, replaying B7's answer. |
+| B8 · user `alex`, same question | 8.2s | 8.6s | **0 hits.** Isolation holds. |
+| D · "what have we worked on together?" | — | 11.8s | **episodic 3.** Nothing from this thread. |
+
+**Total 41.1s** across seven beats (the earlier 38.1s covered six). Still inside
+the 2:00 Screen-1 budget. Every beat is within noise of its previous figure except
+B7, which came in 5s *faster* — that is model latency, not a change worth
+attributing to anything. **Zero errors, warnings, or tracebacks** in the server log
+across the whole run.
+
+The tier split shifts between B5 and B7 (`ltm 3 · stm 1` → `ltm 1 · stm 3`) because
+the same fact exists in both tiers and `$rankFusion` orders them per query. Nothing
+to fix; just don't script a specific split onto a slide.
+
+**State drift reproduced exactly as documented above.** After the run, `alex` held
+2 memories · 1 episode · 1 cache entry — including the isolation beat's own question.
+`--wipe-only` cleared it and `ai4-demo` was re-seeded to `stm 12 · ltm 6 · episodes 3
+· candidates 5`. Both users are at presentation state as of this entry.
+
 ## Still outstanding
 
 The **recorded 60–90s OFF-vs-ON screen capture** is not done, and it is the item

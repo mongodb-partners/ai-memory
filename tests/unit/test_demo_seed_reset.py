@@ -12,10 +12,20 @@ cache entry, one of them the demo's own question verbatim. The next run can then
 recall its own residue and return hits where the entire point is zero. Nothing
 errors; the beat just stops proving anything.
 
-So these tests pin the two properties a reset needs: it clears *all three*
-collections (the library's `wipe_user_data` covers `memories`, but `episodes` and
-the demo's response cache are outside its user-data contract and have to be named
-explicitly), and it plants nothing afterwards.
+So these tests pin the two properties a reset needs: it clears every collection a
+user's data spans, and it plants nothing afterwards.
+
+Which collections those are moved once. `wipe_user_data` originally cleared three
+collections while promising "all user data", so the script deleted `episodes`
+itself. The library now covers every user-scoped collection it owns — `episodes`
+among them — leaving only `demo_response_cache`, which is the demo's own table and
+genuinely invisible to the library. Deleting `episodes` here as well was harmless
+in itself, but the server's `/reset` did the same thing and then reported *its*
+count, overwriting the library's: a reset that cleared nine episodes reported zero.
+
+Hence the direction these tests now pin. `demo_response_cache` must be deleted by
+the script, and `episodes` must **not** be — because a second delete is how the
+real count got lost.
 """
 
 from __future__ import annotations
@@ -38,34 +48,47 @@ pytest.importorskip(
 )
 
 
-def _import_seed():
-    """Import `demo.seed` without letting its `load_dotenv` reach `os.environ`.
+def _import_demo(module_name: str):
+    """Import a demo module without letting its `load_dotenv` reach `os.environ`.
 
-    The script loads the repository's real `.env` at module scope, which is right
-    for a script and wrong for a test process: importing it would publish live
-    configuration into `os.environ` for the rest of the session, and any test
-    asserting a *default* would then read the developer's actual value instead.
-    That failure is order-dependent and lands in unrelated files — three config
-    tests broke this way, all of them passing in isolation.
+    Both `demo.seed` and `server.app` load the repository's real `.env` at module
+    scope, which is right for a script and wrong for a test process: importing one
+    would publish live configuration into `os.environ` for the rest of the session,
+    and any test asserting a *default* would then read the developer's actual value
+    instead. That failure is order-dependent and lands in unrelated files — three
+    config tests broke this way the first time, and ten the second, when
+    `server.app` was imported inside a test body where this guard could not see it.
+    All of them passed in isolation.
 
     So neutralize the call for the duration of the import, and snapshot the
-    environment around it to prove nothing leaked either way.
+    environment around it to prove nothing leaked either way. Import demo modules
+    only through here.
     """
     before = dict(os.environ)
     with patch("dotenv.load_dotenv", return_value=False):
-        module = importlib.import_module("demo.seed")
-    assert dict(os.environ) == before, "importing demo.seed mutated os.environ"
+        module = importlib.import_module(module_name)
+    assert dict(os.environ) == before, f"importing {module_name} mutated os.environ"
     return module
 
 
-_seed = _import_seed()
+_seed = _import_demo("demo.seed")
 _wipe = _seed._wipe
 main = _seed.main
 
-# The three collections a user's data spans. `memories` is the library's own —
-# reached through `wipe_user_data` rather than a direct delete — while these two
-# belong to the demo and are invisible to it.
-DEMO_OWNED_COLLECTIONS = ("episodes", "demo_response_cache")
+# Imported here rather than inside the route test, so it goes through the guard
+# above. `server.app` calls `load_dotenv` at module scope exactly as the seed
+# script does.
+_server_app = _import_demo("server.app")
+
+# The collections the *demo* owns and the library cannot see, so the script has to
+# name them itself. `memories` and `episodes` are the library's, reached through
+# `wipe_user_data` rather than a direct delete.
+DEMO_OWNED_COLLECTIONS = ("demo_response_cache",)
+
+# Cleared by `wipe_user_data`, so a second delete here would double-count. That is
+# not hypothetical: the server's `/reset` overwrote the library's episode count
+# with its own zero.
+LIBRARY_OWNED_COLLECTIONS = ("memories", "episodes", "audit_log", "semantic_cache")
 
 
 def _fake_db() -> tuple[MagicMock, dict[str, MagicMock]]:
@@ -135,6 +158,83 @@ class TestWipeCoversEveryCollection:
             assert filter_arg == {"user_id": "alex"}
             assert filter_arg != {}
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("collection", LIBRARY_OWNED_COLLECTIONS)
+    async def test_library_collections_are_not_deleted_twice(
+        self, collection: str
+    ) -> None:
+        """The library clears these, so a second delete here can only mislead.
+
+        `episodes` is the one that moved: the script used to delete it and report
+        its own count. Harmless in the script, but the server's `/reset` did the
+        same and *spread* the library's result first, so its zero replaced the real
+        figure and a reset that cleared nine episodes displayed none.
+        """
+        memory, (db, collections) = _fake_memory(), _fake_db()
+
+        await _wipe(memory, db, "alex")
+
+        assert collection not in collections, (
+            f"_wipe deleted {collection!r} directly; wipe_user_data already covers "
+            f"it, and a second delete overwrites the real count with zero"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_logged_counts_come_from_the_library(self) -> None:
+        """What the presenter reads on the terminal has to be the real number."""
+        memory, (db, _) = _fake_memory(), _fake_db()
+        memory.wipe_user_data = AsyncMock(
+            return_value={"memories_deleted": 20, "episodes_deleted": 3}
+        )
+
+        with patch.object(_seed.log, "info") as logged:
+            await _wipe(memory, db, "alex")
+
+        rendered = logged.call_args.args[0] % logged.call_args.args[1:]
+        assert "memories=20" in rendered, rendered
+        assert "episodes=3" in rendered, rendered
+
+
+class TestAPartialWipeStopsTheSeed:
+    """A half-cleared user is the state that must not be reported as ready.
+
+    `wipe_user_data` raises `PartialWipeError` rather than returning it, because
+    the audit status is derived from whether the call raised. For this script the
+    consequence is different but no less real: seeding on top of a half-cleared
+    user leaves exactly the stale documents a recall beat can surface.
+    """
+
+    def test_it_is_reported_as_not_ready_and_exits_nonzero(
+        self, monkeypatch, capsys
+    ) -> None:
+        """Through the same channel as the other pre-flight failures.
+
+        A raw traceback on the morning of a talk reads as a broken script rather
+        than as "run this again".
+        """
+        from agent_memory.services.admin import PartialWipeError
+
+        def boom(coro):
+            coro.close()
+            raise PartialWipeError(
+                {"user_id": "alex", "memories_deleted": 2}, {"episodes": "down"}
+            )
+
+        monkeypatch.setattr("demo.seed.asyncio.run", boom)
+        monkeypatch.setattr(sys, "argv", ["seed", "--user", "alex"])
+
+        assert main() == 1
+        err = capsys.readouterr().err
+        assert "NOT READY TO PRESENT" in err
+        assert "episodes" in err, "the operator is not told what is still there"
+        assert "safe to repeat" in err, "the operator is not told what to do"
+
+    def test_a_clean_run_is_unaffected(self, monkeypatch) -> None:
+        monkeypatch.setattr("demo.seed.asyncio.run", lambda coro: coro.close() or 0)
+        monkeypatch.setattr(sys, "argv", ["seed", "--user", "alex"])
+
+        assert main() == 0
+
 
 class TestWipeOnlyPlantsNothing:
     """The flag exists so that emptying a user does not also populate it."""
@@ -196,3 +296,180 @@ class TestWipeOnlyPlantsNothing:
         with pytest.raises(SystemExit) as exit_info:
             main()
         assert exit_info.value.code != 0
+
+
+
+class TestTheResetRouteReportsRealCounts:
+    """The on-stage reset. The same duplicate delete, with a visible consequence.
+
+    The route spread the library's result and *then* overwrote `episodes_deleted`
+    from its own second delete — which necessarily found nothing, because the
+    library had already cleared the collection. The number the presenter reads was
+    structurally guaranteed to be zero.
+
+    Driven through the real route, via the real lifespan with only the external
+    dependencies faked. The defect was the order of two dict writes; a test that
+    restates that order cannot see it.
+    """
+
+    @staticmethod
+    async def _client(*, failing: set[str] | None = None):
+        """The real app, with Atlas and the providers replaced."""
+
+        from agent_memory.services.admin import AdminService
+        from tests.unit.test_erasure_is_final import _DB
+
+        db = _DB(failing=failing or set())
+        memory = MagicMock()
+        memory._db_manager.db = db
+        memory.close = AsyncMock()
+        admin = AdminService(db)
+
+        async def wipe(user_id, confirm=False):
+            return await admin.wipe_user_data(user_id)
+
+        memory.wipe_user_data = AsyncMock(side_effect=wipe)
+
+        cache = MagicMock()
+        cache.ensure_indexes = AsyncMock()
+        cache.clear = AsyncMock(return_value=2)
+
+        with patch("server.app.MemoryConfig") as config_cls, \
+             patch("server.app.AsyncMemory") as memory_cls, \
+             patch("server.app.DemoResponseCache", return_value=cache), \
+             patch("server.app.TurnRunner"):
+            config_cls.from_env.return_value = MagicMock(llm_provider="bedrock")
+            memory_cls.create = AsyncMock(return_value=memory)
+
+            app = _server_app.create_app()
+            # The routes 503 until the lifespan has populated `state`, so it has
+            # to actually run — that is also what makes this the real wiring
+            # rather than a hand-built dict. Starlette's own TestClient runs it;
+            # a bare httpx transport does not.
+            from server.sse import SHUTDOWN
+            from starlette.testclient import TestClient
+
+            # Running the lifespan means running its *shutdown*, which sets the
+            # module-level `SHUTDOWN` event — and nothing ever clears it, because
+            # in production the process is exiting. Left set, every later test that
+            # streams a turn gets a `shutdown` frame instead of its own output;
+            # seven tests in `test_demo_ui_server.py` failed this way, none of them
+            # touching this file. Restored to whatever it was on entry.
+            was_set = SHUTDOWN.is_set()
+            try:
+                with TestClient(app) as client:
+                    yield client, db
+            finally:
+                if not was_set:
+                    SHUTDOWN.clear()
+
+    @pytest.mark.asyncio
+    async def test_the_episode_count_is_the_librarys_own(self) -> None:
+        async for client, db in self._client():
+            db["episodes"].docs.extend([{"user_id": "ai4-demo"}] * 9)
+            db["memories"].docs.extend([{"user_id": "ai4-demo"}] * 4)
+
+            r = client.post("/reset",
+                            json={"user_id": "ai4-demo", "confirm": True})
+
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["episodes_deleted"] == 9, (
+                f"the route reported {body['episodes_deleted']} episodes where the "
+                f"library deleted 9 — its own duplicate delete overwrote the count"
+            )
+            assert body["memories_deleted"] == 4
+            assert body["demo_cache_deleted"] == 2
+            assert body["complete"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_partial_wipe_is_a_conflict_not_a_crash(self) -> None:
+        """409 with the counts. A 500 would say "the server is broken" when what
+        happened is that some of the user's data is still there — and the
+        difference decides whether the operator retries or starts debugging."""
+        async for client, db in self._client(failing={"decisions"}):
+            db["memories"].docs.extend([{"user_id": "ai4-demo"}] * 3)
+
+            r = client.post("/reset",
+                            json={"user_id": "ai4-demo", "confirm": True})
+
+            assert r.status_code == 409, r.text
+            detail = r.json()["detail"]
+            assert detail["complete"] is False
+            assert detail["memories_deleted"] == 3
+            assert detail["failed_collections"] == ["decisions"]
+
+    @pytest.mark.asyncio
+    async def test_the_confirm_gate_still_holds(self) -> None:
+        async for client, db in self._client():
+            db["memories"].docs.append({"user_id": "ai4-demo"})
+
+            r = client.post("/reset", json={"user_id": "ai4-demo"})
+
+            assert r.status_code == 400
+            assert db["memories"].docs, "a reset ran without confirmation"
+
+
+class TestTheDemoModulesDoNotLeakTheEnvironment:
+    """Importing a demo module must not publish the real `.env` into the process.
+
+    Both demo entry points call `load_dotenv` at module scope, which is correct for
+    something you run from a shell and hostile inside a test session: the live
+    `VOYAGE_API_KEY`, endpoint, and embedding dimension become `os.environ` for
+    every test that follows, so anything asserting a *default* reads the
+    developer's actual value. The failures land in unrelated files and every one of
+    them passes in isolation.
+
+    This has happened twice — first from `demo.seed`, then from `server.app`
+    imported inside a test body where the module-scope guard could not apply. So it
+    is asserted rather than documented.
+
+    Asserted at the level of "every demo module this file imports goes through the
+    guard", because re-importing to observe the leak directly is not reproducible:
+    the values are already in `os.environ` from the guarded import at module scope,
+    and `load_dotenv` will not overwrite them.
+    """
+
+    # Every demo module this file pulls in. A new one added without going through
+    # `_import_demo` is the failure being prevented.
+    DEMO_MODULES = ("demo.seed", "server.app")
+
+    @pytest.mark.parametrize("module_name", DEMO_MODULES)
+    def test_the_module_was_imported_through_the_guard(self, module_name: str) -> None:
+        """`_import_demo` asserts the environment is unchanged around the import,
+        so a module reaching this file any other way is what to catch."""
+        assert module_name in sys.modules, (
+            f"{module_name} is not imported; if this file stopped needing it, drop "
+            f"it from DEMO_MODULES"
+        )
+
+    @pytest.mark.parametrize("module_name", DEMO_MODULES)
+    def test_the_module_really_does_load_a_dotenv(self, module_name: str) -> None:
+        """Otherwise the guard is load-bearing for nothing and the next person
+        removes it. Read from the source, since the call already happened."""
+        module = sys.modules[module_name]
+        source = Path(module.__file__).read_text()
+        assert "load_dotenv(" in source, (
+            f"{module_name} no longer loads a .env at import — the guard in "
+            f"_import_demo may now be unnecessary, but confirm before removing it"
+        )
+
+    def test_the_guard_restores_load_dotenv_afterwards(self) -> None:
+        """It patches a shared module. Leaving it patched would silently stop the
+        *next* test's legitimate dotenv use."""
+        import dotenv
+
+        _import_demo("demo.seed")  # already imported; exercises the patch path
+        assert not isinstance(dotenv.load_dotenv, MagicMock)
+
+    def test_no_live_credential_reached_the_environment(self) -> None:
+        """The concrete consequence, stated as the thing that must not be true.
+
+        A leaked `VOYAGE_API_KEY` made `test_voyage_defaults` assert the real key
+        against `None`, which also printed it into the failure output.
+        """
+        for key in ("VOYAGE_API_KEY", "VOYAGE_API_URL", "EMBEDDING_DIMENSION"):
+            assert key not in os.environ, (
+                f"{key} leaked into os.environ from a demo module import; tests "
+                f"asserting defaults will read the live value instead"
+            )

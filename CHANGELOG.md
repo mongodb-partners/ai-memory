@@ -149,6 +149,48 @@ change than this fix, and the three `F841` unused locals were checked by hand �
 they are throwaway assignments in tests that assert on mock call args, not dropped
 assertions.
 
+**The demo's reset paths had not caught up with `wipe_user_data`.** Both predate
+the wipe fix below, which brought `episodes` inside the library's user-data
+contract. Two consequences, one of them visible on stage:
+
+* `POST /reset` in `examples/memory-ui/server/app.py` spread the library's result
+  and *then* set `episodes_deleted` from its own second delete of `episodes` —
+  which necessarily found nothing, because the library had already cleared the
+  collection. The count the presenter reads was structurally guaranteed to be
+  zero; a reset that cleared nine episodes reported none. The duplicate delete is
+  gone and the library's count is what the route returns.
+* Neither caller handled `PartialWipeError`, which the wipe now raises instead of
+  returning. `/reset` would have answered 500 — "the server is broken" when what
+  happened is that some of the user's data is still there — and `demo/seed.py`
+  would have printed a traceback. `/reset` now answers **409** carrying the
+  per-collection counts and `failed_collections`; the seed script reports it
+  through its existing `NOT READY TO PRESENT` channel and exits 1, because seeding
+  on top of a half-cleared user leaves exactly the stale documents a recall beat
+  can surface.
+
+`test_demo_seed_reset.py` grew from 13 to 22 tests, including the `/reset` route
+driven through the real app and lifespan rather than a re-implementation — the
+defect was the order of two dict writes, which a test that restates that order
+cannot see. Both fixes were verified against mutations that restore the old
+behaviour.
+
+**Importing a demo module leaked the live `.env` into the test session.**
+`server.app` calls `load_dotenv` at module scope exactly as `demo/seed.py` does, so
+importing it inside a test body — where the existing module-scope guard could not
+apply — published the real `VOYAGE_API_KEY`, `VOYAGE_API_URL`, and
+`EMBEDDING_DIMENSION` into `os.environ` for every test that followed. Ten tests in
+three unrelated files began asserting the developer's actual configuration against
+library defaults, and all ten passed in isolation. One of them printed the live API
+key into the failure output.
+
+The guard is now general (`_import_demo`) and covers both modules, and
+`TestTheDemoModulesDoNotLeakTheEnvironment` asserts the property rather than
+documenting it: that each demo module was imported through the guard, that each
+still loads a `.env` (so the guard is not load-bearing for nothing), that the patch
+is restored afterwards, and that no live credential is present in `os.environ`. The
+last of those is what fails now — inside the file responsible, naming the variable
+— instead of surfacing three files away.
+
 ### Security
 
 A further review of the 4.1.0 hardening, which found that two of its fixes had a
