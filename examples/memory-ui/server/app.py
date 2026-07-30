@@ -34,7 +34,7 @@ from agent_memory.services.admin import PartialWipeError
 
 from .cache_key import DemoResponseCache
 from .history import ConversationHistory
-from .sse import SHUTDOWN, drain_in_flight, sse_response
+from .sse import SHUTDOWN, drain_in_flight, reset_shutdown_state, sse_response
 from .turn import TurnRunner, project_episode_hit, project_memory_hit
 
 log = logging.getLogger(__name__)
@@ -72,6 +72,12 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # `SHUTDOWN` is a module global, so a previous lifespan's shutdown is still
+        # visible here — and a set flag makes every chat request in this lifecycle
+        # answer with a `shutdown` error frame while the server otherwise reports
+        # healthy. Cleared first, before anything can serve. See
+        # `reset_shutdown_state`.
+        reset_shutdown_state()
         config = MemoryConfig.from_env(
             # Short-lived clients would otherwise race index creation, but this
             # is a long-running server, so the background path is right — the

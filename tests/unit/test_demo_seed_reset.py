@@ -30,6 +30,7 @@ real count got lost.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import sys
@@ -89,6 +90,32 @@ DEMO_OWNED_COLLECTIONS = ("demo_response_cache",)
 # not hypothetical: the server's `/reset` overwrote the library's episode count
 # with its own zero.
 LIBRARY_OWNED_COLLECTIONS = ("memories", "episodes", "audit_log", "semantic_cache")
+
+
+@pytest.fixture(autouse=True)
+def _no_shutdown_residue():
+    """Leave the process's SSE shutdown state clean around every test here.
+
+    Several tests in this file run the demo's real lifespan, and its *exit* sets
+    the module-level `SHUTDOWN` event — in production the process is exiting, so
+    nothing cleared it. Left set, any later test that streams a turn gets a
+    `shutdown` error frame instead of its own output. That has bitten twice: seven
+    tests in `test_demo_ui_server.py` failed on residue from this file, and then
+    the last test in `TestASecondLifecycleStillServesTurns` hung on residue from
+    the test before it — waiting on a generator the producer refused to start.
+    Both were order-dependent and both passed in isolation.
+
+    The production fix (`reset_shutdown_state` at lifespan startup) makes a second
+    *lifecycle* clean, which is the bug that was reported. It cannot help a test
+    that streams a turn without running a lifespan at all, so this stays.
+    """
+    import server.sse as sse
+
+    sse.reset_shutdown_state()
+    try:
+        yield
+    finally:
+        sse.reset_shutdown_state()
 
 
 def _fake_db() -> tuple[MagicMock, dict[str, MagicMock]]:
@@ -346,22 +373,17 @@ class TestTheResetRouteReportsRealCounts:
             # to actually run — that is also what makes this the real wiring
             # rather than a hand-built dict. Starlette's own TestClient runs it;
             # a bare httpx transport does not.
-            from server.sse import SHUTDOWN
             from starlette.testclient import TestClient
 
-            # Running the lifespan means running its *shutdown*, which sets the
-            # module-level `SHUTDOWN` event — and nothing ever clears it, because
-            # in production the process is exiting. Left set, every later test that
-            # streams a turn gets a `shutdown` frame instead of its own output;
-            # seven tests in `test_demo_ui_server.py` failed this way, none of them
-            # touching this file. Restored to whatever it was on entry.
-            was_set = SHUTDOWN.is_set()
-            try:
-                with TestClient(app) as client:
-                    yield client, db
-            finally:
-                if not was_set:
-                    SHUTDOWN.clear()
+            # No `SHUTDOWN` bookkeeping here any more. This helper used to save and
+            # restore the flag, because running the lifespan runs its *shutdown*,
+            # which sets a module-level event that nothing cleared — seven tests in
+            # `test_demo_ui_server.py` failed on the residue, none of them touching
+            # this file, and all of them passing in isolation. The lifespan clears
+            # it on the way in now, which is the production fix as well: see
+            # `TestASecondLifecycleStillServesTurns`.
+            with TestClient(app) as client:
+                yield client, db
 
     @pytest.mark.asyncio
     async def test_the_episode_count_is_the_librarys_own(self) -> None:
@@ -408,6 +430,211 @@ class TestTheResetRouteReportsRealCounts:
 
             assert r.status_code == 400
             assert db["memories"].docs, "a reset ran without confirmation"
+
+
+class TestASecondLifecycleStillServesTurns:
+    """Shutdown state is per *process*, so it has to be cleared on the way in.
+
+    ``SHUTDOWN`` is a module-level ``asyncio.Event``. Shutdown set it and nothing
+    cleared it, on the reasoning that the process is exiting — true of
+    ``uvicorn server.app:app``, and false of anything that runs the lifespan twice
+    in one interpreter: ``pytest``'s ``TestClient``, a reload-on-edit dev loop, an
+    embedding host that mounts the app, a rehearsal harness that restarts the demo
+    between passes.
+
+    What that costs is a server that looks healthy and refuses everything.
+    ``_producer`` checks ``SHUTDOWN.is_set()`` before the first frame, so every
+    ``/chat`` request in the second lifecycle returns a well-formed stream whose
+    only content is a ``shutdown`` error. ``/health`` is fine, the log is quiet, and
+    on stage that is a demo that has stopped working with nothing to point at.
+
+    This suite is where it was found: `_client` above had to save and restore the
+    flag by hand, or seven tests in another file failed. That workaround is gone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_turn_after_a_previous_shutdown_is_not_refused(self) -> None:
+        from server.sse import SHUTDOWN, sse_response
+
+        # Exactly the state a previous lifecycle's shutdown leaves behind.
+        SHUTDOWN.set()
+        async for _client, _db in TestTheResetRouteReportsRealCounts._client():
+            assert SHUTDOWN.is_set() is False, (
+                "the lifespan started with a previous shutdown still in force; "
+                "every turn in this lifecycle would answer with a shutdown frame"
+            )
+
+            # Not just the flag — the frame a client would actually receive.
+            async def drive():
+                yield {"event": "token", "data": "hello"}
+
+            response = sse_response(drive, "cid-second-life", 5.0)
+            frames = [f async for f in response.body_iterator]
+            assert [f["event"] for f in frames] == [
+                "correlation", "token", "done",
+            ], frames
+
+    @pytest.mark.asyncio
+    async def test_shutdown_still_stops_new_turns(self) -> None:
+        """Paired. Clearing the flag unconditionally — rather than only at startup
+        — would satisfy the test above and disable the drain the flag exists for:
+        a turn arriving mid-shutdown would be accepted against a closing database.
+        """
+        from server.sse import SHUTDOWN, sse_response
+
+        async for _client, _db in TestTheResetRouteReportsRealCounts._client():
+            pass
+        # The lifespan has exited, so shutdown is in force again.
+        assert SHUTDOWN.is_set() is True, "shutdown no longer refuses new turns"
+
+        async def drive():  # pragma: no cover - must never be entered
+            yield {"event": "token", "data": "should not run"}
+
+        frames = [
+            f async for f in sse_response(drive, "cid", 5.0).body_iterator
+        ]
+        assert frames == [
+            {"event": "correlation", "data": "cid"},
+            {"event": "error", "data": "shutdown"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_streams_from_a_dead_loop_are_not_carried_forward(
+        self, caplog
+    ) -> None:
+        """A stream that outlived its drain timeout stays in `_IN_FLIGHT`.
+
+        Its task is bound to an event loop that no longer exists, so the next
+        lifespan's `drain_in_flight` would gather a cross-loop task during
+        shutdown — a failure at the least convenient moment, and one that is
+        logged and dropped rather than reported.
+
+        Discarding it is the right call — there is no loop left to drain it on —
+        but it is not free: that stream may have owed a memory write-back, and
+        dropping it silently means a turn vanishes with no record that it did. So
+        the log line is asserted, not just the discard.
+        """
+        import logging
+
+        import server.sse as sse
+
+        stale = MagicMock()  # a task object from a loop that is gone
+        sse._IN_FLIGHT.add(stale)
+        try:
+            with caplog.at_level(logging.WARNING, logger="server.sse"):
+                async for _c, _db in TestTheResetRouteReportsRealCounts._client():
+                    assert stale not in sse._IN_FLIGHT, (
+                        "a stream from a previous lifespan survived into this one"
+                    )
+            assert any(
+                "previous lifespan" in r.message and r.levelno >= logging.WARNING
+                for r in caplog.records
+            ), "a leftover stream was dropped without a word"
+        finally:
+            sse._IN_FLIGHT.discard(stale)
+
+    @pytest.mark.asyncio
+    async def test_a_clean_startup_says_nothing(self) -> None:
+        """Paired with the warning above. A line on every ordinary startup is a
+        line the presenter learns to ignore, which is how the real one gets
+        missed."""
+        import logging
+
+        import server.sse as sse
+
+        assert sse._IN_FLIGHT == set()
+        records: list[logging.LogRecord] = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        logger = logging.getLogger("server.sse")
+        logger.addHandler(handler)
+        try:
+            async for _c, _db in TestTheResetRouteReportsRealCounts._client():
+                pass
+        finally:
+            logger.removeHandler(handler)
+        assert [r for r in records if r.levelno >= logging.WARNING] == []
+
+    @pytest.mark.asyncio
+    async def test_shutdown_drains_before_closing_the_database(self) -> None:
+        """What makes clearing `_IN_FLIGHT` at startup safe.
+
+        Startup can discard leftovers only because shutdown is supposed to have
+        drained them. Drop the drain and the two changes compose into silent loss:
+        every unfinished stream is abandoned at shutdown and then thrown away at
+        the next startup, so a turn's memory write-back disappears with a warning
+        that names the wrong cause.
+
+        Ordering is the assertion. Draining after `memory.close()` would be no
+        drain at all — the streams still writing would find the connection gone.
+        """
+        from agent_memory.services.admin import AdminService
+        from tests.unit.test_erasure_is_final import _DB
+
+        order: list[str] = []
+        db = _DB(failing=set())
+        memory = MagicMock()
+        memory._db_manager.db = db
+        memory.wipe_user_data = AsyncMock(
+            side_effect=AdminService(db).wipe_user_data
+        )
+
+        async def _close():
+            order.append("close")
+
+        memory.close = _close
+
+        async def _drain(timeout: float = 10.0):
+            order.append("drain")
+
+        cache = MagicMock()
+        cache.ensure_indexes = AsyncMock()
+
+        with patch("server.app.MemoryConfig") as config_cls, \
+             patch("server.app.AsyncMemory") as memory_cls, \
+             patch("server.app.DemoResponseCache", return_value=cache), \
+             patch("server.app.drain_in_flight", _drain), \
+             patch("server.app.TurnRunner"):
+            config_cls.from_env.return_value = MagicMock(llm_provider="bedrock")
+            memory_cls.create = AsyncMock(return_value=memory)
+            app = _server_app.create_app()
+            async with app.router.lifespan_context(app):
+                assert order == []
+
+        assert order == ["drain", "close"]
+
+    @pytest.mark.asyncio
+    async def test_a_live_stream_is_not_discarded_by_a_reset(self) -> None:
+        """Paired. `reset_shutdown_state` clearing `_IN_FLIGHT` is only safe at
+        startup, when by definition nothing this loop owns is registered. Called
+        anywhere else it would drop live streams from the drain set, so shutdown
+        would close the database under a turn that was still writing.
+        """
+        import server.sse as sse
+        from server.sse import sse_response
+
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def drive():
+            started.set()
+            await release.wait()
+            yield {"event": "token", "data": "done waiting"}
+
+        response = sse_response(drive, "cid-live", 5.0)
+        consumer = asyncio.create_task(
+            _collect(response.body_iterator)
+        )
+        await started.wait()
+        assert len(sse._IN_FLIGHT) == 1
+        release.set()
+        await consumer
+        # Registration is by done-callback, so it clears itself on completion —
+        # which is what makes a *leftover* entry evidence of a dead loop.
+        assert sse._IN_FLIGHT == set()
+
+
+async def _collect(iterator) -> list:
+    return [frame async for frame in iterator]
 
 
 class TestTheDemoModulesDoNotLeakTheEnvironment:

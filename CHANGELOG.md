@@ -116,6 +116,36 @@ independently, so a badly trained artifact cannot emit the value that means
 
 ### Fixed
 
+**The demo server refused every turn on a second lifecycle.** `SHUTDOWN` in
+`examples/memory-ui/server/sse.py` is a module-level `asyncio.Event`. Shutdown set
+it and nothing cleared it, on the reasoning that the process is exiting — true of
+`uvicorn server.app:app`, and false of anything running the lifespan twice in one
+interpreter: pytest's `TestClient`, a reload-on-edit dev loop, an embedding host
+that mounts the app, a rehearsal harness restarting the demo between passes.
+
+The producer checks `SHUTDOWN.is_set()` before the first frame, so every `/chat`
+request in the second lifecycle returned a well-formed stream whose only content
+was a `shutdown` error. `/health` stayed fine and the log stayed quiet — a demo
+that has stopped working with nothing to point at. `_IN_FLIGHT` had the same
+problem with a nastier tail: a stream that missed the drain timeout stayed
+registered holding a task bound to the *previous* event loop, so the next
+`drain_in_flight` gathered a cross-loop task during shutdown, when there is least
+attention to spare, and the failure was discarded rather than reported.
+
+`reset_shutdown_state()` now runs first in the lifespan, before anything can serve.
+Leftover streams are dropped rather than awaited — their loop is gone, so there is
+nothing to drain — but the drop is logged, because a stream that never finished may
+have owed a memory write-back and losing one silently is how a turn disappears with
+no record that it did. A clean startup says nothing, so the warning still means
+something when it appears.
+
+This was already visible in the test suite as a workaround: `test_demo_seed_reset.py`
+saved and restored the flag by hand around the lifespan, or seven tests in
+`test_demo_ui_server.py` failed on the residue — none of them touching that file,
+all of them passing in isolation. The workaround is gone. A module-scoped fixture
+replaces it for the narrower case the production fix cannot reach: a test that
+streams a turn without running a lifespan at all.
+
 **A failed startup left the connection pool claimed and its workers running.**
 `AsyncMemory.create` acquires a reference-counted claim on the process-wide
 `DatabaseManager` at step 1 and starts four background worker tasks at step 6. A

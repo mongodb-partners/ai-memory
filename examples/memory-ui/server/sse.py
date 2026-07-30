@@ -36,9 +36,45 @@ log = logging.getLogger(__name__)
 # refused outright; a turn already streaming is left alone and bounded by
 # `drain_in_flight` instead. Cutting a live turn short would lose both the tail of
 # the answer and its memory write-back, and the write is the thing worth keeping.
+#
+# Module-level, and therefore per *process* rather than per app instance — which is
+# only safe because `reset_shutdown_state()` clears it on the way in. See there.
 SHUTDOWN = asyncio.Event()
 
 _IN_FLIGHT: set[asyncio.Task[Any]] = set()
+
+
+def reset_shutdown_state() -> None:
+    """Clear process-global shutdown state. Call at the start of every lifespan.
+
+    ``SHUTDOWN`` and ``_IN_FLIGHT`` are module globals, so they outlive the app
+    instance that set them. Shutdown sets ``SHUTDOWN`` and nothing ever cleared it,
+    on the assumption that the process is exiting — an assumption the code does not
+    enforce and that is wrong whenever a lifespan runs twice in one interpreter:
+
+    * ``_producer`` checks ``SHUTDOWN.is_set()`` before the first frame, so a
+      second lifecycle answers **every** turn with a ``shutdown`` error frame. The
+      server is up, ``/health`` is fine, and each chat request returns a
+      well-formed stream containing nothing but a refusal.
+    * A stream that missed the drain timeout stays in ``_IN_FLIGHT`` holding a task
+      bound to the *previous* event loop. The next ``drain_in_flight`` gathers it
+      and gets a cross-loop failure during shutdown, when there is least attention
+      to spare.
+
+    Neither symptom points at the previous lifecycle, and the second is discarded
+    rather than reported. Stale entries are dropped rather than awaited: their loop
+    is gone, so there is nothing left to drain — the log line says so, because
+    silently discarding a stream that may still have owed a memory write is worth
+    one.
+    """
+    SHUTDOWN.clear()
+    if _IN_FLIGHT:
+        log.warning(
+            "discarding %d stream(s) left over from a previous lifespan; their "
+            "event loop is gone, so they cannot be drained",
+            len(_IN_FLIGHT),
+        )
+        _IN_FLIGHT.clear()
 
 # Bounded so a slow client applies backpressure to the model loop instead of
 # letting the queue grow without limit.
