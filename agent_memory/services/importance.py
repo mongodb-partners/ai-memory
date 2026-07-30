@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +45,103 @@ LEXICAL_FEATURE_COUNT = 7
 # `forgetting_score_threshold`, so emitting it is ordering a deletion.
 MIN_IMPORTANCE = 0.1
 MAX_IMPORTANCE = 1.0
+
+
+# --------------------------------------------------------------------------
+# Lexical features
+#
+# The fallback feature space, used when no artifact matches the configured
+# embedder. Deliberately crude: seven interpretable numbers a regex can produce,
+# not a replacement for the embedding head. Its job is to be *better than a
+# constant* on a deployment we have not trained an artifact for.
+#
+# The ORDER IS THE WIRE FORMAT. Coefficients in a trained artifact are
+# positional, so inserting a feature in the middle silently reassigns every
+# weight and the model goes on returning plausible numbers. Append only, and bump
+# LEXICAL_FEATURE_COUNT and SCHEMA_VERSION when you do.
+# --------------------------------------------------------------------------
+
+LEXICAL_FEATURE_NAMES = (
+    "length",
+    "digit_ratio",
+    "preference",
+    "identity",
+    "temporal",
+    "interrogative",
+    "entity",
+)
+
+# Standing rules and stated preferences — the archetypal long-term memory.
+_PREFERENCE_TERMS = frozenset({
+    "prefer", "prefers", "preferred", "preference", "preferences",
+    "always", "never", "must", "should", "avoid", "avoids",
+    "favorite", "favourite", "hate", "hates", "dislike", "dislikes",
+    "policy", "convention", "standard", "rule", "requires", "required",
+})
+
+# Facts about the user rather than about the task at hand.
+_IDENTITY_TERMS = frozenset({
+    "my", "mine", "our", "ours", "i'm", "im", "we're",
+    "myself", "ourselves", "me",
+})
+
+# Scoped, expiring facts — the archetypal *short*-term memory. Expected to train
+# with a negative weight.
+_TEMPORAL_TERMS = frozenset({
+    "today", "tomorrow", "yesterday", "tonight", "now", "currently",
+    "temporarily", "temporary", "meanwhile", "sprint", "standup", "asap",
+})
+
+# Length above which more text stops meaning more signal. A 4000-character
+# memory is not four times as important as a 1000-character one, and without a
+# cap this feature would dominate the linear combination on outliers.
+_LENGTH_SATURATION = 1000
+
+# Marker counts saturate too: three preference words is as strong a signal as
+# ten, and an unbounded count would make one ranting memory an outlier.
+_MARKER_SATURATION = 3
+
+# Word tokens, apostrophes kept so "I'm" survives as one token.
+_WORD_RE = re.compile(r"[A-Za-z']+")
+
+
+def _marker_ratio(tokens: list[str], terms: frozenset[str]) -> float:
+    hits = sum(1 for t in tokens if t in terms)
+    return min(hits, _MARKER_SATURATION) / _MARKER_SATURATION
+
+
+def lexical_features(content: str | None) -> list[float]:
+    """Extract the fallback feature vector from raw text.
+
+    Returns exactly ``LEXICAL_FEATURE_COUNT`` values, each in ``[0.0, 1.0]``.
+    Bounded on purpose: an unbounded feature crossed with a trained weight can
+    push the pre-squash sum far enough that ``logistic`` saturates, and a scorer
+    that returns 1.0 for everything long is worse than one that returns 0.5.
+    """
+    text = content or ""
+    n = len(text)
+    if n == 0:
+        return [0.0] * LEXICAL_FEATURE_COUNT
+
+    raw_words = _WORD_RE.findall(text)
+    tokens = [w.lower() for w in raw_words]
+
+    length = min(n, _LENGTH_SATURATION) / _LENGTH_SATURATION
+    digit_ratio = sum(1 for c in text if c.isdigit()) / n
+    preference = _marker_ratio(tokens, _PREFERENCE_TERMS)
+    identity = _marker_ratio(tokens, _IDENTITY_TERMS)
+    temporal = _marker_ratio(tokens, _TEMPORAL_TERMS)
+    interrogative = 1.0 if "?" in text else 0.0
+
+    # Skip index 0: a sentence-initial capital is grammar, not an entity. Without
+    # this, every memory that starts with "The" scores an entity it does not have.
+    if len(raw_words) > 1:
+        rest = raw_words[1:]
+        entity = sum(1 for w in rest if w[:1].isupper()) / len(rest)
+    else:
+        entity = 0.0
+
+    return [length, digit_ratio, preference, identity, temporal, interrogative, entity]
 
 
 @dataclass(frozen=True)
