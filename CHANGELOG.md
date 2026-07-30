@@ -838,6 +838,14 @@ observed to fail, then against the fix and observed to pass.
   could call it. Captures in flight at shutdown were dropped exactly as before the
   fix. The server now retains it and drains on shutdown.
 
+- **`python-dotenv` floor raised to 1.2.2.** Versions below it follow symlinks in
+  `set_key` and can overwrite an arbitrary file through the cross-device rename
+  fallback (moderate). Not reachable from this package: nothing here calls
+  `set_key`, and the library never imports dotenv at all — only the demo server and
+  seed script do, which is why it is a dependency in the first place. The floor
+  still matters, because `>=1.0.1` is what a consumer's resolver reads, and it
+  permitted a fresh install to satisfy us with a vulnerable version.
+
 ## [4.1.0] — 2026-07-29
 
 ### Added

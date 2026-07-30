@@ -37,7 +37,13 @@ dependencies = [
     "boto3>=1.36.26",
     "pydantic>=2.10.6",
     "pydantic-settings>=2.0",
-    "python-dotenv>=1.0.1",
+    # Floor is 1.2.2, not 1.0.1: earlier versions follow symlinks in `set_key`
+    # (GHSA / CVE, moderate) and can overwrite an arbitrary file through the
+    # cross-device rename fallback. Nothing here calls `set_key` and the library
+    # never imports dotenv at all, so this is not reachable in our own code --
+    # but the floor is what a consumer's resolver reads, and leaving it at 1.0.1
+    # lets a fresh install pick a vulnerable version to satisfy us.
+    "python-dotenv>=1.2.2",
     "PyJWT>=2.13.0",
     "httpx>=0.27.0",
 ]
