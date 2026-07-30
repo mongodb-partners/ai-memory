@@ -116,6 +116,65 @@ independently, so a badly trained artifact cannot emit the value that means
 
 ### Fixed
 
+**A failed startup left the connection pool claimed and its workers running.**
+`AsyncMemory.create` acquires a reference-counted claim on the process-wide
+`DatabaseManager` at step 1 and starts four background worker tasks at step 6. A
+failure anywhere after that raised out of `create()` without releasing either —
+and there was no way to release them, because `create()` never returned, so no
+caller had an object to call `close()` on.
+
+Neither consequence surfaces where it is caused. `DatabaseManager.close()` closes
+the client only when the last holder leaves, so one leaked claim means a *later*
+`close()` — a legitimate one, from a facade that started perfectly — decrements to
+a non-zero count and returns without closing anything. The pool outlives the
+process's use of it and the code path that appears to be at fault did nothing
+wrong. A process that retries startup after fixing its config then gets
+"DatabaseManager is already connected to a different MongoDB target", a refusal on
+behalf of a pool nobody holds. Meanwhile the workers keep polling Atlas through a
+connection the caller believes failed to open, and the episodic queue keeps
+accepting turns that nothing will ever drain.
+
+Everything after the database is now wrapped, and `_abandon_startup()` releases
+what was acquired: worker tasks and any backgrounded search-index task cancelled,
+the episodic queue closed, then the pool released. It catches `BaseException`
+rather than `Exception` — a `CancelledError` from a caller's expiring timeout is
+precisely the case where nobody is left to clean up, and the one `Exception` would
+miss. Cleanup never raises: the startup fault is the only thing the caller can act
+on, so a pool whose own `close()` fails during teardown is logged rather than
+substituted for the reason startup failed.
+
+The synchronous `Memory` wrapper had the same shape one level up. It starts an
+event loop on a daemon thread before building the core, so a failed `__init__`
+left the thread alive with no handle on it — a script looping over configs, or a
+test parametrized across them, accumulated one live loop and one thread per
+attempt, each holding whatever the failed startup had scheduled. `__init__` now
+tears the loop down on the way out through a shared, idempotent `_stop_loop()`.
+`close()` became idempotent too, and for a reason the tests found rather than one
+that was designed: a second `close()` reached `_submit` before `_stop_loop`'s
+tolerance mattered, handing a fresh coroutine to a closed loop and raising
+`RuntimeError: Event loop is closed` — reachable from an explicit `close()` inside
+a `with` block, where the caller has done nothing wrong.
+
+Guards mutation-tested rather than assumed: 19 mutations, all caught. Removing the
+handler entirely (the original bug), narrowing it to `Exception`, swallowing the
+startup error instead of re-raising, never recording the pool on the facade;
+making `_abandon_startup` a no-op, skipping the pool close, dropping the holder
+reference before closing, skipping the worker cancellation, leaving the
+backgrounded index task running, leaving the episodic queue open, letting a
+teardown error replace the startup error; and running cleanup on *successful*
+startups too. On the sync side: dropping the handler, narrowing it to `Exception`,
+abandoning the thread without joining, never closing the loop, removing the
+idempotence guard, stopping the loop before the core could shut down, and skipping
+the core's close.
+
+Two live-Atlas assertions in `tests/integration/test_episodic_live.py` compared
+index and vector widths against `config.embedding_dimension`. That passed only
+because the provider factory used to overwrite the field in place during
+`create()`; since the resolution became a published value it read Titan's
+inherited 1536 on a Voyage deployment. They now read
+`providers.embedding_spec.dimension`, which is what every writer and index
+actually uses.
+
 **A short or wrong-width embedding reply silently destroyed data.** `store`
 embedded a batch of messages in one provider call and paired the results with the
 inputs positionally, via `zip`. `zip` stops at the shorter sequence, so a provider

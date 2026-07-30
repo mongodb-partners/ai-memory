@@ -76,9 +76,55 @@ class AsyncMemory:
 
         Equivalent to the former FastMCP ``lifespan`` startup, lifted out and
         made callable by any consumer.
+
+        **A failed startup leaves nothing running.** Everything after the database
+        connection is wrapped, because a partially-built facade is never returned
+        to anyone and so has no owner to close it. What leaks without that is not
+        obvious from the failure: `DatabaseManager` is a reference-counted
+        singleton, so an abandoned `create()` leaves the pool's refcount one too
+        high and the *next* `close()` — a legitimate one, from a facade that
+        started fine — decrements to a non-zero count and never closes the client.
+        Worse, in a process that retries startup, the raised `ValueError` for a
+        mismatched target now compares against a pool nobody holds. Worker tasks
+        started at step 6 keep polling Atlas through a connection the caller
+        believes failed to open.
+        """
+        from agent_memory.core.database import DatabaseManager
+
+        self = cls.__new__(cls)
+        self.config = config
+        self._workers = []
+        # Users with a wipe in flight. Read by `_check_access` to refuse writes
+        # for the duration; see `wipe_user_data`. A class attribute backs this so
+        # a facade built by a test without going through `create()` still has the
+        # barrier rather than an AttributeError — see `_erasing` on the class.
+        self._erasing = set()
+
+        # 1. Database. Taken first because everything below needs it, and held
+        # under the try/except that follows: from here on a failure owns a
+        # reference-counted claim on the shared pool, and possibly running worker
+        # tasks, that nothing else will release. See `_abandon_startup`.
+        db_manager = await DatabaseManager.initialize(config)
+        self._db_manager = db_manager
+        try:
+            return await self._build(config, db_manager)
+        except BaseException:
+            # `BaseException`, not `Exception`: a `CancelledError` — the caller's
+            # timeout expiring, or the task group around it being torn down — is
+            # exactly the case where nobody is left to clean up, and it is the one
+            # `Exception` would miss.
+            await self._abandon_startup()
+            raise
+
+    async def _build(self, config: MemoryConfig, db_manager) -> AsyncMemory:
+        """Steps 2–7 of ``create()``, with the database already acquired.
+
+        Split out so ``create()`` can wrap every step that runs *after* the pool
+        is claimed in one handler. Inlining the same try/except would have worked
+        and read far worse: the interesting part of startup would sit one indent
+        deeper than the reason for it.
         """
         from agent_memory.core.collections import EPISODES, EPISODES_COUNTERS
-        from agent_memory.core.database import DatabaseManager
         from agent_memory.core.migrations import ensure_indexes
         from agent_memory.providers.manager import ProviderManager
         from agent_memory.services.admin import AdminService
@@ -91,18 +137,7 @@ class AsyncMemory:
         from agent_memory.services.prompt_library import PromptLibrary
         from agent_memory.services.rate_limiter import RateLimiter
 
-        self = cls.__new__(cls)
-        self.config = config
-        self._workers = []
-        # Users with a wipe in flight. Read by `_check_access` to refuse writes
-        # for the duration; see `wipe_user_data`. A class attribute backs this so
-        # a facade built by a test without going through `create()` still has the
-        # barrier rather than an AttributeError — see `_erasing` on the class.
-        self._erasing = set()
-
-        # 1. Database + 2. Stage-1 indexes (blocking)
-        db_manager = await DatabaseManager.initialize(config)
-        self._db_manager = db_manager
+        # 2. Stage-1 indexes (blocking)
         db = db_manager.db
         # `config` is what carries the retention durations into the TTL indexes.
         # Called without it, `ensure_indexes` builds them from the defaults —
@@ -411,6 +446,57 @@ class AsyncMemory:
                 f"configured embedder emits {actual}. Set embedding_dimension={actual} "
                 f"and re-provision the Atlas vector index numDimensions to match."
             )
+
+    async def _abandon_startup(self) -> None:
+        """Release everything a failed ``create()`` acquired. Never raises.
+
+        Called from ``create()``'s handler on the way out, and only there. The
+        object it cleans up is half-built by definition — which step failed decides
+        which attributes exist — so every read goes through ``getattr`` and
+        ``close()``'s ordering is reused rather than reimplemented.
+
+        Never raises, because the exception that brought us here is the one the
+        caller needs. A cleanup failure that replaced it would report a symptom of
+        the shutdown instead of the reason for it; anything that goes wrong in here
+        is logged and the original propagates.
+
+        Cancels before closing the pool, unlike ``close()``, and does not drain:
+        a worker still polling while its client shuts down logs a connection error
+        that reads like the startup fault but is not, and there is nothing worth
+        draining — no caller ever held this facade, so no queued turn came from one.
+        """
+        for task in getattr(self, "_workers", []):
+            task.cancel()
+        self._workers = []
+        search_task = getattr(self, "_search_index_task", None)
+        if search_task is not None and not search_task.done():
+            search_task.cancel()
+
+        episodic = getattr(self, "episodic_service", None)
+        if episodic is not None:
+            # The consumer task is already cancelled above, so this only flips the
+            # worker's `_closed` flag and refuses further writes — it is not a
+            # drain. Called anyway so a facade that somehow escapes into a
+            # `log_activity` cannot enqueue into a queue with no consumer.
+            try:
+                episodic.worker.stop()
+            except Exception:
+                logger.debug("Episodic stop failed while abandoning startup.",
+                             exc_info=True)
+
+        db_manager = getattr(self, "_db_manager", None)
+        if db_manager is not None:
+            try:
+                await db_manager.close()
+            except Exception:
+                logger.warning(
+                    "Could not release the database pool after a failed startup. "
+                    "The pool's reference count is now too high, so a later "
+                    "close() will not actually close the client.",
+                    exc_info=True,
+                )
+            self._db_manager = None
+        logger.debug("Released partially-initialized state after a failed startup.")
 
     async def close(self) -> None:
         """Drain episodic, cancel workers, flush audit, close the connection.

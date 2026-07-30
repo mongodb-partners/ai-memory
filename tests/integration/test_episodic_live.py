@@ -99,9 +99,13 @@ class TestIndexes:
     async def test_episodes_dimension_matches_memories(self, memory):
         """A per-collection dimension drift is silent until recall returns nothing.
 
-        ProviderManager mutates config in place during create() — with Voyage,
-        embedding_dimension auto-aligns to the model. Both vector indexes have to
-        pick up the same value.
+        Compared against the *resolved* dimension, which is what every writer and
+        every index actually uses. ``config.embedding_dimension`` is the wrong
+        yardstick on a Voyage deployment: it holds Titan's inherited 1536 while the
+        embedder emits 1024. This used to read the config field and pass only
+        because ``_create_embedding_provider`` overwrote it in place during
+        ``create()`` — the resolution is a published value now, so the assertion
+        has to ask for it rather than rely on a side effect.
         """
         db = memory.episodic_service.episodes.database
 
@@ -116,7 +120,7 @@ class TestIndexes:
 
         episodes = await _dims("episodes", "episodes_vector_index")
         memories = await _dims("memories", "memories_vector_index")
-        assert episodes == memories == memory.config.embedding_dimension
+        assert episodes == memories == memory.providers.embedding_spec.dimension
 
     async def test_vector_index_declares_every_prefilter_field(self, memory):
         """An undeclared filter field makes the branch return nothing, silently.
@@ -192,7 +196,9 @@ class TestWritePath:
         raw = await memory.episodic_service.episodes.find_one(
             {"user_id": user, "thread_id": thread}
         )
-        assert len(raw["embedding"]) == memory.config.embedding_dimension
+        # The resolved dimension, not the declared one — see
+        # test_episodes_dimension_matches_memories.
+        assert len(raw["embedding"]) == memory.providers.embedding_spec.dimension
         assert raw["search_text"]
 
     async def test_steps_are_monotonic_within_a_thread(self, memory):

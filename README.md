@@ -174,6 +174,20 @@ and the connection is still open, bounded by
 `episodic_shutdown_timeout_seconds`. Cancelling workers first would silently
 discard turns that never reached Atlas.
 
+`close()` is idempotent on both facades, so calling it explicitly inside a `with`
+block is safe.
+
+A **failed** `create()` releases everything it acquired before raising — the
+connection pool, the worker tasks, the episodic queue — so you do not need (and
+cannot write) a cleanup path for it: `create()` did not return, so there is no
+object to close. This matters because the pool is shared per process and
+reference-counted: a leaked claim would not fail loudly, it would make a *later*
+`close()` from a healthy facade stop closing the client, and make a retry against
+a corrected config raise "already connected to a different MongoDB target". Both
+symptoms point away from the startup that actually failed. Retrying `create()`
+after a failure is therefore safe, including from the synchronous `Memory`
+wrapper, whose background loop thread is torn down on the same path.
+
 ## Running it as a server
 
 Both shells wrap the same facade and enforce the same access-control path. Pick a

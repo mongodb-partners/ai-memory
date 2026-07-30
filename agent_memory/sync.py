@@ -36,19 +36,68 @@ class Memory:
     """Blocking facade. Construct with ``Memory(config)``."""
 
     def __init__(self, config: MemoryConfig):
+        """Start the background loop, then build the async core on it.
+
+        A failed ``create()`` used to leave the loop and its thread running. The
+        thread is a daemon, so the process still exits — but nothing else about it
+        is harmless: ``__init__`` raised, so there is no object to call ``close()``
+        on, and a caller that retries construction (a script looping over configs,
+        a test parametrized across them) accumulates one live event loop and one
+        thread per attempt for the life of the process. The loop keeps whatever the
+        failed startup scheduled on it, and Python reports "Task was destroyed but
+        it is pending" from a thread the caller has no handle on.
+
+        So the loop is torn down here on the way out. The async core's own cleanup
+        is its problem — ``AsyncMemory.create`` releases the pool it acquired — and
+        must happen *before* the loop stops, which it does, since ``_submit``
+        returns only once the coroutine has finished unwinding.
+        """
         self._start_loop()
         from agent_memory.memory import AsyncMemory
 
-        self._async = self._submit(AsyncMemory.create(config))
+        try:
+            self._async = self._submit(AsyncMemory.create(config))
+        except BaseException:
+            self._stop_loop()
+            raise
 
     # ── Background loop plumbing ──────────────────────────────────────────────
 
     def _start_loop(self) -> None:
+        self._closed = False
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._loop.run_forever, name="agent-memory-loop", daemon=True
         )
         self._thread.start()
+
+    def _stop_loop(self) -> None:
+        """Stop the loop and join its thread. Idempotent, and never raises.
+
+        Shared by ``close()`` and the failed-construction path. Never raises
+        because both callers have something more important to report: ``close()``
+        must finish releasing the rest, and ``__init__`` must propagate the startup
+        error rather than a symptom of tidying up after it.
+        """
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            return
+        try:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:  # pragma: no cover - already stopping
+            pass
+        thread = getattr(self, "_thread", None)
+        if thread is not None and thread.is_alive():
+            # Bounded: a wedged loop must not hang the caller's teardown. A join
+            # that times out leaves a daemon thread, which the interpreter will not
+            # wait for at exit.
+            thread.join(timeout=5)
+        try:
+            if not loop.is_closed():
+                loop.close()
+        except RuntimeError:  # pragma: no cover - loop still running after timeout
+            pass
 
     def _submit(self, coro):
         """Schedule a coroutine on the background loop and block for its result.
@@ -131,14 +180,29 @@ class Memory:
     # ── Teardown ──────────────────────────────────────────────────────────────
 
     def close(self) -> None:
-        """Close the async core, stop the background loop, join its thread."""
+        """Close the async core, stop the background loop, join its thread.
+
+        Idempotent, and the flag is what makes it so. ``_stop_loop`` tolerating an
+        already-stopped loop is not enough on its own: a second ``close()`` would
+        reach ``_submit`` first and hand a fresh coroutine to a loop that is gone,
+        which raises ``RuntimeError: Event loop is closed`` and leaves the
+        coroutine unawaited. That is a real path — ``close()`` inside a ``with``
+        block, followed by ``__exit__`` calling it again — where the caller did
+        nothing wrong and there is nothing left to do.
+
+        The core is closed *before* the loop stops, because the core's teardown is
+        a coroutine that runs on this loop. Stopping the loop first would leave
+        ``AsyncMemory.close()`` unable to run at all, leaking from the tidy path
+        the pool that the failure path is careful to release.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         try:
             if getattr(self, "_async", None) is not None:
                 self._submit(self._async.close())
         finally:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=5)
-            self._loop.close()
+            self._stop_loop()
 
     def __enter__(self) -> Memory:
         return self
