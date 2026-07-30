@@ -97,6 +97,31 @@ class MCPConfig(BaseSettings):
     # next hour" but does not survive a restart — the next startup reconciles
     # back to the value here. Set this field to make a change permanent.
     episodic_retention_days: int = 30
+    # The shortest human message that becomes a long-term memory candidate.
+    #
+    # This is the cheapest filter in the system and the most consequential: a
+    # message shorter than this is never enriched, never promoted, and never
+    # recalled, so the value decides what the agent is *able* to remember. It was
+    # a literal `> 30` inside `store_stm`, where it could be neither read by an
+    # operator nor tuned without a fork — the one number in the pipeline whose
+    # correct setting most obviously depends on the deployment.
+    #
+    # 30 is a length, not a measure of meaning, and that trade-off is the reason
+    # this is configurable rather than clever. It is chosen to drop the
+    # acknowledgements that dominate a real transcript ("ok", "thanks", "yes do
+    # that") while keeping a short statement of fact — "I'm allergic to
+    # penicillin" is 26 characters and is exactly the kind of thing this gets
+    # wrong. Lower it for a deployment whose users write telegraphically, raise it
+    # for one where every turn is a paragraph and enrichment cost matters.
+    #
+    # `0` keeps every human message, which is the honest way to say "let
+    # importance scoring decide" — and it means one LLM enrichment per turn.
+    #
+    # Comparison is `>=`, so the value reads as "the shortest length that
+    # qualifies". The old literal was `> 30`, so the default is 31 to preserve
+    # existing behaviour exactly; anything already stored was judged by the same
+    # boundary.
+    ltm_candidate_min_chars: int = 31
 
     # Memory Evolution Thresholds
     reinforce_threshold: float = 0.85

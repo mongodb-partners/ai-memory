@@ -67,7 +67,9 @@ class TestMemoryServiceStoreStm:
         stm_id = ObjectId()
         col.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=[stm_id]))
 
-        messages = [{"content": "A" * 50, "message_type": "human"}]  # >30 chars
+        # Comfortably over `ltm_candidate_min_chars`; the boundary itself is
+        # pinned in test_ltm_candidate_threshold.py.
+        messages = [{"content": "A" * 50, "message_type": "human"}]
         result = await service.store_stm("user1", "conv1", messages)
 
         # Two insert_many calls: one for STM, one for LTM
@@ -86,7 +88,7 @@ class TestMemoryServiceStoreStm:
         stm_id = ObjectId()
         col.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=[stm_id]))
 
-        messages = [{"content": "Hi", "message_type": "human"}]  # <=30 chars
+        messages = [{"content": "Hi", "message_type": "human"}]  # under the threshold
         await service.store_stm("user1", "conv1", messages)
 
         # Only one insert_many call (STM only)

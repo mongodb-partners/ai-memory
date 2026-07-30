@@ -98,7 +98,11 @@ from sklearn.model_selection import train_test_split
 # The script may import the library. The reverse must never happen.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent_memory.services.importance import (  # noqa: E402
+# The *class*, not an instance. Every other use of `MCPConfig` in this script is
+# a function-local import because constructing one reads the environment and a
+# live `.env`; reading a field's declared default touches neither.
+from agent_memory.core.config import MCPConfig
+from agent_memory.services.importance import (
     LEXICAL_FEATURE_NAMES,
     MAX_IMPORTANCE,
     MIN_IMPORTANCE,
@@ -131,11 +135,16 @@ DEFAULT_CACHE_DIR = Path(
 ) / "agent-memory" / "importance"
 
 # Below this, text is too short to carry a feature signal and mostly adds noise
-# ("ok", "thanks"). Matches the `len(content) > 30` gate in
-# `MemoryService.add_memories`, which decides what becomes an LTM candidate at
-# all — training on text the runtime never scores would be training on the wrong
-# distribution.
-MIN_CONTENT_CHARS = 31
+# ("ok", "thanks"). Read from `ltm_candidate_min_chars` — the same threshold
+# `MemoryService.store_stm` uses to decide what becomes an LTM candidate at all,
+# because training on text the runtime never scores would be training on the
+# wrong distribution.
+#
+# Imported rather than copied: this was a literal 31 with a comment pointing at
+# the runtime's literal 30, which is two numbers that had already drifted by one
+# and would drift further the moment either moved. A deployment that tunes the
+# threshold and then retrains gets a matching training set for free.
+MIN_CONTENT_CHARS = MCPConfig.model_fields["ltm_candidate_min_chars"].default
 
 # Logit-space fitting needs labels strictly inside (0, 1): logit(1.0) is
 # infinite. 0.02 keeps the transformed target inside ±3.9, which is well within

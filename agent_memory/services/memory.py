@@ -140,6 +140,11 @@ class MemoryService:
     ) -> list[str]:
         """Store STM messages.  For significant human messages, also queue LTM creation.
 
+        "Significant" means a human message of at least
+        ``config.ltm_candidate_min_chars`` characters. Every message is stored as
+        STM regardless; the threshold decides only what is *additionally* queued
+        for enrichment and long-term recall.
+
         Raises ``EmbeddingError`` — before writing anything — if the provider's reply
         does not describe the input. Nothing below this point can survive a short
         reply honestly: the ``zip`` would drop the tail and still report success, and
@@ -190,10 +195,13 @@ class MemoryService:
         result = await self.memories.insert_many(docs)
         stm_ids = result.inserted_ids
 
-        # Create LTM candidates for significant human messages
+        # Create LTM candidates for significant human messages. "Significant" is
+        # a length threshold — see `ltm_candidate_min_chars`, which documents both
+        # the trade-off and how to change it.
         ltm_docs = []
+        min_chars = self.config.ltm_candidate_min_chars
         for i, msg in enumerate(messages):
-            if msg["message_type"] == "human" and len(msg["content"]) > 30:
+            if msg["message_type"] == "human" and len(msg["content"]) >= min_chars:
                 ltm_now = datetime.now(UTC)
                 ltm_doc = {
                     "user_id": user_id,

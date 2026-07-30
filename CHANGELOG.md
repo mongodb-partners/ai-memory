@@ -114,6 +114,38 @@ independently, so a badly trained artifact cannot emit the value that means
 - The importance prompt lookup moved from the worker into `LLMScorer` — the local
   scorer has no prompt, so the worker could not keep the branch.
 
+### Changed
+
+**`ltm_candidate_min_chars` — what becomes a long-term memory is now a setting.**
+`store_stm` stores every message as STM and additionally queues a long-term
+candidate for human messages it judges significant. That judgement was a bare
+`len(msg["content"]) > 30` in the middle of the method.
+
+It is the cheapest filter in the system and the most consequential. A message
+below the threshold is never enriched, never promoted, and never recalled — so the
+number decides what the agent is *able* to remember, and it decided it somewhere
+an operator could neither read it nor change it without forking. It is also a
+length rather than a measure of meaning, which is exactly why it belongs in
+configuration: the default drops the acknowledgements that dominate a real
+transcript, and it also drops *"I'm allergic to penicillin"* (26 characters).
+
+The default is **31**, not 30. The comparison is now `>=`, so the value reads as
+"the shortest length that qualifies", and 31 preserves the old `> 30` boundary
+exactly — everything already stored was judged by that boundary, and a silent
+one-character shift would change which messages a running deployment remembers
+after an upgrade. `0` keeps every human message, which is the honest way to say
+"let importance scoring decide", at one LLM enrichment per turn.
+
+Assistant messages are still never candidates at any threshold. `README.md` gains
+a "What becomes long-term" section on tuning it.
+
+`scripts/train_importance.py` now *reads* this default instead of carrying its own
+`MIN_CONTENT_CHARS = 31` beside a comment pointing at the runtime's `30` — two
+numbers already off by one, and free to drift further. A deployment that tunes the
+threshold and retrains now gets a matching training distribution.
+
+17 tests; 14 mutations, 14 caught.
+
 ### Fixed
 
 **A concurrent audit flush could let an erased user's record survive the wipe.**

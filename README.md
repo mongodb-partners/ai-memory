@@ -295,6 +295,7 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `embedding_dimension` | `1536` | Auto-aligned to the model for Voyage while left at the default; a mismatch raises at startup |
 | `allow_embedding_dimension_change` | `False` | Startup refuses when the dimension changed and existing vectors would be orphaned — see below |
 | `stm_ttl_hours` | `24` | Short-term retention |
+| `ltm_candidate_min_chars` | `31` | Shortest human message promoted to a long-term candidate. Below it, a message is stored as STM but never enriched or recalled — see [What becomes long-term](#what-becomes-long-term) |
 | `soft_delete_purge_days` | `30` | How long a soft-deleted memory survives before purge |
 | `episodic_retention_days` | `30` | Turn-log retention — see [Retention](#retention) |
 | `cache_ttl_seconds` | `3600` | Semantic-cache entry lifetime |
@@ -341,6 +342,32 @@ Long-term retention works differently: it is per-tier, applied as a per-document
 `ltm_retention_critical_days` / `_reference_days` / `_standard_days` /
 `_temporary_days`. Changing those affects memories written afterwards — the
 `expires_at` already stamped on existing documents is not rewritten.
+
+### What becomes long-term
+
+`add()` stores every message as STM. It *additionally* queues a long-term
+candidate for each **human** message of at least `ltm_candidate_min_chars`
+characters (default `31`). Only candidates are enriched, promoted, and returned by
+`recall`, so this one number decides what the agent is able to remember later.
+
+It is a length, not a measure of meaning, and that is why it is a setting rather
+than a cleverer inline rule. The default drops the acknowledgements that dominate
+a real transcript — "ok", "thanks", "yes do that" — and it also drops *"I'm
+allergic to penicillin"*, which is 26 characters. Adjust it to your traffic:
+
+- **Lower it** where users write telegraphically, or where short facts matter more
+  than enrichment cost.
+- **Raise it** where every turn is a paragraph and you would rather not pay an
+  enrichment per turn.
+- **`0`** keeps every human message, which is the honest way to say "let
+  importance scoring decide" — and means one LLM enrichment per turn.
+
+Assistant messages are never candidates at any threshold. Promoting the agent's
+own output would let its summaries become the facts it later recalls.
+
+If you retrain the local importance model, `scripts/train_importance.py` reads
+this same value to filter its corpus, so a tuned threshold and its model stay in
+step.
 
 ### Changing the embedding model later
 
