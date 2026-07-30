@@ -3,7 +3,6 @@
 **Date:** 2026-06-26
 **Status:** Approved design, pre-implementation
 **Repo:** `mongodb-partners/ai-memory` → to be renamed `mongodb-partners/agent-memory`
-**Working path:** `/Users/mdf/git/partners/agent-memory`
 **Branch:** `revamp/agent-memory-v4`
 **Target version:** `4.0.0` (major; supersedes memory-mcp 3.x)
 
@@ -441,9 +440,8 @@ New fields beyond memory-mcp's config: `openai_api_key`, `openai_base_url`,
 
 ## 9. Repo, version & branch strategy
 
-- Work on branch `revamp/agent-memory-v4` in
-  `/Users/mdf/git/partners/agent-memory` (cloned from
-  `mongodb-partners/ai-memory`).
+- Work on branch `revamp/agent-memory-v4`, in a clone of
+  `mongodb-partners/ai-memory`.
 - **Full rewrite:** memory-mcp source restructured into `agent_memory/` +
   `shells/`. Old ai-memory FastAPI / `memory_nodes` code replaced entirely.
 - **Version `4.0.0`** (supersedes memory-mcp 3.x).

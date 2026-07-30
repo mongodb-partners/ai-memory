@@ -106,6 +106,18 @@ as an error. Before switching a production deployment, read
 independently, so a badly trained artifact cannot emit the value that means
 "delete this".
 
+**`.env.example` documents the settings this release added.** Nine of them were
+reachable from the environment and described nowhere an operator would look:
+`IMPORTANCE_SCORER`, `IMPORTANCE_MODEL_PATH`, `PROMOTION_IMPORTANCE_THRESHOLD`,
+`LTM_CANDIDATE_MIN_CHARS`, and the five `AUDIT_*` buffer and fallback knobs. A
+setting nobody can find is a setting nobody can use, and two of these — what
+becomes a long-term memory, and where audit records go when MongoDB refuses
+them — decide things an operator would want to decide themselves.
+
+The file remains a curated starting point rather than an exhaustive dump of every
+config field, and it does not claim otherwise; `MemoryConfig` is the complete
+reference, and the README table covers the frequently-used subset.
+
 ### Changed
 
 - `EnrichmentWorker.__init__` accepts an optional `scorer`. Omitted, it builds an

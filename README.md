@@ -117,7 +117,7 @@ re-ranking. `search` is the raw `$rankFusion` result with scores intact. Use
 
 ### Episodic memory
 
-```python
+```text
 await memory.log_activity(user_id, thread_id, messages, *, todos=None,
                           agent_name=None, correlation_id=None,
                           conversation_id=None, ts=None)
@@ -142,15 +142,18 @@ something is already going wrong:
   newest turn always survives — a stale turn is worth less than a fresh one.
 - If the durable step counter fails, the document is inserted with a null step
   rather than dropped. A logged turn beats a lost one.
-- The embedding is generated *before* `search_text` is assigned, so an embedding
-  failure leaves neither field — never a searchable document with no vector.
+- The embeddings are generated *before* `search_text` is assigned, so an embedding
+  failure leaves neither field — never a searchable document with no vector. One
+  provider call covers the whole batch, so a provider failure degrades every turn
+  in that batch to text-only rather than just one. `embed_failures` counts
+  documents rather than calls, so the number means the same thing either way.
 
 `correlation_id` accepts a W3C `traceparent`, so this joins to your existing
 tracing stack rather than introducing a competing id.
 
 ### Semantic cache and sticky decisions
 
-```python
+```text
 await memory.check_cache(user_id, query, *, similarity_threshold=None)
 await memory.store_cache(user_id, query, response)
 await memory.invalidate_cache(user_id, *, pattern=None, invalidate_all=False)
@@ -498,7 +501,7 @@ artifact's `training.metrics` and compare against your own thresholds first.
 Two failure modes are deliberately loud rather than quiet. An embedding whose
 dimension does not match the artifact raises instead of scoring the overlapping
 prefix; the affected memories land in `enrichment_status: "failed"`, where they can
-be counted and re-run. And a `importance_model_path` pointing at a missing file
+be counted and re-run. And an `importance_model_path` pointing at a missing file
 refuses to start rather than falling back to a bundled artifact the operator did
 not ask for.
 
