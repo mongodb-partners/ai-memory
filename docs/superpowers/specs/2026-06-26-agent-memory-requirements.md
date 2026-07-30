@@ -65,7 +65,15 @@ Closest analog: tools/memory_tools.py orchestration → absorbed by AsyncMemory.
   start in-process workers and SHALL emit a warning log that reactive work is
   disabled.
 - **REQ-E-023:** `AsyncMemory.close()` THE SYSTEM SHALL cancel running workers,
-  flush the audit buffer, and close the database connection.
+  flush the audit buffer, and close the database connection, in that order — a
+  worker cancelled mid-write returns its batch to the buffer, so the flush must
+  follow the cancellation to write it.
+- **REQ-E-023a:** `AuditService.flush()` THE SYSTEM SHALL, on return, guarantee
+  that every entry buffered when it was called has reached MongoDB or the
+  fallback file, including entries a concurrent flush had already removed from
+  the buffer. Concurrent flushes SHALL NOT each issue their own write.
+  WHERE a flush is cancelled THE SYSTEM SHALL return its batch to the buffer
+  rather than discard it or write it to the fallback file.
 - **REQ-E-024:** THE SYSTEM SHALL support `async with AsyncMemory.create(cfg) as m:`
   (async context manager calling `close()` on exit).
 - **REQ-E-025:** Every public facade method THE SYSTEM SHALL route through one

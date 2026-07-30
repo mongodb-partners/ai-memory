@@ -116,6 +116,45 @@ independently, so a badly trained artifact cannot emit the value that means
 
 ### Fixed
 
+**A concurrent audit flush could let an erased user's record survive the wipe.**
+`AuditService.flush` had no mutual exclusion, and five callers can reach it at
+once: every audited operation (via `log`, once the buffer fills or the interval
+elapses), `AuditFlushWorker` on its timer, `wipe_user_data` before the delete,
+`close()`, and any explicit caller.
+
+The buffer *swap* was already safe — no `await` sits between the copy and the
+reset, so no entry was ever written twice or lost to an interleaving. The damage
+was in what "flush returned" meant. A second flush swapped the buffer, found it
+empty, and returned **while the first flush's `insert_many` was still in
+flight**. `wipe_user_data` flushes before deleting for exactly one reason: so no
+buffered row naming the user survives the wipe. An early return let that row land
+*after* the delete — the erasure undone through a different door than the
+episodic queue, and invisible afterwards, because the surviving row looks like
+ordinary activity.
+
+`flush()` now holds a lock across the write, so it returns only once the entries
+that existed when it was called have reached MongoDB or the fallback file. There
+is deliberately no empty-buffer shortcut before the lock: "nothing buffered" is
+not "nothing outstanding", and an uncontended `asyncio.Lock` costs no suspension,
+so the idle case is already free.
+
+Two consequences fall out of the same change:
+
+- **N concurrent flushes no longer produce N writes.** Each used to start its own
+  `insert_many` carrying a fraction of the batch, so under load — where the flush
+  interval has always elapsed — the buffer was costing one round trip per audited
+  request, which is the cost it exists to avoid.
+- **A cancelled flush no longer discards its batch.** `close()` cancels the worker
+  tasks; a cancellation mid-`insert_many` left the entries in neither the buffer,
+  MongoDB, nor the fallback file. They are now returned to the front of the buffer
+  — prepended, since they predate anything logged while the insert was in flight —
+  and written by the flush `close()` performs next. Not written to the fallback
+  file, because a cancelled write's fate is unknown and a record that exists twice
+  is a quieter lie than one that is missing. An ordinary write failure still goes
+  to the file.
+
+15 tests; 14 mutations, 14 caught.
+
 **The audit fallback file could not be located and grew without bound.**
 When a flush to MongoDB fails, `AuditService` appends the batch to a local JSONL
 file — the only copy of those records. That file was a bare relative

@@ -1,5 +1,6 @@
 """Buffered audit log service."""
 
+import asyncio
 import json
 import logging
 import time
@@ -41,6 +42,22 @@ class AuditService:
         self.config = config
         self._buffer: list[dict] = []
         self._last_flush = time.time()
+        # Serialises flushes. Five callers can reach `flush()` concurrently — every
+        # audited operation via `log()`, `AuditFlushWorker` on its interval,
+        # `wipe_user_data` before the delete, `close()`, and a caller's own
+        # `flush()` — and without this each one starts its own `insert_many`.
+        #
+        # The buffer swap in `flush()` is already atomic (no `await` between the
+        # copy and the reset), so this is not about losing entries. It is about
+        # what "flush returned" is allowed to mean. `wipe_user_data` flushes
+        # *before* deleting precisely so no buffered row naming the user survives
+        # the wipe; if that call can return while another flush's `insert_many` is
+        # still in flight, the row lands after the delete and the erasure is undone
+        # — the same defect as the episodic queue, through a different door. The
+        # lock makes `flush()` mean "everything buffered when I was called has
+        # reached MongoDB, or the fallback file", which is the postcondition that
+        # path depends on.
+        self._flush_lock = asyncio.Lock()
         # Resolved once, here, rather than on every write. The path was built as a
         # bare relative `Path("audit_fallback.jsonl")` inside `_write_to_file`, so
         # it meant "the process's current directory *at the moment of an outage*" —
@@ -87,16 +104,53 @@ class AuditService:
             await self.flush()
 
     async def flush(self) -> None:
-        if not self._buffer:
-            return
-        batch = self._buffer[:]
-        self._buffer = []
-        try:
-            await self.audit_log.insert_many(batch)
-        except Exception:
-            logger.exception("Failed to flush audit entries to MongoDB")
-            self._write_to_file(batch)
-        self._last_flush = time.time()
+        """Write everything buffered at call time to MongoDB, or to the fallback file.
+
+        Serialised on ``_flush_lock``, so this returns only once the entries that
+        existed when it was called have actually landed somewhere — including any
+        that a *concurrent* flush had already taken out of the buffer. Callers rely
+        on that: ``wipe_user_data`` flushes before deleting so that no buffered row
+        naming the user outlives the wipe, and ``close()`` flushes so the last
+        records are not lost with the process.
+
+        Never raises. A failure here must not fail the operation being audited,
+        which has usually already succeeded by the time this runs.
+        """
+        # There is deliberately no "buffer is empty, return early" check before
+        # the lock. "Nothing buffered" is not "nothing outstanding": a concurrent
+        # flush may be holding this batch in an in-flight `insert_many`, and
+        # returning here is precisely the early return that breaks the
+        # postcondition `wipe_user_data` depends on. Acquiring an uncontended
+        # `asyncio.Lock` costs no suspension, so the idle case — the interval
+        # worker on a quiet process — is already free.
+        async with self._flush_lock:
+            # Checked under the lock, which is the only place the answer is
+            # stable. It covers both the genuinely-empty case and the flush that
+            # was queued behind another and woke to find its entries already
+            # taken; inserting an empty batch would mean N concurrent callers
+            # produce N round trips for one batch's worth of records.
+            if not self._buffer:
+                return
+            batch = self._buffer[:]
+            self._buffer = []
+            try:
+                await self.audit_log.insert_many(batch)
+            except asyncio.CancelledError:
+                # Cancellation is not a write failure and the batch's fate is
+                # unknown, so it goes back in the buffer for the next flush rather
+                # than to the fallback file: `close()` cancels the worker tasks, and
+                # a batch written to disk *and* to MongoDB is a duplicated audit
+                # record, which is a quieter lie than a missing one.
+                #
+                # Prepended, because these entries are older than anything logged
+                # while the insert was in flight, and the file is read as a
+                # chronology.
+                self._buffer[:0] = batch
+                raise
+            except Exception:
+                logger.exception("Failed to flush audit entries to MongoDB")
+                self._write_to_file(batch)
+            self._last_flush = time.time()
 
     def _write_to_file(self, entries: list[dict]) -> None:
         """Append entries to the fallback file, rotating it if it has grown too big.

@@ -549,6 +549,11 @@ class AsyncMemory:
         if search_task is not None and not search_task.done():
             search_task.cancel()
         if getattr(self, "audit_service", None) is not None:
+            # After the cancellations above, deliberately. `AuditFlushWorker` may
+            # have been mid-`insert_many` when it was cancelled; `flush()` returns
+            # that batch to the buffer rather than dropping it, so this call is
+            # what actually writes it. Flushing first and cancelling second would
+            # leave that window unclosed.
             await self.audit_service.flush()
         if getattr(self, "_db_manager", None) is not None:
             await self._db_manager.close()

@@ -133,6 +133,21 @@ Cancelling workers first would leave queued turns with no consumer and a closing
 connection — silently discarding writes the caller believes succeeded. The
 ordering is a correctness requirement, not a tidiness preference.
 
+The audit flush comes *after* the cancellations for the mirror-image reason.
+`AuditFlushWorker` may be mid-`insert_many` when it is cancelled; `flush()` puts
+that batch back in the buffer instead of dropping it, so the flush that follows
+is what actually writes it. Flushing before cancelling would leave that window
+open.
+
+`AuditService.flush()` is serialised on a lock, and what it buys is a
+postcondition rather than throughput: when it returns, everything buffered at
+call time has reached MongoDB or the fallback file — *including* entries a
+concurrent flush had already taken out of the buffer. `wipe_user_data` depends on
+that. It flushes before deleting so no buffered row naming the user outlives the
+wipe; a flush that returned while another's write was still in flight would let
+that row land after the delete, undoing the erasure the same way an undrained
+episodic queue would.
+
 ## Why `episodes` is a separate collection
 
 The `memories` tier has deduplication, importance scoring, reinforcement, merging,
