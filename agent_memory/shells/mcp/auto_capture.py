@@ -74,7 +74,17 @@ class AutoCaptureMiddleware:
             logger.warning("Auto-capture failed for %s", tool_name, exc_info=True)
 
 
-def wrap_tools(mcp, auto_capture: "AutoCaptureMiddleware") -> None:
+# Strong references to in-flight capture tasks.
+#
+# `asyncio.create_task` returns the *only* strong reference to its task; the event
+# loop holds a weak one. A task whose handle is discarded can therefore be garbage
+# collected mid-await and simply stop — the capture write half-done, nothing
+# raised, nothing logged. Holding the handle until the task completes is what makes
+# fire-and-forget actually fire.
+_pending: set[asyncio.Task] = set()
+
+
+def wrap_tools(mcp, auto_capture: AutoCaptureMiddleware) -> None:
     """Wrap registered MCP tools so each fires auto-capture after execution."""
     for key, component in list(mcp.local_provider._components.items()):
         if not key.startswith("tool:"):
@@ -85,7 +95,11 @@ def wrap_tools(mcp, auto_capture: "AutoCaptureMiddleware") -> None:
         @functools.wraps(original_fn)
         async def wrapped(*args, _original=original_fn, _name=tool_name, **kwargs):
             result = await _original(*args, **kwargs)
-            asyncio.create_task(auto_capture.capture(_name, kwargs, {"result": str(result)}))
+            task = asyncio.create_task(
+                auto_capture.capture(_name, kwargs, {"result": str(result)})
+            )
+            _pending.add(task)
+            task.add_done_callback(_pending.discard)
             return result
 
         component.fn = wrapped

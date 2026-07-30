@@ -4,7 +4,7 @@ Uses a ``rate_limits`` collection with TTL index on ``timestamp``.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from agent_memory.core.config import MCPConfig
 
@@ -32,7 +32,7 @@ class RateLimiter:
 
         effective_max = max_requests if max_requests is not None else self.config.rate_limit_max_requests
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         window_start = now - timedelta(seconds=self.config.rate_limit_window_seconds)
 
         # Count operations in the window

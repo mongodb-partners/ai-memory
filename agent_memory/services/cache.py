@@ -1,6 +1,6 @@
 """Semantic cache service — check, store, invalidate (hard delete)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import EmbeddingProvider
@@ -58,7 +58,7 @@ class CacheService:
             "query": query,
             "response": response,
             "embedding": embedding,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         }
         result = await self.cache.insert_one(doc)
         return str(result.inserted_id)

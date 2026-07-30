@@ -174,7 +174,11 @@ class BedrockLLMProvider(LLMProvider):
                             asyncio.run_coroutine_threadsafe(
                                 queue.put(("text", text)), loop
                             ).result()
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the loop
+            # `BaseException`, not `Exception`, and deliberately broad: this runs on
+            # a worker thread, where an escaping exception is lost and the consumer
+            # below waits forever on a queue nothing will fill. Nothing is
+            # swallowed — the exception is handed to the loop and re-raised there.
+            except BaseException as exc:
                 asyncio.run_coroutine_threadsafe(
                     queue.put(("error", exc)), loop
                 ).result()

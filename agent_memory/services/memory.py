@@ -2,7 +2,7 @@
 
 import logging
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from bson import ObjectId
 
@@ -81,7 +81,7 @@ class MemoryService:
 
         docs = []
         for msg, emb in zip(messages, embeddings):
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             stm_doc = {
                 "user_id": user_id,
                 "tier": "stm",
@@ -114,7 +114,7 @@ class MemoryService:
         ltm_docs = []
         for i, msg in enumerate(messages):
             if msg["message_type"] == "human" and len(msg["content"]) > 30:
-                ltm_now = datetime.now(timezone.utc)
+                ltm_now = datetime.now(UTC)
                 ltm_doc = {
                     "user_id": user_id,
                     "tier": "ltm",
@@ -197,7 +197,7 @@ class MemoryService:
         results = self._deduplicate(results)
 
         # Apply calibrated 3-component ranking (Section 4.2 of design spec)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         results = self._calibrated_rank(results, now)
 
         # Trim to limit
@@ -210,7 +210,7 @@ class MemoryService:
                 {"_id": {"$in": result_ids}},
                 {
                     "$inc": {"access_count": 1},
-                    "$set": {"last_accessed": datetime.now(timezone.utc)},
+                    "$set": {"last_accessed": datetime.now(UTC)},
                 },
             )
 
@@ -239,7 +239,7 @@ class MemoryService:
         for r in results:
             created_at = r.get("created_at", now)
             if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
+                created_at = created_at.replace(tzinfo=UTC)
             age_days = max((now - created_at).total_seconds() / 86400, 0)
             recency = math.exp(-age_days / 30)
 
@@ -328,7 +328,7 @@ class MemoryService:
             count = await self.memories.count_documents(query_filter)
             return {"deleted_count": count, "dry_run": True}
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result = await self.memories.update_many(
             query_filter,
             {"$set": {"deleted_at": now, "is_deleted": True, "updated_at": now}},
@@ -422,7 +422,7 @@ class MemoryService:
                 {"_id": top["_id"]},
                 {
                     "$set": {
-                        "updated_at": datetime.now(timezone.utc),
+                        "updated_at": datetime.now(UTC),
                         "importance": min(top.get("importance", 0.5) * 1.1, 1.0),
                     },
                     "$inc": {"access_count": 1},
@@ -433,7 +433,7 @@ class MemoryService:
         if similarity > self.config.merge_threshold:
             # Create new memory immediately for searchability,
             # queue async merge via enrichment worker
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             merge_doc = {
                 "user_id": user_id,
                 "tier": "ltm",

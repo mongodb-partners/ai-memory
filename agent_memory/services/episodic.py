@@ -20,7 +20,7 @@ ordinary awaited queries.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from agent_memory.core.projection import (
@@ -124,7 +124,7 @@ class EpisodicService:
             "thread_id": thread_id,
             "conversation_id": conversation_id or thread_id,
             "agent_name": agent_name or "main",
-            "ts": ts if ts is not None else datetime.now(timezone.utc),
+            "ts": ts if ts is not None else datetime.now(UTC),
             "messages": messages_proj,
             "todos": project_todos(todos if todos is not None else []),
             "files_touched": project_files(

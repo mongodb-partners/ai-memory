@@ -161,7 +161,20 @@ class LLMProvider(ABC):
         return await self.chat(self.user_turn(text), **kwargs)
 
     @abstractmethod
-    async def assess_importance(self, content: str) -> float:
+    async def assess_importance(self, content: str, prompt: str | None = None) -> float:
+        """Score `content` 0.0-1.0, optionally with a caller-supplied template.
+
+        ``prompt`` is part of the interface because ``LLMScorer`` passes it
+        whenever a custom template is configured. Leaving it off two of the three
+        implementations made that path raise ``TypeError`` at call binding on
+        OpenAI and Anthropic — swallowed by the enrichment worker's ``except``,
+        retried to ``failed``, and invisible in tests that mock the LLM with a
+        bare ``AsyncMock``, which accepts any keyword. Declaring it here makes
+        that class of drift a signature error instead of a silent outage.
+
+        Implementations must accept it. Ignoring its value is acceptable; not
+        accepting the argument is not.
+        """
         ...
 
     @abstractmethod

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from agent_memory.config import MemoryConfig
 from agent_memory.exceptions import AccessError, NotFoundError, RateLimitError
 from agent_memory.memory import AsyncMemory
+from agent_memory.version import __version__
 
 
 def _build_auth_dependency(config: MemoryConfig | None):
@@ -89,7 +90,10 @@ def create_app(app, config: MemoryConfig | None = None) -> FastAPI:
     When ``config`` enables auth, every route except ``/health`` requires a valid
     Bearer token, verified by the existing ``auth/`` verifier (REQ-E-072).
     """
-    api = FastAPI(title="agent-memory", version="4.0.0")
+    # Read from the package rather than repeated here. This copy is published in
+    # the OpenAPI document — the one place a client reads a version to decide
+    # what the API supports — so a stale literal misinforms every consumer.
+    api = FastAPI(title="agent-memory", version=__version__)
     auth = Depends(_build_auth_dependency(config))
     protected = [auth]
 

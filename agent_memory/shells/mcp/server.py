@@ -66,7 +66,7 @@ def create_mcp(config: MemoryConfig | None = None, app: AsyncMemory | None = Non
     mcp = FastMCP("agent-memory", lifespan=make_lifespan(config, app), auth=build_auth(config))
 
     @mcp.custom_route("/health", methods=["GET"])
-    async def health_check(request):  # noqa: ANN001
+    async def health_check(request):
         from starlette.responses import JSONResponse
 
         return JSONResponse({"status": "ok"})

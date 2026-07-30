@@ -165,6 +165,9 @@ class TestInternalCallersUseIt:
                 "merge must go through `complete`, not `chat` — see REQ-E-120"
             )
         )
+        # `_process_merge` re-embeds, because it rewrites `content`. A stale vector
+        # would leave the merged memory findable only by its pre-merge text.
+        providers.embedding.generate_embedding = AsyncMock(return_value=[0.2] * 8)
 
         collection = MagicMock()
         collection.update_one = AsyncMock()

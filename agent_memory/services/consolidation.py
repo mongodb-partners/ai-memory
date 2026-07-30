@@ -6,7 +6,7 @@ Modeled after EnrichmentWorker — runs as an asyncio task within the server.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import MIN_SUMMARIZABLE_CHARS, is_usable_summary
@@ -59,7 +59,7 @@ class ConsolidationWorker:
 
     async def _compress_stm(self) -> int:
         """Summarize and archive STM older than stm_compression_age_hours."""
-        cutoff = datetime.now(timezone.utc) - timedelta(
+        cutoff = datetime.now(UTC) - timedelta(
             hours=self.config.stm_compression_age_hours
         )
         cursor = self.memories.find(
@@ -100,7 +100,7 @@ class ConsolidationWorker:
                     {
                         "$set": {
                             "summary": summary,
-                            "updated_at": datetime.now(timezone.utc),
+                            "updated_at": datetime.now(UTC),
                         }
                     },
                 )
@@ -111,7 +111,7 @@ class ConsolidationWorker:
 
     async def _forget_low_importance(self) -> int:
         """Soft-delete memories with importance below forgetting_score_threshold."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result = await self.memories.update_many(
             {
                 "deleted_at": None,
@@ -131,7 +131,7 @@ class ConsolidationWorker:
 
     async def _promote_to_ltm(self) -> int:
         """Promote STM memories meeting importance/access/age thresholds to LTM."""
-        age_cutoff = datetime.now(timezone.utc) - timedelta(
+        age_cutoff = datetime.now(UTC) - timedelta(
             minutes=self.config.promotion_age_minutes
         )
         cursor = self.memories.find(
@@ -150,7 +150,7 @@ class ConsolidationWorker:
             return 0
 
         count = 0
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for memory in candidates:
             try:
                 await self.memories.update_one(

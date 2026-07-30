@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pymongo import ReturnDocument
@@ -223,7 +223,7 @@ class EpisodicWorker:
             logger.warning("Episodic embedding failed: %s", exc)
 
     async def _insert(self, batch: list[dict[str, Any]]) -> None:
-        started = datetime.now(timezone.utc)
+        started = datetime.now(UTC)
         try:
             if len(batch) == 1:
                 await self.collection.insert_one(batch[0])
@@ -237,7 +237,7 @@ class EpisodicWorker:
             return
         self._written += len(batch)
         self._batches += 1
-        self._last_write_ts = datetime.now(timezone.utc)
+        self._last_write_ts = datetime.now(UTC)
         await self._audit(batch, "success", started)
 
     async def _audit(
@@ -255,7 +255,7 @@ class EpisodicWorker:
         if self.audit_service is None:
             return
         duration_ms = int(
-            (datetime.now(timezone.utc) - started).total_seconds() * 1000
+            (datetime.now(UTC) - started).total_seconds() * 1000
         )
         counts: dict[str, int] = {}
         for doc in batch:
@@ -282,7 +282,7 @@ class EpisodicWorker:
             return True
         try:
             await asyncio.wait_for(self._idle.wait(), timeout=timeout)
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             return False
         return True
 

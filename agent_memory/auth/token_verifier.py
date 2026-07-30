@@ -15,7 +15,6 @@ import time
 from typing import Any
 
 import jwt
-
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
 from agent_memory.auth.api_keys import APIKeyManager

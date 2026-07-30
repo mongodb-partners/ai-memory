@@ -68,13 +68,16 @@ class OpenAILLMProvider(LLMProvider):
             if text:
                 yield text
 
-    async def assess_importance(self, content: str) -> float:
-        text = (
-            "Rate the importance of the following memory on a scale of 1-10, "
-            "where 1 is trivial and 10 is critically important. "
-            "Respond with ONLY a single integer.\n\n"
-            f"Memory: {content}"
-        )
+    async def assess_importance(self, content: str, prompt: str | None = None) -> float:
+        if prompt:
+            text = prompt.format(content=content)
+        else:
+            text = (
+                "Rate the importance of the following memory on a scale of 1-10, "
+                "where 1 is trivial and 10 is critically important. "
+                "Respond with ONLY a single integer.\n\n"
+                f"Memory: {content}"
+            )
         response = await self.complete(text)
         # Handles both the 1-10 scale prompted above and a 0.0-1.0 reply, which a
         # custom prompt may ask for. See `parse_importance`.

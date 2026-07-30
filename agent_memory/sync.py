@@ -102,6 +102,16 @@ class Memory:
         """Already synchronous on the core — no loop hop needed."""
         return self._async.activity_stats()
 
+    def worker_status(self):
+        """Already synchronous on the core — no loop hop needed.
+
+        Reads task state, which is owned by the background loop's thread, but only
+        via ``Task.done()``/``cancelled()``/``exception()`` — all of which are plain
+        attribute reads under the GIL, not loop operations. Hopping the loop to
+        fetch them would make a health probe wait on the very loop it is checking.
+        """
+        return self._async.worker_status()
+
     # ── Teardown ──────────────────────────────────────────────────────────────
 
     def close(self) -> None:
@@ -114,7 +124,7 @@ class Memory:
             self._thread.join(timeout=5)
             self._loop.close()
 
-    def __enter__(self) -> "Memory":
+    def __enter__(self) -> Memory:
         return self
 
     def __exit__(self, *exc) -> None:
