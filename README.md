@@ -210,7 +210,13 @@ design; REST is the explicit-control surface.
 
 `/health` is open; every other route requires a Bearer token when
 `AUTH_ENABLED=true`. `RateLimitError` maps to 429, `AccessError` to 403,
-`NotFoundError` to 404.
+`NotFoundError` to 404, `EmbeddingError` to 502.
+
+502 is the embedding provider answering with something that does not describe the
+request — fewer vectors than inputs, or a vector of the wrong width. Nothing was
+written, and retrying is the right response: the write is refused precisely so the
+caller still holds its own data. See [Embedding replies are
+validated](#embedding-replies-are-validated).
 
 `/health` also returns the episodic writer's counters — queue depth, throughput,
 write and embed failures. A 200 with a saturated queue and rising failures is not
@@ -333,6 +339,36 @@ collection is not affected and never triggers this. To proceed, pick one:
 * Drop the affected collections, if the history is expendable.
 * `ALLOW_EMBEDDING_DIMENSION_CHANGE=true`, accepting that the old vectors become
   unsearchable.
+
+### Embedding replies are validated
+
+The dimension guard above covers a *changed* configuration. A provider can also
+answer a single request wrongly, and the two ways it does are both silent.
+
+**A short batch.** `store` embeds a batch of messages in one call and pairs the
+results with the inputs positionally. A provider that returns nine vectors for ten
+messages used to produce nine memories: `zip` stops at the shorter sequence, the
+insert succeeds, and the call returns nine ids to a caller that handed over ten.
+Nothing raised, nothing logged, and no record existed of which message was lost.
+
+**A wrong width.** Atlas accepts a 1024-wide vector into a 1536-wide index. The
+document is stored, the count goes up, `find` returns it — and `$vectorSearch`
+never does. The memory exists and is not recallable.
+
+Both are refused now, before anything is written, with `EmbeddingError` (a
+`MemoryError`, so an existing `except MemoryError` catches it; 502 over REST). The
+width compared against is the *resolved* one — Voyage's native 1024, not the
+1536 a config may still declare — so a correct Voyage deployment is unaffected.
+
+There is no repair, only a refusal. Padding a short vector, truncating a long one,
+or re-embedding the missing tail all invent data and store it as though the
+provider had produced it. Failing the call leaves the messages with the caller,
+which is the only state from which a retry is possible.
+
+The background paths degrade rather than fail, because they have no caller to
+return to: a wrong-width episodic vector logs the turn as text-only and counts an
+`embed_failures`, and a wrong-width merge re-embed leaves the merge `merge_pending`
+for the next pass rather than committing content and vector that disagree.
 
 ### Importance scoring without the LLM
 

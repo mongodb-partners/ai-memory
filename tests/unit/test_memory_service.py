@@ -8,6 +8,7 @@ from bson import ObjectId
 import pytest
 
 from agent_memory.core.config import MCPConfig
+from agent_memory.providers.manager import ResolvedEmbedding
 from agent_memory.services.memory import MemoryService
 
 
@@ -23,6 +24,13 @@ def _make_providers():
     providers.embedding.generate_embedding = AsyncMock(return_value=[0.1] * 1536)
     providers.embedding.generate_embeddings_batch = AsyncMock(
         side_effect=lambda texts: [[0.1] * 1536 for _ in texts]
+    )
+    # The real `ProviderManager` publishes this and `MemoryService` reads it to
+    # know how wide a vector should be. A bare `MagicMock` attribute would answer
+    # with another mock, which reads as "no declared width" and would leave the
+    # dimension check untested for every case below.
+    providers.embedding_spec = ResolvedEmbedding(
+        model="amazon.titan-embed-text-v2:0", dimension=1536
     )
     return providers
 

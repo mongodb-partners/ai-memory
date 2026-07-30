@@ -296,6 +296,64 @@ class TestEmbedding:
         providers.embedding.generate_embedding.assert_not_awaited()
 
 
+class TestAWrongWidthVectorIsAnEmbeddingFailure:
+    """A vector Atlas would accept and never return counts as a failure.
+
+    The width has to be checked here, because nothing downstream will object:
+    Atlas stores a 1024-wide vector in a 1536-wide index, ``find`` returns the
+    document, and ``$vectorSearch`` never does. The turn would read as logged and
+    be unfindable — the one outcome ``_attach_embedding``'s fail-closed ordering
+    exists to prevent.
+    """
+
+    @staticmethod
+    def _spec_providers(width):
+        from agent_memory.providers.manager import ResolvedEmbedding
+
+        providers = _providers([0.1] * width)
+        providers.embedding_spec = ResolvedEmbedding(model="m", dimension=4)
+        return providers
+
+    async def test_a_wrong_width_leaves_neither_field(self):
+        col = _collection()
+        worker = _worker(col, providers=self._spec_providers(3))
+        worker.enqueue({"user_id": "u1", "__search_text": "q\n\na"})
+
+        await _run_until_drained(worker)
+        doc = col.insert_one.await_args.args[0]
+        assert "embedding" not in doc
+        assert "search_text" not in doc
+        assert worker.stats()["embed_failures"] == 1
+        # Degraded to text-only, not dropped: a logged turn beats a lost one.
+        assert col.insert_one.await_count == 1
+
+    async def test_the_right_width_is_stored(self):
+        # The paired case. Without it, a check that rejected every vector would
+        # satisfy the test above while silently disabling episodic search.
+        col = _collection()
+        worker = _worker(col, providers=self._spec_providers(4))
+        worker.enqueue({"user_id": "u1", "__search_text": "q\n\na"})
+
+        await _run_until_drained(worker)
+        doc = col.insert_one.await_args.args[0]
+        assert doc["embedding"] == [0.1] * 4
+        assert doc["search_text"] == "q\n\na"
+        assert worker.stats()["embed_failures"] == 0
+
+    async def test_a_stack_without_a_spec_stores_whatever_it_gets(self):
+        # No declared width means nothing to compare against — the existing
+        # `_providers()` helper, and every provider stack that is not the real
+        # manager. Refusing here would break logging on those.
+        col = _collection()
+        worker = _worker(col, providers=_providers([0.1] * 7))
+        worker.enqueue({"user_id": "u1", "__search_text": "q\n\na"})
+
+        await _run_until_drained(worker)
+        doc = col.insert_one.await_args.args[0]
+        assert doc["embedding"] == [0.1] * 7
+        assert worker.stats()["embed_failures"] == 0
+
+
 class TestFailureCounting:
     """REQ-E-106: failures are counters, not exceptions."""
 

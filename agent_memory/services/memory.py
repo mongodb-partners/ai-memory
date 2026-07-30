@@ -8,6 +8,7 @@ from typing import Any
 from bson import ObjectId
 
 from agent_memory.core.config import MCPConfig
+from agent_memory.core.embedding_check import check_batch, expected_dimension
 from agent_memory.services.search_pipeline import rank_fusion_pipeline
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,13 @@ class MemoryService:
         self.memories = memories_collection
         self.config = config
         self.providers = providers
+        # The width every vector written from here must have. Read from the
+        # provider manager's resolved spec rather than `config.embedding_dimension`,
+        # which is the *declared* value and is wrong on a Voyage deployment that
+        # inherited Titan's 1536 default — see `ProviderManager.embedding_spec`.
+        # `None` when the provider stack does not publish one; the count check
+        # runs either way.
+        self._expected_dimension: int | None = expected_dimension(providers)
 
     def _retention_ttl(self, retention_tier: str) -> timedelta:
         """Return TTL for a given retention tier."""
@@ -130,12 +138,26 @@ class MemoryService:
         conversation_id: str,
         messages: list[dict],
     ) -> list[str]:
-        """Store STM messages.  For significant human messages, also queue LTM creation."""
+        """Store STM messages.  For significant human messages, also queue LTM creation.
+
+        Raises ``EmbeddingError`` — before writing anything — if the provider's reply
+        does not describe the input. Nothing below this point can survive a short
+        reply honestly: the ``zip`` would drop the tail and still report success, and
+        the LTM loop indexes ``embeddings[i]`` by *message* position, so it would
+        either raise ``IndexError`` into the caller's ``except`` or pair a message
+        with another message's vector. Refusing keeps the messages in the caller's
+        hands to retry; see :mod:`agent_memory.core.embedding_check`.
+        """
         if not messages:
             return []
 
         texts = [m["content"] for m in messages]
-        embeddings = await self.providers.embedding.generate_embeddings_batch(texts)
+        embeddings = check_batch(
+            await self.providers.embedding.generate_embeddings_batch(texts),
+            texts,
+            expected=self._expected_dimension,
+            operation="store",
+        )
 
         docs = []
         for msg, emb in zip(messages, embeddings):

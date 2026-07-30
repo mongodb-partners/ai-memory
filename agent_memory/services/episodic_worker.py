@@ -28,6 +28,7 @@ from typing import Any
 from pymongo import ReturnDocument
 from pymongo.errors import BulkWriteError, PyMongoError
 
+from agent_memory.core.embedding_check import check_one, expected_dimension
 from agent_memory.core.redaction import redact_error
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class EpisodicWorker:
         self.counters = counter_collection
         self.providers = providers
         self.config = config
+        self._expected_dimension: int | None = expected_dimension(providers)
         # One audit entry per flushed batch, not per turn. Routing a turn log
         # through per-call auditing costs more writes than the agent it records.
         self.audit_service = audit_service
@@ -218,13 +220,21 @@ class EpisodicWorker:
         leaves *neither* ``embedding`` nor ``search_text`` on the document. A
         document with searchable text but no vector would rank inconsistently
         between the two branches of hybrid recall.
+
+        A vector of the wrong width counts as a failure for the same reason, and
+        it has to be checked here rather than left to Atlas: Atlas accepts it,
+        stores it, and then never returns it from ``$vectorSearch``. The turn
+        would look logged and be unfindable. Degrading to text-only — which is
+        what the ``except`` below does — is the honest outcome.
         """
         search_text = doc.pop(_KEY_SEARCH_TEXT, None)
         if not search_text:
             return
         try:
-            doc["embedding"] = await self.providers.embedding.generate_embedding(
-                search_text
+            doc["embedding"] = check_one(
+                await self.providers.embedding.generate_embedding(search_text),
+                expected=self._expected_dimension,
+                operation="episodic",
             )
             doc["search_text"] = search_text
         except Exception as exc:

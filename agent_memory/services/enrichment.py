@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pymongo import ReturnDocument
 
 from agent_memory.core.config import MCPConfig
+from agent_memory.core.embedding_check import check_one, expected_dimension
 from agent_memory.providers.base import MIN_SUMMARIZABLE_CHARS, is_usable_summary
 from agent_memory.services.importance import LLMScorer
 
@@ -32,6 +33,7 @@ class EnrichmentWorker:
         self.memories = memories_collection
         self.config = config
         self.providers = providers
+        self._expected_dimension: int | None = expected_dimension(providers)
         self.memory_service = memory_service
         self.prompt_library = prompt_library
         # Default to the LLM path so every existing construction — including the
@@ -346,8 +348,16 @@ class EnrichmentWorker:
         # counts a retry, and leaves the status as `merge_pending`, so the merge is
         # attempted again rather than committed half-done. A content/embedding pair
         # that disagrees is worse than a merge that has not happened yet.
-        merged_embedding = await self.providers.embedding.generate_embedding(
-            merged_content
+        #
+        # A wrong-width vector is checked for the same reason and takes the same
+        # path. Written, it would produce the one outcome the re-embed exists to
+        # prevent: a document whose content is the merge and which `$vectorSearch`
+        # never returns at all — strictly worse than searching as its pre-merge
+        # half, and just as silent.
+        merged_embedding = check_one(
+            await self.providers.embedding.generate_embedding(merged_content),
+            expected=self._expected_dimension,
+            operation="merge",
         )
 
         now = datetime.now(UTC)

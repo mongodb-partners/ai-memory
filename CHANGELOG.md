@@ -116,6 +116,53 @@ independently, so a badly trained artifact cannot emit the value that means
 
 ### Fixed
 
+**A short or wrong-width embedding reply silently destroyed data.** `store`
+embedded a batch of messages in one provider call and paired the results with the
+inputs positionally, via `zip`. `zip` stops at the shorter sequence, so a provider
+that returned nine vectors for ten messages wrote nine memories, succeeded, and
+returned nine ids to a caller that handed over ten. No exception, no log line, and
+nothing anywhere recorded which message was dropped. The long-term-memory pass
+immediately after indexes `embeddings[i]` by *message* position, so the same short
+reply raised `IndexError` into a `try` whose comment reads "Partial failure
+acceptable" — the LTM candidates vanished into a log line too, while the call
+still reported success.
+
+The width was unchecked on every write path. Atlas accepts a 1024-wide vector into
+a 1536-wide index: the document is stored, the count goes up, `find` returns it,
+and `$vectorSearch` never does. The memory exists and is not recallable, which
+reads as the user never having said it. Neither failure is recoverable afterwards,
+because in both cases nothing records what was lost.
+
+`agent_memory/core/embedding_check.py` now validates the reply before anything is
+written, raising `EmbeddingError` (a `MemoryError`, so existing base-class handlers
+catch it; 502 over REST — an upstream fault, not a client error and not a bug
+here). The width compared against is the *resolved* dimension from
+`ProviderManager.embedding_spec`, not `config.embedding_dimension`: reading the
+declared value would refuse every correct vector on a Voyage deployment, whose
+config still carries Titan's inherited 1536 while the model emits 1024. A provider
+stack that publishes no spec declares no width, and the count check — the one that
+catches silent data loss — runs unconditionally either way.
+
+There is deliberately no repair path. Padding a short vector, truncating a long
+one, or re-embedding the missing tail each invent data and store it as though the
+provider had produced it. Refusing leaves the messages with the caller, which is
+the only state a retry can start from. The two background paths degrade instead,
+because they have no caller to return to: a wrong-width episodic vector logs the
+turn as text-only and counts an `embed_failures` (the existing fail-closed
+ordering, which leaves neither `embedding` nor `search_text`), and a wrong-width
+merge re-embed leaves the memory `merge_pending` for the next pass rather than
+committing a content/embedding pair that disagrees — and, critically, without
+soft-deleting the merge target, whose content would otherwise be lost for good.
+
+Guards mutation-tested rather than assumed: 25 mutations, all caught. Removing or
+narrowing the count check (long-only, short-only, off-by-one, `None` reply);
+removing the width loop, checking only the first vector, inverting the comparison
+to a floor, letting a `None` vector inside a full-length batch through; accepting a
+`MagicMock` attribute or a non-positive value as a declared dimension; never
+resolving one at all; reverting each of the three call sites to the raw provider
+reply, or passing `expected=None` at each; moving `EmbeddingError` out of the
+`MemoryError` hierarchy; removing the 502 handler or reporting the fault as a 403.
+
 **Every configured retention value was discarded.** `AUDIT_RETENTION_DAYS=30` set
 the config field, left `ix_audit_ttl` at its hardcoded `365 * 86400`, and reported
 success. The same held for `SOFT_DELETE_PURGE_DAYS`, `CACHE_TTL_SECONDS`, and the

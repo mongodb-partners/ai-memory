@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_memory.exceptions import AccessError, NotFoundError, RateLimitError
+from agent_memory.exceptions import (
+    AccessError,
+    EmbeddingError,
+    NotFoundError,
+    RateLimitError,
+)
 from agent_memory.shells.rest.app import create_app
 
 
@@ -96,6 +101,32 @@ class TestErrorMapping:
         facade.recall = AsyncMock(side_effect=NotFoundError("missing"))
         r = _client(facade).get("/memories/recall", params={"user_id": "u1", "query": "q"})
         assert r.status_code == 404
+
+    def test_an_embedding_refusal_maps_to_502(self):
+        # Not 500. The request was well-formed and this service is healthy — the
+        # upstream embedder answered with a reply that did not describe the input,
+        # so nothing was written and retrying is the right response. A 500 would
+        # tell the caller to stop and report a bug.
+        facade = _app()
+        facade.add = AsyncMock(side_effect=EmbeddingError("short batch"))
+        r = _client(facade).post("/memories", json={
+            "user_id": "u1", "conversation_id": "c1", "messages": [{"content": "x"}],
+        })
+        assert r.status_code == 502
+        assert "short batch" in r.json()["error"]
+
+    def test_an_embedding_refusal_is_not_swallowed_as_a_denial(self):
+        # `EmbeddingError` and `AccessError` share `MemoryError` as a base but not
+        # each other. Were the handler registered on the base — or the class made a
+        # subclass of `AccessError` for convenience — an upstream fault would read
+        # as "you are not allowed to do this", which sends the operator to the
+        # wrong system entirely.
+        facade = _app()
+        facade.add = AsyncMock(side_effect=EmbeddingError("wrong width"))
+        r = _client(facade).post("/memories", json={
+            "user_id": "u1", "conversation_id": "c1", "messages": [{"content": "x"}],
+        })
+        assert r.status_code not in (403, 429)
 
 
 class TestRemainingRoutes:

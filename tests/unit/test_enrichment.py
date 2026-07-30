@@ -357,6 +357,101 @@ class TestEnrichmentWorkerMergePending:
         assert target_delete_found, "Merge target should be soft-deleted after merge"
 
 
+class TestAMergeIsNotCommittedWithAnUnusableVector:
+    """A wrong-width re-embed retries the merge rather than writing it.
+
+    The re-embed exists so the merged document does not search as its pre-merge
+    half. A vector of the wrong width is worse than that: Atlas accepts it and
+    ``$vectorSearch`` then returns the document for nothing at all. Both halves of
+    the merge — the content write and the target's soft-delete — must be skipped,
+    which is what raising before either one achieves.
+    """
+
+    @staticmethod
+    def _merge_setup(embedding_width):
+        from agent_memory.providers.manager import ResolvedEmbedding
+
+        merge_target_id = ObjectId()
+        merge_memory = {
+            "_id": ObjectId(),
+            "user_id": "user1",
+            "content": "new content",
+            "enrichment_status": "merge_pending",
+            "enrichment_retries": 0,
+            "embedding": [0.1] * 1536,
+            "merge_target_id": merge_target_id,
+        }
+        col = MagicMock()
+        col.update_one = AsyncMock()
+        col.find_one_and_update = AsyncMock(side_effect=[merge_memory, None])
+        col.find_one = AsyncMock(return_value={
+            "_id": merge_target_id,
+            "content": "existing content",
+            "importance": 0.6,
+        })
+        providers = _make_providers()
+        providers.llm.complete = AsyncMock(return_value="merged content")
+        providers.embedding.generate_embedding = AsyncMock(
+            return_value=[0.1] * embedding_width
+        )
+        providers.embedding_spec = ResolvedEmbedding(model="m", dimension=1536)
+        return col, providers, merge_target_id
+
+    async def test_a_wrong_width_leaves_the_merge_pending(self):
+        col, providers, target_id = self._merge_setup(1024)
+
+        worker = EnrichmentWorker(
+            col, _make_config(), providers, _make_memory_service()
+        )
+        await worker.process_batch()
+
+        # `_enrich_memory` catches, counts a retry, and keeps `merge_pending` — so
+        # the only write is the retry bookkeeping. Neither the merged content nor
+        # the target's soft-delete happened.
+        for call in col.update_one.call_args_list:
+            set_arg = call[0][1].get("$set", {})
+            assert set_arg.get("enrichment_status") != "complete"
+            assert "content" not in set_arg
+            assert call[0][0].get("_id") != target_id
+        statuses = [
+            c[0][1].get("$set", {}).get("enrichment_status")
+            for c in col.update_one.call_args_list
+        ]
+        assert "merge_pending" in statuses
+
+    async def test_the_target_survives_so_the_retry_can_use_it(self):
+        # The soft-delete is the irreversible half. If it ran while the content
+        # write did not, the retry would find no target and mark the merge complete
+        # with the pre-merge content — losing the target's content for good.
+        col, providers, target_id = self._merge_setup(1024)
+        worker = EnrichmentWorker(
+            col, _make_config(), providers, _make_memory_service()
+        )
+        await worker.process_batch()
+
+        deletes = [
+            c for c in col.update_one.call_args_list
+            if c[0][1].get("$set", {}).get("is_deleted") is True
+        ]
+        assert deletes == []
+
+    async def test_the_right_width_still_commits_the_merge(self):
+        # Paired case: the guard must not turn every merge into a retry loop.
+        col, providers, target_id = self._merge_setup(1536)
+        worker = EnrichmentWorker(
+            col, _make_config(), providers, _make_memory_service()
+        )
+        await worker.process_batch()
+
+        completed = [
+            c for c in col.update_one.call_args_list
+            if c[0][1].get("$set", {}).get("enrichment_status") == "complete"
+        ]
+        assert len(completed) == 1
+        assert completed[0][0][1]["$set"]["content"] == "merged content"
+        assert completed[0][0][1]["$set"]["embedding"] == [0.1] * 1536
+
+
 class TestEnrichmentWorkerRunLoop:
     """run() loop and stop() control."""
 

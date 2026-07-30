@@ -43,3 +43,21 @@ class NotFoundError(MemoryError):
 class ConfigError(MemoryError):
     """Invalid or inconsistent configuration (e.g. embedding-dimension
     mismatch, or a selected provider whose SDK is not installed)."""
+
+
+class EmbeddingError(MemoryError):
+    """An embedding provider's reply cannot be trusted to describe its input.
+
+    Not a transport failure — those surface as the provider SDK's own exception.
+    This is the well-formed reply that does not answer what was asked: fewer
+    vectors than texts, or a vector of the wrong width.
+
+    Raised rather than worked around because every way of continuing is worse.
+    Zipping a short reply against its inputs drops the tail silently, so a caller
+    that asked to store ten messages stores seven and is told it succeeded; and a
+    vector of the wrong width is accepted by Atlas, stored, and then never
+    returned by ``$vectorSearch`` — no error, no count change, the memory simply
+    stops being recallable. Both are unrecoverable after the fact, because
+    nothing records what was lost. Failing the call keeps the caller's data in
+    the caller's hands, where it can be retried.
+    """

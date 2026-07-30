@@ -7,7 +7,13 @@ business logic. REST is the explicit-control surface — there is no auto-captur
 
 Error mapping (REQ-E-071): ``RateLimitError`` → 429 (registered as its own
 handler so it wins over its ``AccessError`` base), ``AccessError`` → 403,
-``NotFoundError`` → 404.
+``NotFoundError`` → 404, ``EmbeddingError`` → 502.
+
+502 rather than 500 for the embedder, because the distinction is the whole
+message: the request was fine and *this service* is fine — the upstream embedding
+provider returned a reply that did not describe the input, so nothing was written
+and the same request is worth sending again. A 500 tells the caller they found a
+bug and should stop.
 """
 
 from __future__ import annotations
@@ -21,7 +27,12 @@ from pydantic import BaseModel
 
 from agent_memory.auth.identity import Caller, IdentityError, resolve_caller
 from agent_memory.config import MemoryConfig
-from agent_memory.exceptions import AccessError, NotFoundError, RateLimitError
+from agent_memory.exceptions import (
+    AccessError,
+    EmbeddingError,
+    NotFoundError,
+    RateLimitError,
+)
 from agent_memory.memory import AsyncMemory
 from agent_memory.version import __version__
 
@@ -226,6 +237,15 @@ def create_app(app, config: MemoryConfig | None = None) -> FastAPI:
     @api.exception_handler(NotFoundError)
     async def _not_found(_req: Request, exc: NotFoundError):
         return JSONResponse(status_code=404, content={"error": str(exc)})
+
+    # Upstream fault, not a client error and not a bug here: the embedding
+    # provider answered with something that did not describe the request, so the
+    # write was refused before anything was stored. 502 says "retry this" — which
+    # is true, and is the only reason the caller still has its own data to retry
+    # with.
+    @api.exception_handler(EmbeddingError)
+    async def _embedding_failed(_req: Request, exc: EmbeddingError):
+        return JSONResponse(status_code=502, content={"error": str(exc)})
 
     # ── Routes ────────────────────────────────────────────────────────────
     #
