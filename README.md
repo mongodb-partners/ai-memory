@@ -260,6 +260,7 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `mongodb_database_name` | `agent_memory` | |
 | `embedding_provider` / `llm_provider` | `bedrock` | `voyage`, `openai`, `anthropic` |
 | `embedding_dimension` | `1536` | Auto-aligned to the model for Voyage while left at the default; a mismatch raises at startup |
+| `allow_embedding_dimension_change` | `False` | Startup refuses when the dimension changed and existing vectors would be orphaned — see below |
 | `stm_ttl_hours` | `24` | Short-term retention |
 | `episodic_enabled` | `True` | `False` accepts and discards, so callers need no conditionals |
 | `episodic_queue_size` | `1000` | Bounded; full → drop oldest |
@@ -270,6 +271,29 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `await_search_indexes` | `False` | Set `True` in short-lived scripts, or the process can exit before indexes are queryable |
 | `importance_scorer` | `llm` | `local` scores in-process instead of calling the LLM |
 | `importance_model_path` | — | Explicit coefficient artifact; unset auto-selects a bundled one |
+
+### Changing the embedding model later
+
+Switching embedding provider or model usually changes the vector width, and a
+vector index cannot have its `numDimensions` edited — it has to be dropped and
+rebuilt. The documents are untouched by that, which sounds safe and is the
+problem: every vector already stored keeps the old width, and the rebuilt index
+returns none of them from `$vectorSearch`.
+
+Nothing about that failure is visible. No exception, no change in document count,
+`find` still shows every memory. Recall goes empty for the whole history while
+working perfectly for anything written afterwards, so it reads as "the user has no
+memories about that". Undoing it means re-embedding every document with the
+*previous* provider — the config you just replaced.
+
+So startup refuses, naming the affected indexes and the counts at risk. An empty
+collection is not affected and never triggers this. To proceed, pick one:
+
+* Restore the previous `embedding_provider` / model.
+* Re-embed every document at the new width, then start.
+* Drop the affected collections, if the history is expendable.
+* `ALLOW_EMBEDDING_DIMENSION_CHANGE=true`, accepting that the old vectors become
+  unsearchable.
 
 ### Importance scoring without the LLM
 

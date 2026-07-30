@@ -116,6 +116,53 @@ independently, so a badly trained artifact cannot emit the value that means
 
 ### Fixed
 
+**Changing the embedding dimension silently orphaned every vector already
+stored.** A vector index cannot have its `numDimensions` edited, so index
+reconciliation dropped and recreated it. The documents beneath were untouched by
+that — which sounds like the safe outcome and is the dangerous one: every stored
+vector kept the old width, and the rebuilt index returned none of them from
+`$vectorSearch`.
+
+Nothing about that failure surfaces. No exception, no change in document count,
+`find` still returning every memory. Recall goes empty for the entire history
+while working perfectly for anything written afterwards, so it presents as "the
+user has no memories about that" — indistinguishable from the truth. Recovery
+means re-embedding every document with the *previous* provider, which is the
+config the operator has just replaced. The cost is asymmetric: leaving the stale
+index in place loses indexing of new writes, recoverable by fixing the config,
+while rebuilding loses the history and is not.
+
+So it is refused in two places, because one is not enough. `create()` runs a
+preflight (`find_stranding_dimension_changes`) before any service is built and
+raises `ConfigError` naming each affected index, both dimensions, the number of
+embedded documents at risk, and the four ways forward. `ensure_search_indexes`
+independently declines the destructive rebuild and logs at error level — it has
+to, because stage 2 runs as a background task by default whose exceptions are
+logged as non-fatal, so a guard that only raised upstream would be one the
+default path routes around.
+
+An empty collection is never affected: there are no vectors to strand, which is
+the ordinary first-run case of an index left over from a previous config. The
+count is of documents that actually carry an `embedding`, not rows, so unenriched
+memories and counter documents do not trigger a refusal. A count that cannot be
+read is treated as non-empty — "we could not check" is not "there is nothing
+there".
+
+- `ALLOW_EMBEDDING_DIMENSION_CHANGE` (`allow_embedding_dimension_change`,
+  default `false`) proceeds anyway, for an operator who has read the refusal and
+  accepts that the old vectors become unsearchable. It travels down to
+  reconciliation as well, so the two guards cannot disagree.
+
+Verified against 15 mutations, all killed: dropping unconditionally; no
+preflight; findings logged instead of raised; the preflight moved after services
+and workers start; the preflight comparing the declared rather than the resolved
+dimension; an unreadable count assumed empty (in each of the two places
+separately); empty collections refused too; the opt-in ignored by reconciliation;
+the opt-in not forwarded by the facade; counting unembedded documents; the
+refusal logged at debug; a declined rebuild pushing an incompatible update
+instead; the flag defaulting to allowing; and an unchanged dimension reported as
+a stranding.
+
 **CI's lint job could not pass.** The workflow runs `uv run ruff check
 agent_memory/`, but `ruff` was declared in neither `pyproject.toml` nor `uv.lock`.
 Locally that resolved to whatever ruff happened to be on `PATH` — a developer's

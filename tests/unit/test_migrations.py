@@ -216,7 +216,13 @@ class TestEnsureSearchIndexes:
         assert total_create_calls == 0
 
     async def test_dimension_mismatch_drops_and_recreates(self):
-        """Vector index with wrong dims is dropped and recreated."""
+        """Vector index with wrong dims is dropped and recreated.
+
+        ``count_documents=0`` is the precondition, not incidental setup: an empty
+        collection has no vectors to strand, so this is the ordinary case of an
+        index left over from a previous config. A collection with vectors in it
+        refuses instead — see ``TestADimensionChangeWillNotStrandStoredVectors``.
+        """
         from agent_memory.core.migrations import ensure_search_indexes
 
         mock_db = MagicMock()
@@ -235,6 +241,7 @@ class TestEnsureSearchIndexes:
         col.list_search_indexes = AsyncMock(side_effect=make_existing_iter)
         col.drop_search_index = AsyncMock()
         col.create_search_index = AsyncMock(return_value="idx_name")
+        col.count_documents = AsyncMock(return_value=0)
         mock_db.__getitem__ = MagicMock(return_value=col)
 
         with patch("agent_memory.core.migrations._wait_for_search_index_dropped",
@@ -319,7 +326,7 @@ class TestExistingIndexesAreReconciled:
         return [i for i in get_search_indexes(dims) if i["name"] == index_name]
 
     @staticmethod
-    def _collection(existing: dict):
+    def _collection(existing: dict, embedded_count: int = 0):
         col = MagicMock()
         col.list_search_indexes = AsyncMock(
             side_effect=lambda name: _async_iter_of([{**existing, "name": name}])
@@ -327,6 +334,11 @@ class TestExistingIndexesAreReconciled:
         col.create_search_index = AsyncMock(return_value="idx")
         col.update_search_index = AsyncMock()
         col.drop_search_index = AsyncMock()
+        # Empty by default: these tests are about *definition* reconciliation, and
+        # a dimension rebuild is only permitted when there are no vectors to
+        # strand. Stranding is its own concern —
+        # `TestADimensionChangeWillNotStrandStoredVectors`.
+        col.count_documents = AsyncMock(return_value=embedded_count)
         return col
 
     @staticmethod
@@ -335,18 +347,29 @@ class TestExistingIndexesAreReconciled:
         db.__getitem__ = MagicMock(return_value=col)
         return db
 
-    async def _reconcile(self, index_name: str, existing: dict, dims: int = 1024):
+    async def _reconcile(
+        self,
+        index_name: str,
+        existing: dict,
+        dims: int = 1024,
+        embedded_count: int = 0,
+        allow_dimension_change: bool = False,
+    ):
         from agent_memory.core.migrations import ensure_search_indexes
         shipped = self._shipped(index_name, dims)
         assert shipped, f"no shipped definition named {index_name!r}"
-        col = self._collection(existing)
+        col = self._collection(existing, embedded_count=embedded_count)
         with patch("agent_memory.core.migrations.get_search_indexes",
                    return_value=shipped), \
              patch("agent_memory.core.migrations._wait_for_search_index",
                    new_callable=AsyncMock, return_value=True), \
              patch("agent_memory.core.migrations._wait_for_search_index_dropped",
                    new_callable=AsyncMock):
-            await ensure_search_indexes(self._db(col), embedding_dimension=dims)
+            await ensure_search_indexes(
+                self._db(col),
+                embedding_dimension=dims,
+                allow_dimension_change=allow_dimension_change,
+            )
         return col, shipped[0]["definition"]
 
     async def test_an_existing_full_text_index_receives_the_new_definition(self):
@@ -475,8 +498,15 @@ class TestExistingIndexesAreReconciled:
     async def test_a_dimension_change_still_drops_and_recreates(self):
         """The one change Atlas will not apply in place.
 
-        ``numDimensions`` is not editable, and the stored vectors are the wrong
-        width regardless — there is nothing to preserve.
+        ``numDimensions`` is not editable, so an update cannot deliver it.
+
+        This test used to justify the drop with "the stored vectors are the wrong
+        width regardless — there is nothing to preserve", and that reasoning was
+        wrong in the case that matters. The vectors are not deleted by the rebuild;
+        they survive at the old width, unsearchable, and re-embedding them needs
+        the provider config that has just been replaced. So the drop is conditional
+        now, and this test states the condition it relies on: an empty collection,
+        which is the case where the old justification is actually true.
         """
         wrong_width = {
             "queryable": True,
@@ -487,7 +517,7 @@ class TestExistingIndexesAreReconciled:
             },
         }
         col, _ = await self._reconcile(
-            "memories_vector_index", wrong_width, dims=1024
+            "memories_vector_index", wrong_width, dims=1024, embedded_count=0
         )
 
         col.drop_search_index.assert_awaited_once_with("memories_vector_index")
@@ -549,6 +579,320 @@ class TestExistingIndexesAreReconciled:
         assert col.list_search_indexes.await_count == len(shipped)
         updated = {c.args[0] for c in col.update_search_index.await_args_list}
         assert updated == {i["name"] for i in shipped}
+
+
+class TestADimensionChangeWillNotStrandStoredVectors:
+    """Rebuilding a vector index at a new width orphans the vectors under it.
+
+    The rebuild does not touch the documents, which is what makes it dangerous
+    rather than what makes it safe. Every vector already stored keeps the old
+    width, and the new index returns none of them from ``$vectorSearch`` — no
+    exception, no changed document count, ``find`` still showing every memory.
+    Recall goes empty for the whole history while working perfectly for anything
+    written afterwards, so it reads as "there are no memories about that".
+
+    Recovery means re-embedding every document with the *previous* provider, which
+    is the config the operator has just replaced. That asymmetry is the argument
+    for refusing: leaving the old index in place costs indexing of new writes,
+    which is recoverable by fixing the config; rebuilding costs the history, which
+    is not.
+
+    The guard lives inside reconciliation rather than only at startup because
+    stage 2 usually runs as a background task whose exceptions are logged and
+    discarded — a check that only raised upstream would be one the default path
+    routes around.
+    """
+
+    @staticmethod
+    def _collection(existing_dims: int, embedded_count):
+        col = MagicMock()
+        col.list_search_indexes = AsyncMock(
+            side_effect=lambda name: _async_iter_of([{
+                "name": name,
+                "queryable": True,
+                "latestDefinition": {"fields": [
+                    {"type": "vector", "path": "embedding",
+                     "numDimensions": existing_dims},
+                ]},
+            }])
+        )
+        col.drop_search_index = AsyncMock()
+        col.create_search_index = AsyncMock(return_value="idx")
+        col.update_search_index = AsyncMock()
+        if isinstance(embedded_count, Exception):
+            col.count_documents = AsyncMock(side_effect=embedded_count)
+        else:
+            col.count_documents = AsyncMock(return_value=embedded_count)
+        return col
+
+    async def _reconcile(self, col, dims=1024, allow=False):
+        from agent_memory.core.migrations import ensure_search_indexes
+        from agent_memory.core.collections import get_search_indexes
+
+        shipped = [i for i in get_search_indexes(dims)
+                   if i["name"] == "memories_vector_index"]
+        db = MagicMock()
+        db.__getitem__ = MagicMock(return_value=col)
+        with patch("agent_memory.core.migrations.get_search_indexes",
+                   return_value=shipped), \
+             patch("agent_memory.core.migrations._wait_for_search_index",
+                   new_callable=AsyncMock, return_value=True), \
+             patch("agent_memory.core.migrations._wait_for_search_index_dropped",
+                   new_callable=AsyncMock):
+            await ensure_search_indexes(
+                db, embedding_dimension=dims, allow_dimension_change=allow
+            )
+
+    async def test_an_index_over_stored_vectors_is_not_rebuilt(self):
+        col = self._collection(existing_dims=1536, embedded_count=42)
+
+        await self._reconcile(col)
+
+        col.drop_search_index.assert_not_called()
+        col.create_search_index.assert_not_called()
+
+    async def test_the_existing_index_is_left_serving_queries(self):
+        """Stated separately from "did not drop".
+
+        Declining the rebuild has to leave the old index intact and usable. An
+        implementation that refused the drop but pushed an incompatible
+        ``update_search_index`` would satisfy the assertion above and still break
+        the index it was protecting.
+        """
+        col = self._collection(existing_dims=1536, embedded_count=42)
+
+        await self._reconcile(col)
+
+        col.update_search_index.assert_not_called()
+
+    async def test_an_empty_collection_is_rebuilt_normally(self):
+        """The paired positive case, so refusing cannot masquerade as the fix.
+
+        This is the ordinary first-run shape — an index left by a previous config
+        over a collection with nothing in it. Nothing is at risk, and a guard that
+        blocked this would break every legitimate dimension change instead of the
+        destructive ones.
+        """
+        col = self._collection(existing_dims=1536, embedded_count=0)
+
+        await self._reconcile(col)
+
+        col.drop_search_index.assert_awaited_once()
+        col.create_search_index.assert_awaited_once()
+
+    async def test_the_operator_can_opt_in(self):
+        """Someone who has read the refusal and means it is not blocked."""
+        col = self._collection(existing_dims=1536, embedded_count=42)
+
+        await self._reconcile(col, allow=True)
+
+        col.drop_search_index.assert_awaited_once()
+        col.create_search_index.assert_awaited_once()
+
+    async def test_an_uncountable_collection_is_treated_as_non_empty(self):
+        """"We could not count" is not "there is nothing there".
+
+        Defaulting to empty would convert a transient count failure into the
+        silent data loss the guard exists to prevent, so the unknown case takes
+        the conservative branch.
+        """
+        col = self._collection(
+            existing_dims=1536, embedded_count=RuntimeError("count failed")
+        )
+
+        await self._reconcile(col)
+
+        col.drop_search_index.assert_not_called()
+
+    async def test_only_embedded_documents_count(self):
+        """Counting rows rather than vectors would refuse for no reason.
+
+        A collection can hold documents that carry no ``embedding`` at all — the
+        counter and metadata shapes, or memories whose enrichment has not run.
+        Those have no vector to strand.
+        """
+        col = self._collection(existing_dims=1536, embedded_count=0)
+
+        await self._reconcile(col)
+
+        assert col.count_documents.await_args.args[0] == {
+            "embedding": {"$ne": None}
+        }
+
+    async def test_a_matching_dimension_never_asks_the_question(self):
+        """No count, no refusal, no log — an unchanged dimension is not this case."""
+        col = self._collection(existing_dims=1024, embedded_count=42)
+
+        await self._reconcile(col, dims=1024)
+
+        col.count_documents.assert_not_called()
+        col.drop_search_index.assert_not_called()
+
+    async def test_the_refusal_is_logged_loudly_enough_to_find(self, caplog):
+        """The one channel that reaches an operator here.
+
+        Raising is not available: on the default path this runs inside a task whose
+        exception is caught and logged as "non-fatal". So the message has to name
+        the index, both dimensions, and the way out, at a level that is not
+        filtered out of production logs.
+        """
+        import logging
+
+        col = self._collection(existing_dims=1536, embedded_count=42)
+
+        with caplog.at_level(logging.ERROR, logger="agent_memory.core.migrations"):
+            await self._reconcile(col)
+
+        assert caplog.records, "the refusal was silent"
+        message = caplog.records[-1].getMessage()
+        assert "memories_vector_index" in message
+        assert "1536" in message and "1024" in message
+        assert "allow_embedding_dimension_change" in message
+
+
+class TestFindStrandingDimensionChanges:
+    """The startup preflight: report, so the caller can refuse before booting.
+
+    Separate from the in-reconciliation guard because they answer to different
+    needs. Reconciliation must survive anything and keep going, so it declines the
+    one destructive step and logs. Startup can and should stop — a process that
+    boots and serves empty recall for its whole history is worse than one that
+    does not boot — so it needs the findings as data, not as a log line.
+    """
+
+    @staticmethod
+    def _db(**by_collection):
+        db = MagicMock()
+        db.__getitem__ = MagicMock(side_effect=lambda name: by_collection[name])
+        return db
+
+    @staticmethod
+    def _collection(existing_dims: int | None, embedded_count=0):
+        col = MagicMock()
+        if existing_dims is None:
+            col.list_search_indexes = AsyncMock(
+                side_effect=lambda name: _empty_async_iter()
+            )
+        else:
+            col.list_search_indexes = AsyncMock(
+                side_effect=lambda name: _async_iter_of([{
+                    "name": name,
+                    "latestDefinition": {"fields": [
+                        {"type": "vector", "path": "embedding",
+                         "numDimensions": existing_dims},
+                    ]},
+                }])
+            )
+        col.count_documents = AsyncMock(return_value=embedded_count)
+        return col
+
+    def _all(self, existing_dims, embedded_count=0):
+        """Every collection with a vector index, wired the same way."""
+        from agent_memory.core.collections import EPISODES, MEMORIES, SEMANTIC_CACHE
+
+        return {
+            name: self._collection(existing_dims, embedded_count)
+            for name in (MEMORIES, EPISODES, SEMANTIC_CACHE)
+        }
+
+    async def test_a_change_over_stored_vectors_is_reported(self):
+        from agent_memory.core.migrations import find_stranding_dimension_changes
+
+        findings = await find_stranding_dimension_changes(
+            self._db(**self._all(1536, embedded_count=7)), 1024
+        )
+
+        assert findings, "the stranding went unreported"
+        assert {f.collection for f in findings} == {
+            "memories", "episodes", "semantic_cache"
+        }
+        one = findings[0]
+        assert (one.existing_dimension, one.wanted_dimension) == (1536, 1024)
+        assert one.document_count == 7
+
+    async def test_an_empty_collection_is_not_a_finding(self):
+        """Changing the dimension with nothing stored is the normal first run."""
+        from agent_memory.core.migrations import find_stranding_dimension_changes
+
+        findings = await find_stranding_dimension_changes(
+            self._db(**self._all(1536, embedded_count=0)), 1024
+        )
+
+        assert findings == []
+
+    async def test_an_unchanged_dimension_is_not_a_finding(self):
+        from agent_memory.core.migrations import find_stranding_dimension_changes
+
+        findings = await find_stranding_dimension_changes(
+            self._db(**self._all(1024, embedded_count=7)), 1024
+        )
+
+        assert findings == []
+
+    async def test_an_absent_index_is_not_a_finding(self):
+        """Nothing to drop, so nothing to strand — a fresh cluster."""
+        from agent_memory.core.migrations import find_stranding_dimension_changes
+
+        findings = await find_stranding_dimension_changes(
+            self._db(**self._all(None)), 1024
+        )
+
+        assert findings == []
+
+    async def test_a_non_atlas_deployment_is_not_a_finding(self):
+        """``list_search_indexes`` raising ``OperationFailure`` means no Atlas
+        Search at all. There are no vector indexes to rebuild, so refusing to
+        start would block a deployment that was never at risk."""
+        from pymongo.errors import OperationFailure
+
+        from agent_memory.core.migrations import find_stranding_dimension_changes
+
+        cols = self._all(1536, embedded_count=7)
+        for col in cols.values():
+            col.list_search_indexes = AsyncMock(
+                side_effect=OperationFailure("no search")
+            )
+
+        assert await find_stranding_dimension_changes(self._db(**cols), 1024) == []
+
+    async def test_an_uncountable_collection_is_still_reported(self):
+        """The dimension change is established; only its size is unknown.
+
+        Dropping the finding here would let a transient count failure wave through
+        exactly the migration this exists to stop.
+        """
+        from agent_memory.core.migrations import find_stranding_dimension_changes
+
+        cols = self._all(1536)
+        for col in cols.values():
+            col.count_documents = AsyncMock(side_effect=RuntimeError("nope"))
+
+        findings = await find_stranding_dimension_changes(self._db(**cols), 1024)
+
+        assert findings, "an uncountable collection was treated as empty"
+        assert findings[0].document_count == -1
+
+    async def test_the_error_names_what_to_do_about_it(self):
+        from agent_memory.core.migrations import (
+            StrandedVectors,
+            stranding_error,
+        )
+
+        err = stranding_error([StrandedVectors(
+            collection="memories", index_name="memories_vector_index",
+            existing_dimension=1536, wanted_dimension=1024, document_count=7,
+        )])
+
+        message = str(err)
+        assert "memories_vector_index" in message
+        assert "1536" in message and "1024" in message
+        assert "7 document" in message
+        # The four ways out, so an operator is not left with only the refusal.
+        assert "Re-embed" in message
+        assert "allow_embedding_dimension_change=true" in message
+        assert "ALLOW_EMBEDDING_DIMENSION_CHANGE" in message, (
+            "the env var name is how this is actually set in a deployment"
+        )
 
 
 class TestDefinitionMatches:

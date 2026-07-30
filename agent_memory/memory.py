@@ -120,6 +120,12 @@ class AsyncMemory:
         await self._validate_embedding_dimension(
             self.providers, expected=self._embedding_dimension, config=config
         )
+        # Awaited here, before any service exists, because the check is about what
+        # is *already* in the database and the answer decides whether to boot at
+        # all. Stage 2 (step 7) is where the destructive rebuild would happen, and
+        # by default that runs as a background task whose exceptions are logged
+        # and dropped — so a refusal raised there would not stop anything.
+        await self._refuse_to_strand_existing_vectors(db, config)
 
         # 4. Services
         self.memory_service = MemoryService(db["memories"], config, self.providers)
@@ -160,6 +166,33 @@ class AsyncMemory:
         logger.info("AsyncMemory started (workers_in_process=%s)", config.workers_in_process)
         return self
 
+    async def _refuse_to_strand_existing_vectors(self, db, config) -> None:
+        """Fail startup when the embedding dimension changed under stored vectors.
+
+        The dimension guard immediately above this checks the config against the
+        *embedder*. This checks it against the *database*, which is a different
+        question with a different failure: a config that is internally consistent
+        and correct for every future write can still be wrong for everything
+        already written.
+
+        Uses the resolved dimension, so a Voyage deployment is compared on the 1024
+        its embedder actually emits rather than the 1536 its config declares —
+        otherwise this would report a stranding on every correctly-configured
+        Voyage startup and refuse to boot.
+        """
+        if config.allow_embedding_dimension_change:
+            return
+        from agent_memory.core.migrations import (
+            find_stranding_dimension_changes,
+            stranding_error,
+        )
+
+        findings = await find_stranding_dimension_changes(
+            db, self._embedding_dimension
+        )
+        if findings:
+            raise stranding_error(findings)
+
     async def _provision_search_indexes(self, db, config, ensure=None) -> None:
         """Create Atlas Search indexes — awaited or backgrounded per config.
 
@@ -185,12 +218,25 @@ class AsyncMemory:
         dimension = getattr(
             self, "_embedding_dimension", config.embedding_dimension
         )
+        # Forwarded because reconciliation refuses a stranding rebuild on its own,
+        # independently of the startup preflight — see `ensure_search_indexes`.
+        # Startup has already refused by this point unless the operator opted in,
+        # so in practice this says "the operator opted in" rather than granting
+        # anything new; the flag has to travel for the two checks to agree.
+        allow_change = getattr(config, "allow_embedding_dimension_change", False)
         self._search_index_task = None
         if config.await_search_indexes:
-            await ensure(db, embedding_dimension=dimension)
+            await ensure(
+                db,
+                embedding_dimension=dimension,
+                allow_dimension_change=allow_change,
+            )
         else:
             self._search_index_task = asyncio.create_task(
-                _ensure_search_indexes_bg(db, dimension, ensure=ensure)
+                _ensure_search_indexes_bg(
+                    db, dimension, ensure=ensure,
+                    allow_dimension_change=allow_change,
+                )
             )
 
     async def _seed_defaults(self) -> None:
@@ -1088,13 +1134,28 @@ class AsyncMemory:
             result["unverified_collections"] = sorted(unverified)
 
 
-async def _ensure_search_indexes_bg(db, embedding_dimension: int = 1536, ensure=None) -> None:
-    """Background Atlas Search index creation — failures are non-fatal."""
+async def _ensure_search_indexes_bg(
+    db,
+    embedding_dimension: int = 1536,
+    ensure=None,
+    allow_dimension_change: bool = False,
+) -> None:
+    """Background Atlas Search index creation — failures are non-fatal.
+
+    Non-fatal is why ``allow_dimension_change`` has to be threaded down rather
+    than checked here: a refusal on this path would be logged and dropped, so the
+    decision belongs to reconciliation itself, which can decline the destructive
+    step and still complete everything else.
+    """
     from agent_memory.core.migrations import ensure_search_indexes
 
     ensure = ensure or ensure_search_indexes
     try:
-        await ensure(db, embedding_dimension=embedding_dimension)
+        await ensure(
+            db,
+            embedding_dimension=embedding_dimension,
+            allow_dimension_change=allow_dimension_change,
+        )
         logger.info("Atlas Search indexes ready.")
     except asyncio.CancelledError:
         logger.debug("Atlas Search index creation cancelled (shutting down).")

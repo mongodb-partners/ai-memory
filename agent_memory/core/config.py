@@ -44,6 +44,21 @@ class MCPConfig(BaseSettings):
     embedding_provider: str = "bedrock"
     embedding_model: str = "amazon.titan-embed-text-v1"
     embedding_dimension: int = 1536
+    # The operator's assertion that changing the embedding dimension out from
+    # under existing vectors is intended.
+    #
+    # A vector index cannot have its `numDimensions` edited, so reconciliation
+    # drops and recreates it. The documents are untouched — and that is the
+    # problem: every vector already stored is the old width, and the rebuilt index
+    # will not return any of them from `$vectorSearch`. Nothing raises, no count
+    # changes, and `find` still shows every memory. Recall simply goes empty for
+    # the entire history while continuing to work for anything written after.
+    #
+    # Recovery means re-embedding every document, which needs the *old* provider
+    # config that the operator has by then already replaced. So the default is to
+    # refuse and say what to do, and this flag is how someone who has read that
+    # and means it proceeds anyway.
+    allow_embedding_dimension_change: bool = False
 
     # LLM Provider
     llm_provider: str = "bedrock"

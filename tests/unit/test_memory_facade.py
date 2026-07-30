@@ -611,6 +611,214 @@ class TestTheGuardChecksTheDimensionInForce:
             await AsyncMemory._validate_embedding_dimension(providers, expected=1536)
 
 
+class TestStartupRefusesToStrandStoredVectors:
+    """`create()` asks the database, not just the embedder.
+
+    The dimension guard above compares the config against the *provider*: does the
+    embedder emit what we think it does. This is the other question — does what we
+    think match what is already stored — and a config can pass the first and fail
+    the second. Switching provider produces exactly that: internally consistent,
+    correct for every future write, wrong for the entire history.
+
+    Awaited during `create()`, before any service is built, because the answer
+    decides whether to boot. It cannot live in stage 2 where the rebuild happens:
+    that runs as a background task by default and its exceptions are logged as
+    "non-fatal", so the refusal would never reach anyone.
+    """
+
+    def _providers(self, dimension: int = 1024):
+        from agent_memory.providers.manager import ResolvedEmbedding
+
+        providers = MagicMock()
+        providers.embedding = AsyncMock()
+        providers.embedding.generate_embedding = AsyncMock(
+            return_value=[0.0] * dimension
+        )
+        providers.embedding_spec = ResolvedEmbedding(
+            model="voyage-4", dimension=dimension
+        )
+        return providers
+
+    def _wire(self, monkeypatch, findings):
+        """Everything `create()` touches before the preflight, and the preflight."""
+        import agent_memory.core.database as dbmod
+        import agent_memory.core.migrations as mig
+        import agent_memory.providers.manager as pm
+
+        db_manager = MagicMock()
+        db_manager.db = MagicMock()
+        db_manager.close = AsyncMock()
+        monkeypatch.setattr(
+            dbmod.DatabaseManager, "initialize", AsyncMock(return_value=db_manager)
+        )
+        monkeypatch.setattr(mig, "ensure_indexes", AsyncMock())
+        monkeypatch.setattr(
+            pm, "ProviderManager", lambda config: self._providers(1024)
+        )
+        find = AsyncMock(return_value=findings)
+        monkeypatch.setattr(mig, "find_stranding_dimension_changes", find)
+        return find
+
+    @staticmethod
+    def _finding():
+        from agent_memory.core.migrations import StrandedVectors
+
+        return StrandedVectors(
+            collection="memories", index_name="memories_vector_index",
+            existing_dimension=1536, wanted_dimension=1024, document_count=7,
+        )
+
+    def _cfg(self, **overrides):
+        return _config(
+            embedding_provider="voyage", voyage_model="voyage-4", voyage_api_key="k",
+            governance_enabled=False, rate_limit_enabled=False,
+            workers_in_process=False, **overrides,
+        )
+
+    async def test_a_stranding_change_refuses_to_start(self, monkeypatch):
+        import agent_memory.memory as mem
+
+        self._wire(monkeypatch, [self._finding()])
+
+        with pytest.raises(ConfigError, match="stranded"):
+            await mem.AsyncMemory.create(self._cfg())
+
+    async def test_it_refuses_before_building_any_service(self, monkeypatch):
+        """Not just "it raised" — where it raised.
+
+        A check that ran after the services were wired, or after workers started,
+        would leave a half-initialized facade and a running enrichment loop behind
+        with no `close()` to call, because `create()` never returned an object to
+        call it on.
+        """
+        import agent_memory.memory as mem
+
+        self._wire(monkeypatch, [self._finding()])
+        seeded = AsyncMock()
+        started = AsyncMock()
+        monkeypatch.setattr(mem.AsyncMemory, "_seed_defaults", seeded)
+        monkeypatch.setattr(mem.AsyncMemory, "_maybe_start_workers", started)
+
+        with pytest.raises(ConfigError):
+            await mem.AsyncMemory.create(self._cfg())
+
+        seeded.assert_not_called()
+        started.assert_not_called()
+
+    async def test_a_clean_database_starts_normally(self, monkeypatch):
+        """The paired case: no findings, no refusal.
+
+        Without this, a preflight that reported a stranding unconditionally — or
+        one that simply always raised — would satisfy the test above.
+        """
+        import agent_memory.memory as mem
+
+        self._wire(monkeypatch, [])
+
+        m = await mem.AsyncMemory.create(self._cfg())
+        try:
+            assert m._embedding_dimension == 1024
+        finally:
+            await m.close()
+
+    async def test_the_check_uses_the_resolved_dimension(self, monkeypatch):
+        """1024, not the 1536 the config declares.
+
+        Comparing the declared value against the database would report a stranding
+        on every correctly-configured Voyage startup — the guard would refuse to
+        boot the deployment it was written for.
+        """
+        import agent_memory.memory as mem
+
+        find = self._wire(monkeypatch, [])
+        cfg = self._cfg()
+        assert cfg.embedding_dimension == 1536, "precondition: declared != resolved"
+
+        m = await mem.AsyncMemory.create(cfg)
+        try:
+            assert find.await_args.args[1] == 1024
+        finally:
+            await m.close()
+
+    async def test_the_operator_can_opt_in(self, monkeypatch):
+        """Opting in skips the question entirely rather than ignoring the answer.
+
+        Someone who has read the refusal and accepts losing the old vectors gets to
+        proceed; there is no reason to spend the round trips confirming what they
+        have already decided.
+        """
+        import agent_memory.memory as mem
+
+        find = self._wire(monkeypatch, [self._finding()])
+
+        m = await mem.AsyncMemory.create(
+            self._cfg(allow_embedding_dimension_change=True)
+        )
+        try:
+            find.assert_not_called()
+        finally:
+            await m.close()
+
+    async def test_the_flag_reaches_index_reconciliation(self, monkeypatch):
+        """The two guards have to agree.
+
+        Reconciliation declines a stranding rebuild on its own — it has to, since
+        it runs where an exception would be swallowed. If the opt-in did not travel
+        down to it, an operator who set the flag would get past startup and then
+        find the rebuild silently refused, with recall empty for new writes and no
+        obvious reason why.
+        """
+        import agent_memory.memory as mem
+
+        facade = mem.AsyncMemory.__new__(mem.AsyncMemory)
+        facade._embedding_dimension = 1024
+        ensure = AsyncMock()
+
+        await facade._provision_search_indexes(
+            MagicMock(),
+            _config(await_search_indexes=True, allow_embedding_dimension_change=True),
+            ensure,
+        )
+
+        assert ensure.await_args.kwargs["allow_dimension_change"] is True
+
+    async def test_the_flag_defaults_to_refusing(self, monkeypatch):
+        import agent_memory.memory as mem
+
+        facade = mem.AsyncMemory.__new__(mem.AsyncMemory)
+        facade._embedding_dimension = 1024
+        ensure = AsyncMock()
+
+        await facade._provision_search_indexes(
+            MagicMock(), _config(await_search_indexes=True), ensure
+        )
+
+        assert ensure.await_args.kwargs["allow_dimension_change"] is False
+
+    async def test_the_backgrounded_path_carries_the_flag_too(self):
+        """The default path, and a separate call site from the awaited one.
+
+        The two build their call differently, so a flag threaded through only one
+        of them is a real possibility — and the one that would be missed is the
+        default.
+        """
+        import agent_memory.memory as mem
+
+        facade = mem.AsyncMemory.__new__(mem.AsyncMemory)
+        facade._embedding_dimension = 1024
+        ensure = AsyncMock()
+
+        await facade._provision_search_indexes(
+            MagicMock(),
+            _config(await_search_indexes=False,
+                    allow_embedding_dimension_change=True),
+            ensure,
+        )
+        await facade._search_index_task
+
+        assert ensure.await_args.kwargs["allow_dimension_change"] is True
+
+
 class TestCreateAndClose:
     """Exercise the create() wiring and close() teardown with everything mocked."""
 

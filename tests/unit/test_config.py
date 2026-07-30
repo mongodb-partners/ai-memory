@@ -178,6 +178,37 @@ class TestMCPConfigEnvOverride:
         assert config.enrichment_batch_size == 100
 
 
+class TestAllowEmbeddingDimensionChange:
+    """The opt-in for a migration that silently orphans stored vectors.
+
+    Defaults to False because the failure it gates is invisible and
+    unrecoverable: rebuilding a vector index at a new ``numDimensions`` leaves
+    every stored vector at the old width, unsearchable, with no error and no
+    change in document count — and undoing it needs the embedding provider that
+    was just replaced.
+    """
+
+    def test_defaults_to_refusing(self):
+        assert _make_config().allow_embedding_dimension_change is False
+
+    def test_settable(self):
+        assert _make_config(
+            allow_embedding_dimension_change=True
+        ).allow_embedding_dimension_change is True
+
+    def test_settable_from_env(self, monkeypatch):
+        """The only way an operator sets this in a container.
+
+        A field readable in Python but not from the environment would be an opt-in
+        nobody deploying the shells could actually reach, leaving them with a
+        refusal and no documented way past it.
+        """
+        monkeypatch.setenv("MONGODB_CONNECTION_STRING", "mongodb://h:27017")
+        monkeypatch.setenv("ALLOW_EMBEDDING_DIMENSION_CHANGE", "true")
+
+        assert MCPConfig(_env_file=None).allow_embedding_dimension_change is True
+
+
 class TestMCPConfigValidation:
     """TC-003: MCPConfig validates required fields."""
 
