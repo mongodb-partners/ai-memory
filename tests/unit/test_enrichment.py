@@ -974,3 +974,70 @@ class TestTheClaimIsReleasedWhenWorkEnds:
             "release the claim; a write that keeps the lease strands the document "
             "for a full lease period after it is already finished"
         )
+
+
+class TestEvolutionsDecisionSurvivesTheFinalWrite:
+    """Enrichment ends with a write; that write must not undo what evolution did.
+
+    `_process_standard_enrichment` calls `evolve_memory` and then sets
+    `enrichment_status: complete`. When evolution has just queued a merge — setting
+    the status to `merge_pending` on this very document — the unconditional
+    `complete` overwrote it, leaving a document with a `merge_target_id` that no
+    worker would ever act on. The merge was silently dropped and the duplicate
+    stayed live.
+    """
+
+    def _worker(self, outcome, col=None):
+        col = col or _ClaimableCollection([_claimable()])
+        memory_svc = _make_memory_service()
+        memory_svc.evolve_memory = AsyncMock(return_value=outcome)
+        return EnrichmentWorker(
+            col, _make_config(), _make_providers(), memory_svc
+        ), col
+
+    async def test_a_queued_merge_is_not_marked_complete(self):
+        doc = _claimable()
+        worker, col = self._worker("merge_queued", _ClaimableCollection([doc]))
+        # `evolve_memory` is mocked, so emulate the status it would have written.
+        doc["enrichment_status"] = "merge_pending"
+
+        await worker._process_standard_enrichment(dict(doc, enrichment_status="pending"))
+
+        assert doc["enrichment_status"] == "merge_pending", (
+            "the final write overwrote the queued merge with 'complete'; the "
+            "document keeps a merge_target_id no worker will act on"
+        )
+
+    async def test_the_importance_is_still_recorded_for_a_queued_merge(self):
+        """Skipping the status must not skip the work that was actually done."""
+        doc = _claimable()
+        worker, col = self._worker("merge_queued", _ClaimableCollection([doc]))
+
+        await worker._process_standard_enrichment(dict(doc))
+
+        assert doc["importance"] == 0.7
+        assert doc["summary"] == "A test summary"
+
+    async def test_an_ordinary_enrichment_still_completes(self):
+        doc = _claimable()
+        worker, col = self._worker("created", _ClaimableCollection([doc]))
+
+        await worker._process_standard_enrichment(dict(doc))
+
+        assert doc["enrichment_status"] == "complete"
+
+    async def test_a_reinforced_memory_completes_too(self):
+        """On `reinforced` evolution soft-deleted this document. `complete` is the
+        right status for it — what matters is that the write sets only the three
+        fields it owns and does not resurrect it."""
+        doc = _claimable()
+        col = _ClaimableCollection([doc])
+        worker, _ = self._worker("reinforced", col)
+        # The state evolution leaves behind.
+        doc.update(deleted_at=datetime.now(timezone.utc), is_deleted=True)
+
+        await worker._process_standard_enrichment(dict(doc))
+
+        assert doc["enrichment_status"] == "complete"
+        assert doc["deleted_at"] is not None, "the final write undid the retirement"
+        assert doc["is_deleted"] is True

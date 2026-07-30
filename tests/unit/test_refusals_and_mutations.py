@@ -539,7 +539,12 @@ class TestEvolutionExcludesItself:
         )
 
         assert result == "reinforced"
-        assert col.update_one.await_args.args[0]["_id"] == duplicate_id
+        # The *first* write, not the last: reinforcement now also retires the
+        # document being evolved, so there are two. Asserting on `await_args`
+        # (the most recent call) would check the retirement and say nothing about
+        # whether the duplicate was reached at all.
+        reinforcing = col.update_one.await_args_list[0]
+        assert reinforcing.args[0]["_id"] == duplicate_id
 
     async def test_without_the_exclusion_nothing_changes_for_other_callers(self):
         """`exclude_id` is optional, so the public signature stays compatible."""

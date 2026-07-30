@@ -214,7 +214,7 @@ class EnrichmentWorker:
         # this very memory at similarity ~1.0, and the reinforce branch fires
         # against its own `_id` — inflating its own importance and never reaching
         # the real duplicates ranked below it.
-        await self.memory_service.evolve_memory(
+        outcome = await self.memory_service.evolve_memory(
             memory["user_id"],
             memory["content"],
             memory["embedding"],
@@ -226,6 +226,18 @@ class EnrichmentWorker:
             "importance": importance,
             "updated_at": datetime.now(UTC),
         }
+        # Evolution may have already decided what this document is. On
+        # `merge_queued` it set the status to `merge_pending`, and writing
+        # `complete` over that would drop the queued merge on the floor — the
+        # document would keep a `merge_target_id` that no worker ever acts on. On
+        # `reinforced` it soft-deleted the document as a duplicate; `complete` is
+        # then the correct status but the write must not undo the deletion, which is
+        # why it only ever sets these three fields.
+        #
+        # The importance and summary are still worth keeping in both cases — they
+        # were computed from this content and the merge will carry them forward.
+        if outcome == "merge_queued":
+            del update["enrichment_status"]
         # Only set `summary` when there is one worth setting. Absent is the safe
         # state: readers fall back to `content`, which is the memory itself.
         if summary is not None:

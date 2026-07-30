@@ -467,6 +467,33 @@ class MemoryService:
             _sanitize_doc(r)
         return results
 
+    async def _retire_as_duplicate(self, memory_id: Any, kept_id: Any, now) -> None:
+        """Soft-delete ``memory_id`` because ``kept_id`` already holds its content.
+
+        ``deleted_at: None`` in the filter keeps this idempotent and preserves an
+        earlier deletion's timestamp — the user may have deleted this memory
+        themselves between the search and here.
+
+        ``enrichment_status`` goes to ``complete`` because the document is finished:
+        left in ``pending`` it would be claimed and enriched again, spending an LLM
+        call on content that is no longer searchable. ``duplicate_of`` records why
+        it went away, which is the difference between an operator seeing deliberate
+        deduplication and seeing memories quietly disappear.
+        """
+        await self.memories.update_one(
+            {"_id": memory_id, "deleted_at": None},
+            {
+                "$set": {
+                    "deleted_at": now,
+                    "is_deleted": True,
+                    "updated_at": now,
+                    "enrichment_status": "complete",
+                    "duplicate_of": kept_id,
+                },
+                "$unset": {"enrichment_claimed_at": ""},
+            },
+        )
+
     async def evolve_memory(
         self,
         user_id: str,
@@ -490,6 +517,12 @@ class MemoryService:
         because the self-match consumed the decision; and importance drifted upward
         on nothing — a memory that no one had read became "important" purely by
         being enriched, which then biased ranking and promotion in its favour.
+
+        Every branch is responsible for leaving exactly one live document per piece
+        of content. That is why ``reinforced`` and ``merge_queued`` retire
+        ``exclude_id``: "this content already exists" and "this content is a live
+        memory of its own" cannot both be true, and the previous code asserted both.
+        See the branches below for what each one does about it.
         """
         pipeline: list[dict[str, Any]] = [
             {
@@ -526,22 +559,75 @@ class MemoryService:
         similarity = top.get("score", 0)
 
         if similarity > self.config.reinforce_threshold:
+            now = datetime.now(UTC)
             await self.memories.update_one(
                 {"_id": top["_id"]},
                 {
                     "$set": {
-                        "updated_at": datetime.now(UTC),
+                        "updated_at": now,
                         "importance": min(top.get("importance", 0.5) * 1.1, 1.0),
                     },
                     "$inc": {"access_count": 1},
                 },
             )
+            # Retire the memory this call was evolving. Reinforcement means "we
+            # already have this content, so the older copy gets stronger" — and the
+            # newer copy was left live and searchable, so the user ended up with two
+            # near-identical memories, one of which had just been declared
+            # redundant. Search returned both, `numCandidates` was spent on both,
+            # and the next enrichment pass found each as the other's duplicate.
+            #
+            # Soft-deleted rather than removed, matching every other deletion in
+            # this service: the TTL on `deleted_at` reclaims it, and until then it
+            # is recoverable if a threshold turns out to be tuned too loosely.
+            #
+            # Ordered after the reinforcing write so that a failure between the two
+            # leaves a duplicate rather than losing the content — the outcome that
+            # the next evolution pass can still repair.
+            if exclude_id is not None:
+                await self._retire_as_duplicate(exclude_id, top["_id"], now)
             return "reinforced"
 
         if similarity > self.config.merge_threshold:
-            # Create new memory immediately for searchability,
-            # queue async merge via enrichment worker
             now = datetime.now(UTC)
+
+            # When this call is evolving an existing document, that document *is*
+            # the thing to merge — mark it `merge_pending` in place. The previous
+            # code inserted a second document holding the same content and left the
+            # original live beside it, so a single `add()` produced two searchable
+            # copies plus a merge target: three documents for one memory, and the
+            # merge worker then folded the target into the copy while the original
+            # stayed behind untouched.
+            #
+            # Nothing is inserted here, so the "create new memory immediately for
+            # searchability" rationale still holds — the memory being evolved is
+            # already stored and already searchable. The only change is which
+            # document carries the pending merge.
+            if exclude_id is not None:
+                await self.memories.update_one(
+                    {"_id": exclude_id, "deleted_at": None},
+                    {
+                        "$set": {
+                            "enrichment_status": "merge_pending",
+                            "merge_target_id": top["_id"],
+                            "updated_at": now,
+                        },
+                        # The merge is a fresh unit of work for the worker, not a
+                        # continuation of the enrichment that requested it. Carrying
+                        # the enrichment's retry count over would let a memory that
+                        # took two attempts to summarize arrive at the merge with one
+                        # attempt left.
+                        "$unset": {
+                            "enrichment_claimed_at": "",
+                            "enrichment_retries": "",
+                        },
+                    },
+                )
+                return "merge_queued"
+
+            # No document to convert — the caller evolved raw content rather than a
+            # stored memory. Insert the merge candidate, which is what the original
+            # code did unconditionally.
             merge_doc = {
                 "user_id": user_id,
                 "tier": "ltm",
