@@ -50,6 +50,21 @@ primary path for exactly the reason above.
 `set_retention` never raises. Retention management should not be able to take down
 a request; check the returned `status` instead.
 
+**Check it.** A failure is a return value, so a caller that ignores the response
+learns nothing — and until 4.2.0 neither did the audit log, which recorded every
+call as a `success` with the requested `ttl_seconds` beside it. A failed
+`{"status": "error"}` is now audited as an `error` carrying the reason, so an
+operator reviewing the log sees the attempt that changed nothing. Both directions
+of a silent failure matter: a lengthened retention that did not take effect leaves
+turns expiring on the old schedule, and a shortened one deletes other tenants'
+data on the TTL monitor's schedule with no signal in the response either way.
+
+The `error` string is scrubbed of credential-shaped substrings before it is
+returned or audited — it is a driver message, and a driver quotes the URI it
+failed to authenticate against. A total failure names both attempts (`collMod`
+*and* the `create_index` fallback), because "collMod is unavailable on this
+deployment" and "this principal may not create an index" need different fixes.
+
 ## What TTL actually guarantees
 
 Three things worth knowing before you rely on a number:

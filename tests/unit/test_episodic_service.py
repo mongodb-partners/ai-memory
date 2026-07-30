@@ -578,6 +578,48 @@ class TestRetention:
         assert result["status"] == "error"
         assert "no permission" in result["error"]
 
+    async def test_a_total_failure_names_both_failures(self):
+        """"collMod is unavailable here" and "this principal cannot create an
+        index" are different problems with different fixes. Reporting only the
+        fallback's message reads as though collMod was never tried."""
+        col = _collection()
+        col.database.command = AsyncMock(side_effect=RuntimeError("collMod refused"))
+        col.create_index = AsyncMock(side_effect=RuntimeError("no permission"))
+        result = await _service(col).set_retention(3600)
+
+        assert "no permission" in result["error"]
+        assert "collMod refused" in result["error"]
+
+    async def test_the_reported_error_is_redacted(self):
+        """This string travels twice — into the audit collection and into the REST
+        response body — and a driver message quotes what it failed on. That the
+        reader is an admin is not a reason to hand them the cluster's password."""
+        col = _collection()
+        col.database.command = AsyncMock(side_effect=RuntimeError("no collMod"))
+        col.create_index = AsyncMock(
+            side_effect=RuntimeError(
+                "auth failed for mongodb+srv://svc:hunter2@cluster.mongodb.net"
+            )
+        )
+        result = await _service(col).set_retention(3600)
+
+        assert "hunter2" not in result["error"]
+        # The type and the surviving detail are what make the entry actionable.
+        assert "RuntimeError" in result["error"]
+        assert "cluster.mongodb.net" in result["error"]
+
+    async def test_a_drop_failure_is_redacted_too(self):
+        """The `ttl_seconds=None` branch is a separate `except` and had the same
+        unscrubbed `str(exc)`."""
+        col = _collection()
+        col.drop_index = AsyncMock(
+            side_effect=RuntimeError("refused: Bearer abcdefghijklmnop")
+        )
+        result = await _service(col).set_retention(None)
+
+        assert "abcdefghijklmnop" not in result["error"]
+        assert "RuntimeError" in result["error"]
+
     async def test_a_drop_failure_reports_instead_of_raising(self):
         # TC-EP-SVC-074
         col = _collection()

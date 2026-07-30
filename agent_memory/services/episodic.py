@@ -32,6 +32,7 @@ from agent_memory.core.projection import (
     project_messages,
     project_todos,
 )
+from agent_memory.core.redaction import redact_error
 from agent_memory.services.memory import _sanitize_doc
 from agent_memory.services.search_pipeline import rank_fusion_pipeline
 
@@ -336,6 +337,21 @@ class EpisodicService:
 
         Falls back to ``create_index`` on deployments without ``collMod``.
 
+        **Failure is a return value, not an exception** — retention management
+        must not be able to fail a request — so ``status: "error"`` is the only
+        signal a caller gets, and the caller has to read it. The facade reads it
+        too: :meth:`AsyncMemory.set_activity_retention` maps it onto an ``error``
+        audit entry, because an operation that failed and was recorded as a
+        success is worse than one that raised. See ``memory._retention_outcome``.
+
+        The ``error`` string is scrubbed by :func:`redact_message` before it
+        leaves here. It is a driver message, and a driver quotes what it failed
+        on — a ``mongodb+srv://user:password@`` URI among other things. This one
+        travels twice: into the audit collection, and into the REST response
+        body. That the reader is an admin is not a reason to hand them the
+        cluster's password, and what makes the message useful (*which* operation
+        was refused) survives the scrub.
+
         **Scope.** A TTL index belongs to a collection, not to a tenant, so this
         retunes retention for *every* user's turns. The facade takes a ``user_id``
         because the call still has to be authorised and audited against a
@@ -369,7 +385,7 @@ class EpisodicService:
                     "status": "error",
                     "ttl_seconds": None,
                     "scope": "collection",
-                    "error": str(exc),
+                    "error": redact_error(exc),
                 }
 
         try:
@@ -393,6 +409,7 @@ class EpisodicService:
                 "index instead.",
                 exc,
             )
+            collmod_error = redact_error(exc)
 
         try:
             await self.episodes.create_index(
@@ -409,7 +426,12 @@ class EpisodicService:
                 "status": "error",
                 "ttl_seconds": ttl_seconds,
                 "scope": "collection",
-                "error": str(exc),
+                # Both failures are reported, not just the last one: "collMod is
+                # unavailable on this deployment" and "this principal cannot
+                # create an index" are different problems with different fixes,
+                # and the fallback's message alone reads as though collMod was
+                # never tried.
+                "error": f"{redact_error(exc)} (after collMod: {collmod_error})",
             }
 
 

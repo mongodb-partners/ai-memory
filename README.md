@@ -127,6 +127,7 @@ await memory.get_thread(user_id, thread_id, *, limit=None, ascending=True)
 await memory.get_activity_by_correlation(user_id, correlation_id)
 await memory.flush_activity(timeout=5.0)          # → bool; bounded, never raises
 await memory.set_activity_retention(user_id, *, ttl_seconds=7200)   # None = forever
+                                                  # → read the returned `status`
 memory.activity_stats()                            # synchronous; safe in a probe
 ```
 
@@ -272,6 +273,14 @@ existing TTL index rather than dropping and rebuilding it (falling back to
 `create_index` where `collMod` is unavailable), which makes it cheap but not
 durable — the next startup reconciles the index back to
 `episodic_retention_days`.
+
+It is also the one method whose failure is a **return value** rather than an
+exception, so read the `status`: `updated`/`created`/`removed` mean the index
+changed, `error` means it did not. The audit entry now agrees — it used to record
+every call as a success, including the ones that changed nothing, which mattered
+most in the destructive direction: shortening retention collection-wide and having
+it silently fail is indistinguishable, from the response alone, from having it
+work.
 
 ## Configuration
 

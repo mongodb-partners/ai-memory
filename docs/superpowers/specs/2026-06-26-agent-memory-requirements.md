@@ -231,7 +231,10 @@ the agent *did*, as distinct from what it *knows*. Ported from
   index on `embedding` declaring `user_id` / `thread_id` / `agent_name` as filter
   fields, and a full-text index on `search_text`.
 - **REQ-E-116:** THE SYSTEM SHALL provide `set_activity_retention` implemented
-  with `collMod` and a `create_index` fallback, which SHALL NOT raise.
+  with `collMod` and a `create_index` fallback, which SHALL NOT raise. WHERE the
+  change fails THE SYSTEM SHALL return `status: "error"` carrying a redacted
+  reason, and SHALL record that call in the audit log with status `"error"` rather
+  than `"success"`.
 - **REQ-E-117:** WHEN `log_activity` is called THE SYSTEM SHALL enforce
   governance and rate limits but SHALL NOT emit one audit record per call;
   instead it SHALL emit one audit record per flushed batch.

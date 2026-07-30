@@ -116,6 +116,45 @@ independently, so a badly trained artifact cannot emit the value that means
 
 ### Fixed
 
+**A failed retention change was audited as a success.**
+`EpisodicService.set_retention` deliberately never raises — retention management
+should not be able to fail a request — so it reports a failure as
+`{"status": "error", ...}` and expects the caller to read it. `AsyncMemory._run`
+did not: it recorded `"error"` only when the coroutine *raised*, so a returned
+failure fell through to the success path and was written to `audit_log` as
+`success`, with the caller's requested `ttl_seconds` beside it as though the index
+now carried it.
+
+That is the worst possible record of this particular operation, because neither
+direction of a silent failure is visible from the response. A **lengthened**
+retention that did not take effect leaves turns expiring on the old, shorter
+schedule while the log says they are being kept. A **shortened** one is
+destructive and equally invisible: Atlas deletes on the TTL monitor's own
+schedule, so the caller sees `{"scope": "collection"}` whether or not the index
+changed. `set_activity_retention` is collection-wide, so the data being deleted on
+an unverified schedule is every tenant's. The audit log was the one place the
+difference could have surfaced, and it agreed that everything was fine.
+
+`_run` gained an opt-in `outcome` hook — `result -> (status, fields) | None` — and
+`set_activity_retention` passes `_retention_outcome`, which maps a reported
+`"error"` onto an `"error"` entry carrying the reason. The hook is deliberately
+narrow rather than a general "inspect every result": for anything new, the honest
+fix is to raise. `remember_decision` also returns a `"status"` key
+(`stored`/`updated`) and reading that as a verdict would be the same bug pointed
+the other way, so a test pins it as unaffected.
+
+Two smaller faults in the same lines. The reported `error` was `str(exc)` — a
+driver message, which quotes the `mongodb+srv://user:password@` URI it failed to
+authenticate against, and this one travels into both the audit collection and the
+REST response body; it is now `redact_error`. And a total failure reported only the
+fallback's message, reading as though `collMod` was never tried, so it now names
+both attempts: "collMod is unavailable on this deployment" and "this principal may
+not create an index" need different fixes.
+
+The contract is unchanged — a failure is still a return value, not an exception —
+and REQ-E-116 now states the audit obligation alongside the "SHALL NOT raise".
+23 tests; 15 mutations, 15 caught.
+
 **The demo server refused every turn on a second lifecycle.** `SHUTDOWN` in
 `examples/memory-ui/server/sse.py` is a module-level `asyncio.Event`. Shutdown set
 it and nothing cleared it, on the reasoning that the process is exiting — true of

@@ -56,6 +56,37 @@ _WRITE_OPERATIONS = frozenset(
 )
 
 
+def _retention_outcome(result) -> tuple[str, dict] | None:
+    """Read ``set_retention``'s reported status for the audit log.
+
+    ``EpisodicService.set_retention`` never raises — retention management must not
+    be able to fail a request — so it reports a failure as
+    ``{"status": "error", "error": ...}``. ``_run`` had no way to see that: the
+    coroutine returned, so the entry read ``success``, with the caller's requested
+    ``ttl_seconds`` recorded beside it as though the index now carried it.
+
+    That is the worst possible record of this particular operation, in both
+    directions. Lengthening retention that silently failed leaves data expiring on
+    the old schedule while the log says otherwise. *Shortening* it is destructive
+    and equally invisible from the response — Atlas deletes on the TTL monitor's
+    own schedule, so a caller sees only ``{"scope": "collection"}`` either way, and
+    the audit log was the one place the difference could have shown up. It said
+    success too.
+
+    Returns ``None`` for every non-failure status (``updated``, ``created``,
+    ``removed``), which keeps the default. A missing or unrecognised ``status`` is
+    also left alone: this reads a contract, and inventing a failure from a shape it
+    does not recognise would make a service change look like an outage.
+    """
+    if isinstance(result, dict) and result.get("status") == "error":
+        # The service already scrubbed this string (`redact_error`), so it is not
+        # re-redacted here — doing so would only re-scan a scrubbed message, and
+        # skipping it in the service instead would leave the REST response body
+        # unscrubbed.
+        return "error", {"error": result.get("error", "retention change failed")}
+    return None
+
+
 class AsyncMemory:
     """Programmatic async memory core. Build via ``await AsyncMemory.create(cfg)``."""
 
@@ -576,7 +607,7 @@ class AsyncMemory:
                 raise RateLimitError(f"Rate limit exceeded for '{operation}'")
 
     async def _run(self, user_id, operation, category, coro_factory, *, role=None,
-                   **audit_fields):
+                   outcome=None, **audit_fields):
         """access-check → service call → audit. The single consumer path.
 
         ``role`` is keyword-only and separate from ``audit_fields`` because it is
@@ -589,6 +620,18 @@ class AsyncMemory:
 
         Library callers pass nothing and keep the old behaviour: no token, no
         role claim, the configured default.
+
+        ``outcome`` is for the services that report failure in their return value
+        instead of raising. Without it, "the coroutine returned" is taken to mean
+        "the operation succeeded", which is not the same statement: a service that
+        catches its own exceptions and hands back ``{"status": "error", ...}``
+        lands in the audit log as a ``success``, with the caller's *requested*
+        parameters recorded as though they had taken effect. It is a callable
+        ``result -> (status, extra_audit_fields) | None``; ``None`` means the
+        default. Only ``set_activity_retention`` needs it today — see
+        :func:`_retention_outcome` — and the hook is deliberately narrow rather
+        than a general "inspect every result", because the honest fix for a new
+        service is to raise.
         """
         start = time.time()
         # The access check is audited, not silent. It used to run ahead of the
@@ -632,8 +675,16 @@ class AsyncMemory:
             )
             raise
         duration_ms = int((time.time() - start) * 1000)
+        status = "success"
+        if outcome is not None:
+            # The service returned without raising, which is not by itself a
+            # success — see the `outcome` note above.
+            verdict = outcome(result)
+            if verdict is not None:
+                status, extra = verdict
+                audit_fields = {**audit_fields, **extra}
         await self.audit_service.log(
-            user_id, category, operation, "success", duration_ms, **audit_fields
+            user_id, category, operation, status, duration_ms, **audit_fields
         )
         return result
 
@@ -914,6 +965,13 @@ class AsyncMemory:
         operation is scoped to one ``user_id``; this is the only one that reaches
         across tenants, which is why the guard lives here rather than in
         ``_check_access``.
+
+        **Read the returned ``status``.** This is the one facade method whose
+        failure is a return value rather than an exception, inherited from
+        :meth:`EpisodicService.set_retention`: ``updated`` / ``created`` /
+        ``removed`` mean the index changed, ``error`` means it did not and carries
+        an ``error`` string. The audit entry now says the same thing — it recorded
+        every call as a success, including the ones that changed nothing.
         """
         async def _do():
             # Inside the factory, so the refusal runs within `_run` and is audited
@@ -922,9 +980,12 @@ class AsyncMemory:
             self._require_admin_for_global_mutation("set_activity_retention", role)
             return await self.episodic_service.set_retention(ttl_seconds)
 
+        # `outcome` because the service reports failure rather than raising it, so
+        # `_run`'s default reading — returned, therefore succeeded — is wrong for
+        # exactly this call. See `_retention_outcome`.
         return await self._run(
             user_id, "set_activity_retention", "admin", _do, role=role,
-            ttl_seconds=ttl_seconds,
+            outcome=_retention_outcome, ttl_seconds=ttl_seconds,
         )
 
     def _require_admin_for_global_mutation(self, operation: str, role: str | None) -> None:
