@@ -437,15 +437,11 @@ already exists by the time enrichment runs, so scoring is a dot product over a
 vector the worker was already holding. No encoder, no new dependency; the scorer is
 pure Python.
 
-Which artifact loads, when `importance_model_path` is unset:
+With `importance_model_path` unset, one artifact loads, whatever the embedder:
+`lexical`, and it is trained. It scores seven bounded text features rather than the
+embedding, so it is provider-independent and applies to every deployment.
 
-| `embedding_provider` / model / dimension | Artifact | State |
-|---|---|---|
-| any — Titan, Voyage, OpenAI alike | `lexical` | trained |
-
-**One artifact ships, and it is trained.** `lexical` scores seven bounded text
-features rather than the embedding, so it is provider-independent and applies to
-every deployment. Earlier versions shipped `titan-1536` and `voyage-3-1024`
+Earlier versions shipped `titan-1536` and `voyage-3-1024`
 alongside it; both were zero-coefficient placeholders that scored every memory
 0.5 — above the forgetting threshold, below the promotion threshold — so
 `IMPORTANCE_SCORER=local` on those embedders did not approximate the LLM, it

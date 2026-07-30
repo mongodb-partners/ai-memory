@@ -3,8 +3,8 @@
 The integration suite in this package exercises the MCP tools end-to-end
 against a running server (default: ``localhost:8000``). When no server is
 reachable, the tests are skipped rather than failed, so ``pytest`` stays
-green for the unit suite. To run them, start the server (see
-``docs/deployment.md``) and re-run pytest.
+green for the unit suite. To run them, start the server (see the project README's
+deployment section) and re-run pytest. ``tests/README.md`` covers the gate.
 """
 
 import http.client

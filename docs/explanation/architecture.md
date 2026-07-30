@@ -71,8 +71,8 @@ drop the access check.
 
 ## The episodic write path
 
-This is the most carefully built part of the library, because it has to be fast
-and it has to not lose data, and those pull in opposite directions.
+This path has to be fast and it has to not lose data, and those pull in opposite
+directions.
 
 ```
 log_activity(...)                      ← caller's coroutine
@@ -85,14 +85,14 @@ log_activity(...)                      ← caller's coroutine
    EpisodicWorker.run()                 ← ONE consumer task
      ├── batch up to episodic_batch_size, or
      │   episodic_flush_interval_seconds elapses
-     ├── durable step per thread        ← find_one_and_update $inc
-     ├── embed final steps              ← providers.embedding
+     ├── durable step per thread        ← find_one_and_update $inc, serially
+     ├── embed final steps              ← ONE provider call per batch
      └── insert_many                    ← one round trip per batch
              │
              └── one audit entry per batch, grouped by user_id
 ```
 
-Six properties hold this together, each of which is a bug if reversed:
+Seven properties hold this together, each of which is a bug if reversed:
 
 **Nothing on the caller's path awaits I/O.** The projection is pure CPU and the
 enqueue is non-blocking. The caller cannot be slowed by Atlas latency or by a slow
@@ -102,8 +102,21 @@ embedding provider.
 consumer could dequeue and decrement before the producer incremented, orphaning
 the in-flight count so `flush()` would never reach zero.
 
-**Exactly one consumer task.** FIFO per thread only holds with a single consumer,
-and `step` monotonicity depends on it. Two consumers would interleave.
+**Exactly one consumer task, and step assignment stays serial inside it.** FIFO
+per thread only holds with a single consumer, and `step` monotonicity depends on
+it. Two consumers would interleave. So would gathering the counter calls within
+one: `$inc` is atomic, so the numbers stay distinct, but they are handed out in
+*arrival* order, and a wait for a connection from the pool happens before the
+claim. One slow acquisition among five turns is enough to assign them
+`[4, 0, 1, 2, 3]`, and `get_thread` sorts by `step`, so the replayed conversation
+comes back out of order.
+
+**One embedding call per batch, not per document.** The provider round trip is
+most of a batch's wall clock, so it is made once. A twenty-turn batch costs one
+request rather than twenty, which also means one twentieth of the rate-limit
+budget. The trade is that failure widens: one dead call degrades every turn in
+that batch to text-only rather than just one, and `embed_failures` counts
+documents rather than calls so the number means the same thing either way.
 
 **A full queue drops the oldest, and counts it.** The newest turn always survives.
 A stale turn is worth less than a fresh one, and evicting the newest means the log
@@ -156,9 +169,9 @@ append-only facts about what happened, not knowledge to be consolidated. Merging
 two similar turns would be data loss.
 
 The document shape, retention policy, index set, and query patterns all differ
-too. So: separate collection, same database, same cluster. The "one database
-instead of four systems" claim is about operational surface, and collections are
-how a single database serves different shapes — not a compromise on it.
+too. So: separate collection, same database, same cluster. Collections are how one
+database serves different shapes, so this costs nothing against the "one database
+instead of four systems" claim, which is about operational surface.
 
 What they *share* is the retrieval pipeline. `services/search_pipeline.py` holds
 one parameterized `$rankFusion` builder used by both tiers, so a fix to the fusion

@@ -28,8 +28,9 @@ These pages go deeper, organized by what you are trying to do.
   the one deliberate exception to the audit path, and the six properties holding
   the episodic write path together.
 
-## Specs
+## Reading the tests
 
-`superpowers/specs/` holds the design documents and EARS requirements the
-implementation was built against. They record decisions rather than describing
-current behaviour — for that, prefer the pages above.
+The test suite is the other half of the documentation, and the parts of it worth
+knowing before you read it — what the `REQ-*` ids in the docstrings mean, why unit
+tests pass `_env_file=None`, and why the integration suite skips itself — are in
+[tests/README.md](../tests/README.md).

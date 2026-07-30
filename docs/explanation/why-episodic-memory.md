@@ -74,8 +74,7 @@ answerable.
 
 ## What it costs
 
-Honesty about the trade-offs, since they are the reason this tier is usually
-skipped:
+Three trade-offs, and they are the reason this tier usually gets skipped:
 
 **Write volume.** One document per turn is a lot of documents. That is why
 `log_activity` never awaits Atlas — it builds the document and enqueues, and a
@@ -85,7 +84,9 @@ would mean logging the agent costs more writes than the agent.
 
 **Embedding cost.** Only final steps get embedded by default. A step that ends in
 a tool request has a question but no answer yet, so its vector would represent
-half a turn — the cost buys nothing.
+half a turn — the cost buys nothing. The steps that do get embedded are sent as
+one call per batch rather than one per document, so a twenty-turn batch is one
+request against the provider's rate limit.
 
 **Retention pressure.** Hence the TTL index, and hence making it tunable at
 runtime instead of at deploy time.

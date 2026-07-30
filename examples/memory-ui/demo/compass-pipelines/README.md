@@ -11,9 +11,10 @@ and it is one pipeline against one database.
 | `03-stm-to-ltm-promotion.json` | `memories` | the promotion criteria, as a query: which short-term memories have earned durability |
 | `04-tier-inventory.json` | `memories` | one row per tier with counts and mean importance — the four-tier slide, live |
 
-The documents these run over, and the four tabs to have open before the audience
-arrives, are in [`../compass-tabs.md`](../compass-tabs.md) — including the setup
-ordering that decides whether pipeline 03 has rows at all.
+Seed a user first, or these run over an empty collection. The order matters —
+seeding before the server is up leaves pipeline 03 with no rows at all, for a
+reason worth knowing: see [Optional: seed a user, and mind the
+order](../../README.md#optional-seed-a-user-and-mind-the-order).
 
 ## Running them
 

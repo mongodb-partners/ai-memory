@@ -144,10 +144,14 @@ reason an exact repeat should not pay for an embedding round-trip.
 one is the "why it works" screen: the hybrid recall is `$rankFusion` over a
 `$vectorSearch` branch and a `$search` branch, in one pipeline, in one database.
 
-`demo/compass-tabs.md` is the companion: which four documents to have open, the
-verified filter for each, and the fields worth pointing at. `demo/rehearsal-log.md`
-records the measured latency of every demo beat, so a slow run on the day is
-recognizable as a network problem rather than a surprise.
+Two filters worth having ready, both against `memories`:
+`{ user_id: "ai4-demo", tier: "stm" }` and
+`{ user_id: "ai4-demo", tier: "ltm", enrichment_status: "complete" }`. Put them
+side by side and the tier distinction is one field: both documents carry
+`expires_at`, roughly 24 hours out on the first and 90 days on the second, from
+the same TTL index and a different `retention_tier`. The long-term document also
+carries `source_stm_id` pointing back at the short-term one it was promoted from,
+so the provenance chain is on screen rather than asserted.
 
 A note on reading those scores live: `$rankFusion` returns a reciprocal-rank sum,
 so with the default `k` of 60 a **first-place** document scores about 1/61 ≈

@@ -13,11 +13,12 @@ export interface Preset {
 }
 
 /**
- * The prompts from `docs/talks/ai4-2026/demo-script.md`, verbatim.
+ * The four demo prompts, in the order the walkthrough in `examples/memory-ui/README.md`
+ * uses them.
  *
- * They are kept identical to the script on purpose: the two questions must match
- * character-for-character between the memory-OFF and memory-ON passes, or the
- * comparison is not a comparison. Retyping them live is how a wording drift
+ * They are buttons rather than something you type on purpose: the two questions
+ * must match character-for-character between the memory-OFF and memory-ON passes,
+ * or the comparison is not a comparison. Retyping them live is how a wording drift
  * sneaks in and undermines the claim in front of the audience.
  */
 export const PRESETS: Preset[] = [

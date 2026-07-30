@@ -245,6 +245,30 @@ reply latency reorders nothing: `gather` starts its coroutines in order and each
 claims its sequence number on arrival. The fake now waits for a connection before
 claiming, which is where the delay actually is, and the reordering appears.
 
+**The internal design documents and talk assets are no longer in the tree.**
+`docs/superpowers/` (four specs and a plan), `docs/talks/ai4-2026/`, and the two
+presenter files under `examples/memory-ui/demo/` were working documents that
+recorded how this was built, not how it behaves — and the specs in particular were
+never the index they looked like: of the 91 `REQ-*` ids the test suite uses, 45 were
+never defined in them.
+
+What was load-bearing moved rather than disappearing:
+
+- **`tests/README.md`** is new, and is where the `REQ-*` convention now lives: what
+  the ids are for, the range-to-area map, why unit tests pass `_env_file=None`, why
+  the integration suite skips itself, and how the mutation runs were done.
+- The `ConsolidationWorker` startup-ordering trap (seed before the server is up and
+  the promotion candidates are consumed within seconds, silently) was already
+  documented in `examples/memory-ui/README.md`, which is where it belongs — anyone
+  seeding data hits it, presentation or not.
+- The two Compass filters worth having ready, and the STM/LTM `expires_at` contrast
+  they show, are now in that README's Compass section.
+
+`docs/README.md`, the Compass pipelines README, `PresetGrid.tsx`, and the ruff
+comment in `pyproject.toml` all pointed at the removed files and now point at what
+replaced them. One reference was already dead before this change:
+`tests/integration/conftest.py` cited a `docs/deployment.md` that has never existed.
+
 ### Fixed
 
 **A concurrent audit flush could let an erased user's record survive the wipe.**
