@@ -5,7 +5,6 @@ The facade is mocked; FastAPI TestClient drives real HTTP through the routes.
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from fastapi.testclient import TestClient
 
 from agent_memory.exceptions import (

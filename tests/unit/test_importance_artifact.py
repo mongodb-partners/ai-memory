@@ -93,7 +93,9 @@ class TestRejections:
     def test_malformed_json(self, tmp_path):
         path = tmp_path / "bad.json"
         path.write_text("{not json")
-        with pytest.raises(ConfigError, match="bad.json"):
+        # Escaped: `match=` is a regex, so an unescaped `.` would also accept
+        # "badXjson" — a weaker assertion than the one this test means to make.
+        with pytest.raises(ConfigError, match=r"bad\.json"):
             load_artifact(path)
 
     def test_unknown_schema_version(self, tmp_path):

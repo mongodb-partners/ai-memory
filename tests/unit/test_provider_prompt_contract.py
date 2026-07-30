@@ -35,11 +35,10 @@ import inspect
 
 import pytest
 
-from agent_memory.providers.base import LLMProvider, render_prompt
-
 # Every concrete provider, imported directly. The optional SDKs are only needed to
 # *construct* these, not to inspect them — and construction is bypassed below.
 from agent_memory.providers.anthropic import AnthropicLLMProvider
+from agent_memory.providers.base import LLMProvider, render_prompt
 from agent_memory.providers.bedrock import BedrockLLMProvider
 from agent_memory.providers.openai import OpenAILLMProvider
 

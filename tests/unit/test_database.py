@@ -1,6 +1,5 @@
 """Tests for DatabaseManager (PyMongo Async singleton)."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

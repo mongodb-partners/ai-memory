@@ -6,6 +6,7 @@ the setting an operator reaches for when a client is choking on a response, and
 lowering it changed nothing at all.
 """
 
+from datetime import UTC
 from unittest.mock import MagicMock
 
 from agent_memory.core.response_limit import cap_results
@@ -36,7 +37,7 @@ class TestCapResults:
         survives survives intact.
         """
         docs = [_doc(i, size=100) for i in range(50)]
-        kept, meta = cap_results(docs, 1000)
+        kept, _ = cap_results(docs, 1000)
 
         assert 0 < len(kept) < 50
         assert kept == docs[: len(kept)]
@@ -82,9 +83,9 @@ class TestCapResults:
         Sanitisation should have converted BSON types already, but a datetime that
         slipped through must be measured, not raised on.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        docs = [{"_id": "m1", "ts": datetime.now(timezone.utc)}]
+        docs = [{"_id": "m1", "ts": datetime.now(UTC)}]
         kept, meta = cap_results(docs, 16_777_216)
         assert kept == docs and meta == {}
 

@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_memory.config import MemoryConfig
-from agent_memory.shells.runner import build_shells
 
 
 def _config(transport: str, **overrides) -> MemoryConfig:
@@ -51,7 +50,7 @@ class TestBuildShells:
         That made `TRANSPORT=rest` serve every route unauthenticated regardless of
         `AUTH_ENABLED`, while the MCP shell built from the same config enforced it.
         """
-        runner, facade, create = _patched
+        runner, *_ = _patched
         cfg = _config("rest")
         shells = await runner.build_shells(cfg)
         assert shells["rest"][2] is cfg, (
@@ -59,22 +58,22 @@ class TestBuildShells:
         )
 
     async def test_mcp_only(self, _patched):
-        runner, facade, create = _patched
+        runner, *_ = _patched
         shells = await runner.build_shells(_config("mcp"))
         assert set(shells) == {"mcp"}
 
     async def test_rest_only(self, _patched):
-        runner, facade, create = _patched
+        runner, *_ = _patched
         shells = await runner.build_shells(_config("rest"))
         assert set(shells) == {"rest"}
 
     async def test_legacy_transport_maps_to_mcp(self, _patched):
-        runner, facade, create = _patched
+        runner, *_ = _patched
         shells = await runner.build_shells(_config("streamable-http"))
         assert set(shells) == {"mcp"}
 
     async def test_unknown_transport_raises(self, _patched):
-        runner, facade, create = _patched
+        runner, *_ = _patched
         with pytest.raises(ValueError):
             await runner.build_shells(_config("carrier-pigeon"))
 
@@ -130,8 +129,8 @@ class TestRun:
         built.run.assert_called_once()
 
     def test_run_rest(self, monkeypatch):
-        import agent_memory.shells.runner as runner
         import agent_memory.shells.rest.app as rest
+        import agent_memory.shells.runner as runner
 
         monkeypatch.setattr(rest, "create_managed_app", lambda config: "rest-app")
         uvicorn_run = MagicMock()

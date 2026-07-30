@@ -3,7 +3,6 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from pymongo.errors import PyMongoError
 
 from agent_memory.config import MemoryConfig

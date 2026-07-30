@@ -114,8 +114,6 @@ independently, so a badly trained artifact cannot emit the value that means
 - The importance prompt lookup moved from the worker into `LLMScorer` — the local
   scorer has no prompt, so the worker could not keep the branch.
 
-### Changed
-
 **`ltm_candidate_min_chars` — what becomes a long-term memory is now a setting.**
 `store_stm` stores every message as STM and additionally queues a long-term
 candidate for human messages it judges significant. That judgement was a bare
@@ -145,6 +143,53 @@ numbers already off by one, and free to drift further. A deployment that tunes t
 threshold and retrains now gets a matching training distribution.
 
 17 tests; 14 mutations, 14 caught.
+
+**The lint gate covers the whole repository, not just `agent_memory/`.**
+CI ran `ruff check agent_memory/`. Everything else — `tests/`, `examples/`,
+`scripts/` — was never linted, and had accumulated 134 findings that no one could
+see, because nothing failed as they arrived.
+
+Two were real defects, and both were in *assertions*:
+
+- `tests/unit/test_importance_artifact.py` asserted `pytest.raises(match="bad.json")`.
+  `match=` is a regex, so the unescaped `.` also accepted `badXjson` — a weaker
+  check than the test was written to make.
+- `tests/unit/test_transport.py` imported `build_shells` at module scope while
+  every test called it as `runner.build_shells`. The import no longer described how
+  the module was used.
+
+That is the argument for linting tests at least as strictly as the library: a test
+is the thing that certifies the library is correct, so a weakened assertion is the
+one class of bug with nothing above it to catch it. The remaining 132 were
+mechanical — `datetime.timezone.utc` → `datetime.UTC`, unused imports, import
+order, unused unpacked variables — and are fixed rather than ignored.
+
+Also in this pass:
+
+- `[i for i in SEARCH_INDEXES if i["name"] == n][0]` became a `_search_index(n)`
+  helper. `[0]` on an empty list raises a bare `IndexError`, so renaming an index
+  failed three tests with nothing in the output naming the index that had gone.
+- The `docs` ruff exclusion narrowed to `docs/**/*.md`. It was written when `docs/`
+  held only prose; it now also holds a real script.
+- `ignore` is asserted to stay narrow. RUF002 is ignored deliberately (en dashes in
+  prose docstrings are not a homoglyph attack); RUF001/RUF003 are not, because they
+  cover identifiers, literals, and inline comments. The tempting response to two
+  RUF001 findings is to add two entries to `ignore`, so a test refuses that.
+- Deleted the empty `agent_memory/tools/`, a stale `dist/agent_memory-4.1.0*`
+  alongside the 4.2.0 build, a committed-by-accident `.coverage`, and four
+  `.DS_Store` files.
+- The "no secrets in the artifacts" gate in both workflows looped over `dist/*.tar.gz`
+  instead of globbing into one `tar tzf`. `tar` treats only its first argument as the
+  archive and looks for the rest *inside* it, so two tarballs in `dist/` — exactly
+  what the stale 4.1.0 files produced — made the check exit 1 with "not found in
+  archive": a security gate failing for an unrelated reason, whose tempting fix is
+  `|| true`. It now also fails on an empty `dist/` rather than passing vacuously.
+
+The gate is asserted two ways, because scope is a property of the run rather than
+of the command line: that `ci.yml` passes no narrowing path, and that ruff's own
+`--show-files` actually reaches `tests/`, `scripts/`, and `examples/` — the second
+catches an `extend-exclude` that narrows it back while the workflow still looks
+correct. 5 tests; 14 mutations, 14 caught.
 
 ### Fixed
 

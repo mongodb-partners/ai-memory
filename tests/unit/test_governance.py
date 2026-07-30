@@ -3,10 +3,8 @@
 import time
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from agent_memory.core.config import MCPConfig
-from agent_memory.services.governance import GovernanceService, _DEFAULT_PROFILES
+from agent_memory.services.governance import _DEFAULT_PROFILES, GovernanceService
 
 
 def _make_config(**overrides) -> MCPConfig:

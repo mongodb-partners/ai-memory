@@ -1,11 +1,10 @@
 """Tests for ConsolidationWorker."""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
-from bson import ObjectId
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from bson import ObjectId
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.services.consolidation import ConsolidationWorker

@@ -1,11 +1,11 @@
 """Tests for EnrichmentWorker."""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
-from bson import ObjectId
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import pytest
+from bson import ObjectId
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.base import LLMProvider
@@ -423,7 +423,7 @@ class TestAMergeIsNotCommittedWithAnUnusableVector:
         # The soft-delete is the irreversible half. If it ran while the content
         # write did not, the retry would find no target and mark the merge complete
         # with the pre-merge content — losing the target's content for good.
-        col, providers, target_id = self._merge_setup(1024)
+        col, providers, _ = self._merge_setup(1024)
         worker = EnrichmentWorker(
             col, _make_config(), providers, _make_memory_service()
         )
@@ -437,7 +437,7 @@ class TestAMergeIsNotCommittedWithAnUnusableVector:
 
     async def test_the_right_width_still_commits_the_merge(self):
         # Paired case: the guard must not turn every merge into a retry loop.
-        col, providers, target_id = self._merge_setup(1536)
+        col, providers, _ = self._merge_setup(1536)
         worker = EnrichmentWorker(
             col, _make_config(), providers, _make_memory_service()
         )
@@ -617,7 +617,7 @@ class TestScorerInjection:
             scorer=scorer,
         )
         await worker._process_standard_enrichment(memory)
-        args, kwargs = scorer.score.call_args
+        args, _ = scorer.score.call_args
         assert args[0] == memory["content"]
         assert args[1] == memory["embedding"]
 
@@ -732,7 +732,7 @@ class _ClaimableCollection:
 
     def __init__(self, docs: list[dict], now: datetime | None = None) -> None:
         self.docs = docs
-        self.now = now or datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        self.now = now or datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
         self.claim_filters: list[dict] = []
         self.updates: list[tuple[dict, dict]] = []
 
@@ -934,7 +934,7 @@ class TestAStrandedClaimIsRecoverable:
     """
 
     async def test_an_expired_lease_can_be_taken_over(self):
-        stale = datetime.now(timezone.utc) - timedelta(seconds=601)
+        stale = datetime.now(UTC) - timedelta(seconds=601)
         col = _ClaimableCollection([_claimable(enrichment_claimed_at=stale)])
         worker = EnrichmentWorker(
             col, _make_config(enrichment_lease_seconds=300),
@@ -945,7 +945,7 @@ class TestAStrandedClaimIsRecoverable:
         )
 
     async def test_a_live_lease_is_left_alone(self):
-        fresh = datetime.now(timezone.utc) - timedelta(seconds=10)
+        fresh = datetime.now(UTC) - timedelta(seconds=10)
         col = _ClaimableCollection([_claimable(enrichment_claimed_at=fresh)])
         worker = EnrichmentWorker(
             col, _make_config(enrichment_lease_seconds=300),
@@ -956,7 +956,7 @@ class TestAStrandedClaimIsRecoverable:
     async def test_the_lease_length_is_configurable(self):
         """An operator whose provider is slow needs a longer lease; the alternative
         is a second worker starting work the first has not finished."""
-        claimed_at = datetime.now(timezone.utc) - timedelta(seconds=400)
+        claimed_at = datetime.now(UTC) - timedelta(seconds=400)
         long_lease = _ClaimableCollection([_claimable(enrichment_claimed_at=claimed_at)])
         short_lease = _ClaimableCollection([_claimable(enrichment_claimed_at=claimed_at)])
 
@@ -1092,7 +1092,7 @@ class TestEvolutionsDecisionSurvivesTheFinalWrite:
 
     async def test_a_queued_merge_is_not_marked_complete(self):
         doc = _claimable()
-        worker, col = self._worker("merge_queued", _ClaimableCollection([doc]))
+        worker, _ = self._worker("merge_queued", _ClaimableCollection([doc]))
         # `evolve_memory` is mocked, so emulate the status it would have written.
         doc["enrichment_status"] = "merge_pending"
 
@@ -1106,7 +1106,7 @@ class TestEvolutionsDecisionSurvivesTheFinalWrite:
     async def test_the_importance_is_still_recorded_for_a_queued_merge(self):
         """Skipping the status must not skip the work that was actually done."""
         doc = _claimable()
-        worker, col = self._worker("merge_queued", _ClaimableCollection([doc]))
+        worker, _ = self._worker("merge_queued", _ClaimableCollection([doc]))
 
         await worker._process_standard_enrichment(dict(doc))
 
@@ -1115,7 +1115,7 @@ class TestEvolutionsDecisionSurvivesTheFinalWrite:
 
     async def test_an_ordinary_enrichment_still_completes(self):
         doc = _claimable()
-        worker, col = self._worker("created", _ClaimableCollection([doc]))
+        worker, _ = self._worker("created", _ClaimableCollection([doc]))
 
         await worker._process_standard_enrichment(dict(doc))
 
@@ -1129,7 +1129,7 @@ class TestEvolutionsDecisionSurvivesTheFinalWrite:
         col = _ClaimableCollection([doc])
         worker, _ = self._worker("reinforced", col)
         # The state evolution leaves behind.
-        doc.update(deleted_at=datetime.now(timezone.utc), is_deleted=True)
+        doc.update(deleted_at=datetime.now(UTC), is_deleted=True)
 
         await worker._process_standard_enrichment(dict(doc))
 

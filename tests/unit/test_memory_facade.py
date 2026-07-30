@@ -904,8 +904,6 @@ class TestCreateAndClose:
         import agent_memory.memory as mem
 
         # Stub DatabaseManager
-        db = {f"c{i}": MagicMock() for i in range(10)}
-
         class FakeDB:
             def __getitem__(self, k):
                 return MagicMock()

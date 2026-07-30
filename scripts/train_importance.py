@@ -88,7 +88,7 @@ import random
 import re
 import sys
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -442,7 +442,7 @@ def label_from_mongo_document(doc: dict, *, now: datetime) -> float | None:
         if created_at.tzinfo is None:
             # pymongo returns naive UTC by default. Comparing naive to aware
             # raises, and defaulting to local time would shift the age by hours.
-            created_at = created_at.replace(tzinfo=timezone.utc)
+            created_at = created_at.replace(tzinfo=UTC)
         age = now - created_at
         if age >= timedelta(days=_MATURITY_DAYS) and access_count == 0:
             return 0.15
@@ -590,7 +590,7 @@ def evaluate(
         "promote_agreement": float(
             np.mean((pred >= promote_threshold) == (true >= promote_threshold))
         ),
-        "n": int(len(true)),
+        "n": len(true),
     }
 
 
@@ -953,7 +953,7 @@ async def _load_mongo_samples(limit: int) -> list[tuple[str, float, list[float] 
     db_manager = await DatabaseManager.initialize(config)
     try:
         collection = db_manager.db[MEMORIES]
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         samples: list[tuple[str, float, list[float] | None]] = []
         skipped = 0
 
@@ -1096,7 +1096,7 @@ def collect_benchmark_pairs(
     pos = [p for p in pairs if p[1] >= 0.5]
     neg = [p for p in pairs if p[1] < 0.5]
 
-    # Downsample the majority class to `max_negative_ratio` × positives. The raw
+    # Downsample the majority class to `max_negative_ratio` * positives. The raw
     # corpus runs ~80:1 negative (2.3k positives against 180k negatives, because
     # longmemeval's `s` split is 23k uncited sessions), and at that ratio a
     # least-squares fit minimizes error by predicting "forgettable" for everything:
@@ -1462,7 +1462,7 @@ async def _run(args: argparse.Namespace) -> int:
         )
 
     logger.info(
-        "training on %d samples, %d features, label mean %.3f (range %.2f–%.2f)",
+        "training on %d samples, %d features, label mean %.3f (range %.2f-%.2f)",
         len(X), X.shape[1], float(y.mean()), float(y.min()), float(y.max()),
     )
 
@@ -1600,14 +1600,14 @@ async def _run(args: argparse.Namespace) -> int:
     from collections import Counter
 
     training = {
-        "trained_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "trained_at": datetime.now(UTC).strftime("%Y-%m-%d"),
         "source": args.source,
         "space": args.space,
         "model": winner,
         "labels": sorted(set(sources)),
         "label_counts": dict(Counter(sources)),
-        "n_samples": int(len(X)),
-        "n_test": int(len(y_test)),
+        "n_samples": len(X),
+        "n_test": len(y_test),
         "benchmark_weight": args.benchmark_weight,
         "synthetic_weight": args.synthetic_weight,
         "negative_ratio": args.negative_ratio,

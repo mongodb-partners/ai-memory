@@ -1,6 +1,6 @@
 """Tests for EpisodicService. REQ-E-100..116."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -129,16 +129,16 @@ class TestLogActivityDocument:
     def test_ts_defaults_to_now_utc(self):
         # TC-EP-SVC-006
         svc = _service()
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         svc.log_activity("u1", "t1", _turn())
         ts = svc.worker.enqueue.call_args.args[0]["ts"]
-        assert before <= ts <= datetime.now(timezone.utc)
+        assert before <= ts <= datetime.now(UTC)
         assert ts.tzinfo is not None
 
     def test_explicit_ts_wins(self):
         # TC-EP-SVC-007: deterministic demo seeding depends on this.
         svc = _service()
-        planted = datetime(2026, 8, 4, 11, tzinfo=timezone.utc)
+        planted = datetime(2026, 8, 4, 11, tzinfo=UTC)
         svc.log_activity("u1", "t1", _turn(), ts=planted)
         assert svc.worker.enqueue.call_args.args[0]["ts"] == planted
 
@@ -372,7 +372,7 @@ class TestSearch:
         # TC-EP-SVC-044: ts is not a declared vector filter field, so the
         # narrowing has to happen in the pipeline rather than a branch pre-filter.
         col = _collection()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+        cutoff = datetime.now(UTC) - timedelta(days=1)
         await _service(col).search("u1", "q", since=cutoff)
 
         stages = col.aggregate.await_args.args[0]
@@ -394,7 +394,7 @@ class TestSearch:
         ordering is now asserted as an index comparison rather than a position.
         """
         col = _collection()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+        cutoff = datetime.now(UTC) - timedelta(days=1)
         await _service(col).search("u1", "q", since=cutoff)
 
         stages = col.aggregate.await_args.args[0]
@@ -425,7 +425,7 @@ class TestSearch:
     async def test_results_are_sanitized(self):
         # TC-EP-SVC-046: BSON inside messages[] would break the JSON boundary.
         oid = ObjectId()
-        ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+        ts = datetime(2026, 8, 4, tzinfo=UTC)
         col = _collection([{"_id": oid, "ts": ts, "messages": [{"at": ts}]}])
         results = await _service(col).search("u1", "q")
 

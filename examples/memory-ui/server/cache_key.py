@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -231,7 +231,7 @@ class DemoResponseCache:
                     "query_key": normalize(query),
                     "response": response,
                     "embedding": embedding,
-                    "created_at": datetime.now(timezone.utc),
+                    "created_at": datetime.now(UTC),
                 }
             )
         except Exception:

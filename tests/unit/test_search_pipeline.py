@@ -1,6 +1,6 @@
 """Tests for the shared $rankFusion builder and BSON sanitization. REQ-E-110/112."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from bson import ObjectId
 
@@ -109,7 +109,7 @@ class TestSanitizeDoc:
     def test_top_level_bson_is_coerced(self):
         # TC-EP-SP-010
         oid = ObjectId()
-        ts = datetime(2026, 8, 4, 11, tzinfo=timezone.utc)
+        ts = datetime(2026, 8, 4, 11, tzinfo=UTC)
         doc = {"_id": oid, "ts": ts, "user_id": "u1"}
         _sanitize_doc(doc)
         assert doc == {"_id": str(oid), "ts": ts.isoformat(), "user_id": "u1"}
@@ -123,7 +123,7 @@ class TestSanitizeDoc:
 
     def test_lists_of_dicts_are_coerced(self):
         # TC-EP-SP-012: episodic docs carry messages[]/todos[]/files_touched[].
-        ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+        ts = datetime(2026, 8, 4, tzinfo=UTC)
         doc = {"messages": [{"type": "ai", "at": ts}, {"type": "human", "at": ts}]}
         _sanitize_doc(doc)
         assert [m["at"] for m in doc["messages"]] == [ts.isoformat()] * 2

@@ -20,7 +20,7 @@ REQ-E-142 (promotion re-stamps expiry to the destination tier).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -44,7 +44,7 @@ def _cursor(docs: list[dict]):
 
 def _candidate(**overrides) -> dict:
     """An STM document that satisfies every promotion predicate."""
-    born = datetime.now(timezone.utc) - timedelta(days=9)
+    born = datetime.now(UTC) - timedelta(days=9)
     doc = {
         "_id": "stm-1",
         "user_id": "u1",

@@ -1,9 +1,7 @@
 """Tests for DecisionService."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
-
-import pytest
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.services.decision import DecisionService
@@ -61,7 +59,7 @@ class TestDecisionStore:
 
         update_doc = col.update_one.call_args[0][1]
         expires_at = update_doc["$set"]["expires_at"]
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # TTL should be roughly 7 days from now
         delta = expires_at - now
         assert 6 <= delta.days <= 7
@@ -77,7 +75,7 @@ class TestDecisionStore:
 
         update_doc = col.update_one.call_args[0][1]
         expires_at = update_doc["$set"]["expires_at"]
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         delta = expires_at - now
         assert 29 <= delta.days <= 30
 
@@ -90,7 +88,7 @@ class TestDecisionRecall:
         config = _make_config()
         svc = DecisionService(col, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         col.find_one = AsyncMock(return_value={
             "key": "editor",
             "value": "vim",
@@ -153,7 +151,7 @@ class TestDecisionSeedDefaults:
         config = _make_config()
         svc = DecisionService(col, config)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         col.find_one = AsyncMock(return_value={
             "key": "system:governance_profile",
             "value": "admin",
@@ -178,7 +176,7 @@ class TestDecisionSeedDefaults:
             call_count += 1
             if call_count == 1:
                 # First recall returns existing
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 return {
                     "key": "exists",
                     "value": "val",

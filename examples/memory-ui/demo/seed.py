@@ -47,7 +47,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -201,7 +201,7 @@ async def seed(user_id: str, *, keep: bool, promote: bool) -> int:
         if not keep:
             await _wipe(memory, db, user_id)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         for convo in CONVERSATIONS:
             ts = now - timedelta(days=convo["days_ago"])

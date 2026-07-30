@@ -23,7 +23,7 @@ Requirement: REQ-E-145 (a rate limit holds under concurrency).
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 from pymongo import ReturnDocument
@@ -242,7 +242,7 @@ class TestWindowBoundaries:
         config = _make_config(rate_limit_window_seconds=3600)
         limiter = RateLimiter(MagicMock(), config)
 
-        base = datetime(2026, 8, 4, 11, 0, 30, tzinfo=timezone.utc)
+        base = datetime(2026, 8, 4, 11, 0, 30, tzinfo=UTC)
         assert limiter._window_start(base) == limiter._window_start(
             base + timedelta(minutes=20)
         )
@@ -251,7 +251,7 @@ class TestWindowBoundaries:
         config = _make_config(rate_limit_window_seconds=3600)
         limiter = RateLimiter(MagicMock(), config)
 
-        base = datetime(2026, 8, 4, 11, 0, 30, tzinfo=timezone.utc)
+        base = datetime(2026, 8, 4, 11, 0, 30, tzinfo=UTC)
         assert limiter._window_start(base) != limiter._window_start(
             base + timedelta(hours=2)
         )
@@ -267,9 +267,9 @@ class TestWindowBoundaries:
         limiter = RateLimiter(MagicMock(), config)
 
         start = limiter._window_start(
-            datetime(2026, 8, 4, 11, 43, 17, tzinfo=timezone.utc)
+            datetime(2026, 8, 4, 11, 43, 17, tzinfo=UTC)
         )
-        assert start == datetime(2026, 8, 4, 11, 0, 0, tzinfo=timezone.utc)
+        assert start == datetime(2026, 8, 4, 11, 0, 0, tzinfo=UTC)
         assert int(start.timestamp()) % 3600 == 0
 
     def test_a_zero_window_does_not_divide_by_zero(self):
@@ -277,7 +277,7 @@ class TestWindowBoundaries:
         limiter = RateLimiter(MagicMock(), config)
         # Clamped to 1s rather than raising: a misconfigured window should give a
         # very short one, not crash every request through the limiter.
-        assert limiter._window_start(datetime.now(timezone.utc)) is not None
+        assert limiter._window_start(datetime.now(UTC)) is not None
 
 
 class TestRateLimiterBoundary:

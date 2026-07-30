@@ -143,7 +143,13 @@ testpaths = ["tests"]
 # 28 findings on 0.16 without a line of source changing.
 [tool.ruff]
 target-version = "py311"
-extend-exclude = [".ruff_cache", "docs"]
+# `docs` was excluded wholesale, which was right when it held only prose and is
+# no longer: `docs/talks/ai4-2026/build_deck.py` is a real script. Excluding the
+# prose by extension instead means a script added under `docs/` gets linted
+# rather than silently skipped. (That one file is still skipped in practice —
+# `talks/` is gitignored and ruff respects that — but it passes when linted by
+# explicit path, and a script in a non-ignored docs subdirectory is now covered.)
+extend-exclude = [".ruff_cache", "docs/**/*.md"]
 
 [tool.ruff.lint]
 # Beyond ruff's default `E4,E7,E9,F`:

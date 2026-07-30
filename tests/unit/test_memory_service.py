@@ -1,11 +1,10 @@
 """Tests for MemoryService (store_stm, recall, delete, evolve)."""
 
-import math
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
-from bson import ObjectId
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from bson import ObjectId
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.providers.manager import ResolvedEmbedding
@@ -70,7 +69,7 @@ class TestMemoryServiceStoreStm:
         # Comfortably over `ltm_candidate_min_chars`; the boundary itself is
         # pinned in test_ltm_candidate_threshold.py.
         messages = [{"content": "A" * 50, "message_type": "human"}]
-        result = await service.store_stm("user1", "conv1", messages)
+        await service.store_stm("user1", "conv1", messages)
 
         # Two insert_many calls: one for STM, one for LTM
         assert col.insert_many.call_count == 2
@@ -249,7 +248,7 @@ class TestMemoryServiceRecall:
                 "content": "test memory",
                 "importance": 0.7,
                 "access_count": 2,
-                "created_at": datetime.now(timezone.utc) - timedelta(days=1),
+                "created_at": datetime.now(UTC) - timedelta(days=1),
                 "tier": "ltm",
                 "vs_score": 0.9,
             }
@@ -291,7 +290,7 @@ class TestMemoryServiceRecall:
                 "content": "test memory",
                 "importance": 0.7,
                 "access_count": 2,
-                "created_at": datetime.now(timezone.utc),
+                "created_at": datetime.now(UTC),
                 "tier": "ltm",
                 "vs_score": 0.9,
             }
@@ -314,7 +313,7 @@ class TestRecallCalibratedRanking:
         providers = _make_providers()
         service = MemoryService(col, config, providers)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Doc A: old (30 days), low importance, high vs_score
         doc_a = {
             "_id": ObjectId(),
@@ -361,7 +360,7 @@ class TestRecallCalibratedRanking:
         providers = _make_providers()
         service = MemoryService(col, config, providers)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Doc A: high vs_score, old, unimportant
         doc_a = {
             "_id": ObjectId(),
@@ -402,7 +401,7 @@ class TestRecallCalibratedRanking:
         providers = _make_providers()
         service = MemoryService(col, config, providers)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = {
             "_id": ObjectId(),
             "user_id": "user1",
@@ -433,7 +432,7 @@ class TestRecallCalibratedRanking:
         providers = _make_providers()
         service = MemoryService(col, config, providers)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = {
             "_id": ObjectId(),
             "user_id": "user1",
@@ -536,7 +535,7 @@ class TestSanitizeDoc:
 
     def test_converts_datetime(self):
         from agent_memory.services.memory import _sanitize_doc
-        dt = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
         doc = {"ts": dt}
         _sanitize_doc(doc)
         assert doc["ts"] == dt.isoformat()
@@ -723,8 +722,8 @@ class TestDeleteTimeRange:
 
         col.update_many = AsyncMock(return_value=MagicMock(modified_count=2))
 
-        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2025, 6, 1, tzinfo=timezone.utc)
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        end = datetime(2025, 6, 1, tzinfo=UTC)
         result = await service.delete(
             "user1", time_range={"start": start, "end": end}, confirm=True,
         )
@@ -775,7 +774,6 @@ class TestCalibratedRankNaiveDatetime:
         providers = _make_providers()
         service = MemoryService(col, config, providers)
 
-        now = datetime.now(timezone.utc)
         # Naive datetime (no tzinfo)
         doc = {
             "_id": ObjectId(),

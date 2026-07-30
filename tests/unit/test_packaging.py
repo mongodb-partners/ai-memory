@@ -2,6 +2,7 @@
 
 import pathlib
 import tomllib
+from typing import ClassVar
 
 import pytest
 
@@ -99,7 +100,7 @@ class TestImportanceArtifactsShip:
 
     # Only `lexical` ships: it is the one artifact that is trained, and
     # `_BUNDLED_ARTIFACTS` is empty so every deployment selects it.
-    EXPECTED = {"lexical.json"}
+    EXPECTED: ClassVar[set[str]] = {"lexical.json"}
 
     def test_artifacts_exist_in_the_source_tree(self):
         found = {
@@ -154,7 +155,7 @@ class TestLibraryStaysDependencyFree:
 
 
 class TestLintGateIsRunnable:
-    """CI's lint step is `uv run ruff check agent_memory/`.
+    """CI's lint step is `uv run --no-sync ruff check`, whole repo.
 
     Undeclared, that command resolved to whatever `ruff` happened to be on PATH:
     a developer's Homebrew build locally, and *nothing* on a clean runner, where
@@ -204,7 +205,33 @@ class TestLintGateIsRunnable:
             "requires-python, and the inference has changed between releases"
         )
 
-    def test_the_package_actually_passes_the_gate(self):
+    def test_ignores_stay_narrow(self):
+        """`ignore` is the cheapest way to make a finding disappear.
+
+        RUF002 is ignored deliberately: en dashes in *prose docstrings* are not a
+        homoglyph attack, and "fixing" them would mean degrading the punctuation of
+        every docstring. Its siblings RUF001 and RUF003 cover identifiers, string
+        literals, and inline comments, where an ambiguous character genuinely can
+        hide something — the config comment says so, and this asserts it, because
+        the tempting response to two RUF001/RUF003 findings is to widen the ignore
+        by two entries rather than fix them.
+        """
+        ignored = set(self.data["tool"]["ruff"]["lint"].get("ignore", []))
+        for rule in ("RUF001", "RUF003"):
+            assert rule not in ignored, (
+                f"{rule} was added to `ignore`. Unlike RUF002 it applies to "
+                "identifiers, literals, and inline comments, where an ambiguous "
+                "unicode character is worth flagging — fix the finding instead"
+            )
+        per_file = self.data["tool"]["ruff"]["lint"].get("per-file-ignores", {})
+        for pattern, rules in per_file.items():
+            assert not pattern.startswith("tests"), (
+                f"per-file-ignores exempts {pattern!r} from {rules}. The tests are "
+                "what certify the library; exempting them re-opens the gap the "
+                "whole-repo gate was widened to close"
+            )
+
+    def test_the_repo_actually_passes_the_gate(self):
         """The end-to-end assertion: run the gate.
 
         Deliberately the *project's* ruff (`.venv/bin/ruff`) rather than whatever
@@ -214,6 +241,10 @@ class TestLintGateIsRunnable:
         slower at runtime. Asserting against an arbitrary PATH ruff would make this
         test demand changes the pinned linter does not want, which is the drift the
         pin exists to prevent.
+
+        No path argument, matching CI. This used to pass `agent_memory/`, and the
+        two together meant the 134 findings in tests/ and scripts/ were invisible
+        to both the gate and the test asserting the gate passes.
         """
         import subprocess
         import sys
@@ -225,12 +256,76 @@ class TestLintGateIsRunnable:
                 "run `uv sync --all-extras`"
             )
         result = subprocess.run(
-            [str(ruff), "check", "agent_memory/"],
+            [str(ruff), "check"],
             cwd=ROOT, capture_output=True, text=True,
         )
         assert result.returncode == 0, (
-            f"`ruff check agent_memory/` failed:\n{result.stdout}{result.stderr}"
+            f"`ruff check` failed:\n{result.stdout}{result.stderr}"
         )
+
+    def test_the_gate_covers_the_tests_too(self):
+        """CI must lint the whole repo, not just the library.
+
+        The gate ran `ruff check agent_memory/` for long enough that tests/,
+        examples/, and scripts/ accumulated 134 findings, two of which were real
+        defects in *assertions*: a `pytest.raises(match="bad.json")` whose
+        unescaped `.` also matched "badXjson", and a stale import in
+        test_transport.py. A test is what certifies the library, so an unlinted
+        test suite is the one place a weakened check has nothing above it.
+
+        Asserted against the workflow text because that is the thing CI runs; a
+        passing local `ruff check` says nothing about the argument in the YAML.
+        """
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        lint_lines = [
+            line.strip() for line in ci.splitlines()
+            if "ruff check" in line and not line.strip().startswith("#")
+        ]
+        assert lint_lines, "no `ruff check` invocation found in ci.yml"
+        for line in lint_lines:
+            # Everything after `ruff check` must be flags, not a path narrowing
+            # the scope back to one directory.
+            args = line.split("ruff check", 1)[1].split()
+            paths = [a for a in args if not a.startswith("-")]
+            assert not paths, (
+                f"ci.yml lints only {paths} — the gate must cover the whole repo, "
+                "or unlinted directories drift the way tests/ already did once"
+            )
+
+    def test_the_gate_actually_reaches_the_test_files(self):
+        """Scope is a property of the run, not of the command line.
+
+        The check above closes one door: a path argument in the workflow. This one
+        closes the other — `extend-exclude = [..., "tests"]` in pyproject narrows
+        the gate to exactly the same thing while `ci.yml` still reads
+        `ruff check` with no arguments. Asked `--show-files` instead of trusting
+        either the YAML or the config, because that is ruff answering what it will
+        actually look at.
+        """
+        import subprocess
+        import sys
+
+        ruff = pathlib.Path(sys.executable).parent / "ruff"
+        if not ruff.exists():
+            pytest.skip("ruff not installed in this interpreter's environment")
+        result = subprocess.run(
+            [str(ruff), "check", "--show-files"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        walked = {
+            pathlib.Path(line).resolve() for line in result.stdout.splitlines() if line
+        }
+        # This very file, plus one from each directory that was previously dark.
+        for rel in (
+            "tests/unit/test_packaging.py",
+            "tests/unit/test_transport.py",
+            "scripts/train_importance.py",
+            "examples/memory-ui/server/cache_key.py",
+        ):
+            assert (ROOT / rel).resolve() in walked, (
+                f"ruff does not lint {rel} — the gate's scope has been narrowed by "
+                "config even though ci.yml still passes no path"
+            )
 
 
 class TestDockerfile:

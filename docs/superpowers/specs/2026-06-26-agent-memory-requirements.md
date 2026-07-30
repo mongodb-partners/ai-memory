@@ -161,6 +161,21 @@ Closest analog: tools/memory_tools.py orchestration → absorbed by AsyncMemory.
   version `4.0.0` and the package id `agent_memory`.
 - **REQ-E-082:** THE SYSTEM `agent_memory.__init__` SHALL export `Memory`,
   `AsyncMemory`, `MemoryConfig`, and the exception classes.
+- **REQ-E-082a:** THE CI lint gate SHALL cover every tracked Python file, not
+  `agent_memory/` alone, and SHALL be asserted both as "the workflow passes no
+  narrowing path" and as "ruff's `--show-files` reaches `tests/`, `scripts/`, and
+  `examples/`" — the second because an `extend-exclude` narrows the scope while the
+  workflow still reads correctly. The tests SHALL NOT be exempted via `ignore` or
+  `per-file-ignores`: a test is what certifies the library, so a weakened assertion
+  is the one defect with nothing above it. `RUF002` is ignored (en dashes in prose
+  docstrings); `RUF001`/`RUF003` SHALL NOT be, because they cover identifiers,
+  literals, and inline comments.
+- **REQ-E-082b:** THE artifact secret scan SHALL iterate over `dist/*.tar.gz`
+  rather than expanding the glob into one `tar tzf` invocation, and SHALL fail WHEN
+  `dist/` contains no sdist. `tar` reads only its first argument as the archive and
+  searches for the remainder inside it, so two artifacts present at once make the
+  scan exit non-zero for an unrelated reason — a security gate whose failure invites
+  being silenced rather than fixed.
 
 ### Episodic memory — the agent activity log (`agent_memory/services/episodic.py`)
 

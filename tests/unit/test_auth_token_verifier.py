@@ -5,11 +5,9 @@ import time
 from unittest.mock import patch
 
 import jwt
-import pytest
 
 from agent_memory.auth.api_keys import APIKeyManager
 from agent_memory.auth.token_verifier import MemoryMCPTokenVerifier
-
 
 _TEST_SECRET = "test-secret-for-unit-tests"
 

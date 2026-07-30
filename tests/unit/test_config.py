@@ -1,7 +1,9 @@
 """Tests for MCPConfig (Pydantic Settings)."""
 
 import os
+
 import pytest
+
 from agent_memory.core.config import MCPConfig
 
 

@@ -15,7 +15,8 @@ silently deletes memories:
 
 import importlib.util
 import pathlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any, ClassVar
 
 import pytest
 
@@ -42,7 +43,7 @@ class TestBenchmarkLabelDerivation:
     no question draws on is negative. Everything else is *unlabeled* and must be
     dropped, not defaulted."""
 
-    SESSIONS = [
+    SESSIONS: ClassVar[list[dict[str, Any]]] = [
         {
             "session_id": "s1",
             "turns": [
@@ -55,7 +56,9 @@ class TestBenchmarkLabelDerivation:
             "turns": [{"turn_id": "t3", "content": "Anything at all."}],
         },
     ]
-    QUESTIONS = [{"evidence_turn_ids": ["t1"], "evidence_session_ids": ["s1"]}]
+    QUESTIONS: ClassVar[list[dict[str, Any]]] = [
+        {"evidence_turn_ids": ["t1"], "evidence_session_ids": ["s1"]}
+    ]
 
     def test_cited_turn_is_positive(self, trainer):
         labels = dict(trainer.derive_benchmark_labels(self.SESSIONS, self.QUESTIONS))
@@ -82,7 +85,7 @@ class TestBenchmarkLabelDerivation:
 class TestMongoLabelDerivation:
     """REQ-E-170. Labels from signals the documents already carry."""
 
-    NOW = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    NOW = datetime(2026, 7, 30, tzinfo=UTC)
 
     def _doc(self, **kw):
         doc = {

@@ -9,8 +9,6 @@ servers.
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from agent_memory.config import MemoryConfig
 
 

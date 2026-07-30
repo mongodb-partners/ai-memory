@@ -1,12 +1,9 @@
 """Tests for PromptLibrary."""
 
-import time
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from agent_memory.core.config import MCPConfig
-from agent_memory.services.prompt_library import PromptLibrary, _HARDCODED_PROMPTS
+from agent_memory.services.prompt_library import _HARDCODED_PROMPTS, PromptLibrary
 
 
 def _make_config(**overrides) -> MCPConfig:

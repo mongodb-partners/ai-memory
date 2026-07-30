@@ -362,7 +362,7 @@ class TestMergeReEmbeds:
     """Rewriting `content` without re-embedding makes the document unfindable."""
 
     async def test_the_merged_content_is_re_embedded(self):
-        worker, col, providers = _merge_worker(
+        worker, _, providers = _merge_worker(
             {"_id": "target", "user_id": "u1", "content": "existing",
              "importance": 0.6}
         )

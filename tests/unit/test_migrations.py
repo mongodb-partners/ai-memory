@@ -1,11 +1,8 @@
 """Tests for migrations.py (ensure_indexes, ensure_search_indexes)."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from agent_memory.core.collections import STANDARD_INDEXES, SEARCH_INDEXES
+from agent_memory.core.collections import SEARCH_INDEXES, STANDARD_INDEXES
 
 
 class TestEnsureIndexes:
@@ -52,8 +49,9 @@ class TestEnsureIndexesConflict:
     """ensure_indexes handles OperationFailure code 86 (index conflict)."""
 
     async def test_conflict_drops_and_recreates(self):
-        from agent_memory.core.migrations import ensure_indexes
         from pymongo.errors import OperationFailure
+
+        from agent_memory.core.migrations import ensure_indexes
 
         mock_db = MagicMock()
         col = MagicMock()
@@ -69,8 +67,9 @@ class TestEnsureIndexesConflict:
         col.drop_index.assert_called_once()
 
     async def test_conflict_recreate_failure_logs(self):
-        from agent_memory.core.migrations import ensure_indexes
         from pymongo.errors import OperationFailure
+
+        from agent_memory.core.migrations import ensure_indexes
 
         mock_db = MagicMock()
         col = MagicMock()
@@ -84,8 +83,9 @@ class TestEnsureIndexesConflict:
         await ensure_indexes(mock_db)
 
     async def test_non_conflict_operation_failure_logs(self):
-        from agent_memory.core.migrations import ensure_indexes
         from pymongo.errors import OperationFailure
+
+        from agent_memory.core.migrations import ensure_indexes
 
         mock_db = MagicMock()
         col = MagicMock()
@@ -165,8 +165,9 @@ class TestEnsureSearchIndexes:
 
     async def test_handles_non_atlas_gracefully(self):
         """REQ-DB-004: Non-Atlas deployment logs warning, doesn't raise."""
-        from agent_memory.core.migrations import ensure_search_indexes
         from pymongo.errors import OperationFailure
+
+        from agent_memory.core.migrations import ensure_search_indexes
 
         mock_db = MagicMock()
         col = MagicMock()
@@ -180,8 +181,9 @@ class TestEnsureSearchIndexes:
 
     async def test_non_atlas_skips_remaining_indexes(self):
         """After first index fails with OperationFailure, remaining indexes are skipped via break."""
-        from agent_memory.core.migrations import ensure_search_indexes
         from pymongo.errors import OperationFailure
+
+        from agent_memory.core.migrations import ensure_search_indexes
 
         mock_db = MagicMock()
         cols = {}
@@ -277,8 +279,9 @@ class TestEnsureSearchIndexes:
 
     async def test_create_search_index_operation_failure(self):
         """OperationFailure on create_search_index is handled."""
-        from agent_memory.core.migrations import ensure_search_indexes
         from pymongo.errors import OperationFailure
+
+        from agent_memory.core.migrations import ensure_search_indexes
 
         mock_db = MagicMock()
         col = MagicMock()
@@ -531,8 +534,9 @@ class TestExistingIndexesAreReconciled:
         added. Dropping on failure would convert a partial degradation into a
         total outage, on startup, unattended.
         """
-        from agent_memory.core.migrations import ensure_search_indexes
         from pymongo.errors import OperationFailure
+
+        from agent_memory.core.migrations import ensure_search_indexes
 
         shipped = self._shipped("memories_fts_index")
         col = self._collection({"queryable": True, "latestDefinition": {
@@ -564,8 +568,8 @@ class TestExistingIndexesAreReconciled:
 
     async def test_reconciliation_continues_to_the_next_index(self):
         """One index needing an update must not stop the others being checked."""
-        from agent_memory.core.migrations import ensure_search_indexes
         from agent_memory.core.collections import get_search_indexes
+        from agent_memory.core.migrations import ensure_search_indexes
 
         shipped = get_search_indexes(1024)
         col = self._collection({"queryable": True, "latestDefinition": {
@@ -626,8 +630,8 @@ class TestADimensionChangeWillNotStrandStoredVectors:
         return col
 
     async def _reconcile(self, col, dims=1024, allow=False):
-        from agent_memory.core.migrations import ensure_search_indexes
         from agent_memory.core.collections import get_search_indexes
+        from agent_memory.core.migrations import ensure_search_indexes
 
         shipped = [i for i in get_search_indexes(dims)
                    if i["name"] == "memories_vector_index"]

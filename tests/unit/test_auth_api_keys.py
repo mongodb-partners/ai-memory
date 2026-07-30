@@ -3,8 +3,6 @@
 import os
 from unittest.mock import patch
 
-import pytest
-
 from agent_memory.auth.api_keys import APIKeyManager
 
 

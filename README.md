@@ -593,8 +593,13 @@ hand are preserved, and nothing is ever removed.
 ```bash
 uv sync --all-extras
 uv run pytest -q          # unit suite, fully mocked — no Atlas needed
-uv run ruff check agent_memory/
+uv run ruff check         # whole repo, matching CI — no path argument
 ```
+
+The lint gate takes no path. It used to be `ruff check agent_memory/`, which left
+the tests unlinted for long enough to accumulate 134 findings — two of them real
+defects in assertions, where a weakened check has nothing above it to catch it.
+Adding a path back is a test failure, not just a style choice.
 
 The integration tier gates on server reachability rather than an env flag: start
 the server against a real cluster, then run `uv run pytest tests/integration -q`.

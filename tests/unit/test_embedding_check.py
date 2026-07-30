@@ -302,7 +302,7 @@ class TestStoreRefusesRatherThanWritingPartially:
         # A provider stack that publishes no dimension must keep working — the
         # width is unknown, not wrong.
         providers = _providers(dimension=None)
-        service, collection = self._service(providers)
+        service, _ = self._service(providers)
         result = await service.store_stm(
             "u", "c", [{"content": "hello", "message_type": "human"}]
         )

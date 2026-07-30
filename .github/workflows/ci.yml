@@ -37,9 +37,19 @@ jobs:
       # whatever ruff was on PATH — a developer's Homebrew build locally, and
       # nothing at all here, where `uv run ruff` exits 2 with "Failed to spawn".
       # `--no-sync` keeps that honest: it fails rather than quietly installing.
-      # Scope is `agent_memory/` only; tests/ and scripts/ are not yet clean.
+      #
+      # No path argument, so ruff walks the whole repo. It was `agent_memory/`
+      # only, which left the 134 findings in tests/, examples/, and scripts/
+      # permanently invisible — and the gap grew, because nothing failed as it
+      # did. Two of those findings were real: a `match="bad.json"` whose
+      # unescaped `.` also accepted "badXjson", and an import of `build_shells`
+      # in test_transport.py that no longer matched how the tests call it.
+      #
+      # Linting the tests matters more than linting the library, not less: a
+      # test is the thing that says the library is correct, and a weakened
+      # assertion is the one bug with no test behind it.
       - name: Lint
-        run: uv run --no-sync ruff check agent_memory/
+        run: uv run --no-sync ruff check
 
       # The unit suite is fully mocked — no Atlas, no cloud credentials. The
       # integration tier gates on server reachability and is intentionally not
@@ -61,12 +71,25 @@ jobs:
       # A live .env exists in developer working trees, and a PyPI release cannot
       # be edited after upload. The sdist uses an allow-list, so this is the
       # second gate rather than the only one.
+      #
+      # Loops rather than `tar tzf dist/*.tar.gz`: `tar` reads only its first
+      # argument as the archive and then looks for the rest *inside* it, so two
+      # tarballs in dist/ made this exit 1 with "not found in archive" — a check
+      # that fails for the wrong reason, and whose fix is tempting to spell `|| true`.
       - name: Assert no secrets in the artifacts
         run: |
-          if tar tzf dist/*.tar.gz | grep -iE '\.env|\.coverage'; then
-            echo "::error::Credential-shaped file found in the sdist."
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::No sdist in dist/ — the check would pass vacuously."
             exit 1
           fi
+          for archive in "${archives[@]}"; do
+            if tar tzf "$archive" | grep -iE '\.env|\.coverage'; then
+              echo "::error::Credential-shaped file found in $archive."
+              exit 1
+            fi
+          done
           echo "sdist is clean."
 
       - name: Assert the package imports from the built wheel

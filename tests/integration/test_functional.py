@@ -8,13 +8,12 @@ Requires: docker container running on localhost:8000
 Run with: .venv/bin/python tests/integration/test_functional.py
 """
 
-import json
 import http.client
+import json
 import os
 import sys
-import uuid
 import time
-import textwrap
+import uuid
 
 # ─── Configuration ────────────────────────────────────────────────
 
@@ -672,7 +671,7 @@ def test_decision_tools():
         "key": "nonexistent_key",
     })
     assert result.get("found") is False, f"Expected found=False: {result}"
-    print(f"  Correctly returned not found")
+    print("  Correctly returned not found")
 
     return True
 
@@ -686,7 +685,7 @@ def run_all():
     failed = 0
     total_steps = 11
 
-    _banner(f"COMPREHENSIVE FUNCTIONAL TEST SUITE")
+    _banner("COMPREHENSIVE FUNCTIONAL TEST SUITE")
     print(f"  Target : http://{MCP_HOST}:{MCP_PORT}{MCP_ENDPOINT}")
     print(f"  User ID: {USER_ID}")
 

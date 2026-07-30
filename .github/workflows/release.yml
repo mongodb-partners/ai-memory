@@ -53,13 +53,22 @@ jobs:
           echo "Tag and package agree on $pkg."
 
       # Immutability again: a credential published by accident cannot be
-      # unpublished, only rotated.
+      # unpublished, only rotated. Loops rather than globbing into `tar`, and
+      # fails on an empty dist/ — see the same step in ci.yml.
       - name: Assert no secrets in the artifacts
         run: |
-          if tar tzf dist/*.tar.gz | grep -iE '\.env|\.coverage'; then
-            echo "::error::Credential-shaped file found in the sdist."
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::No sdist in dist/ — the check would pass vacuously."
             exit 1
           fi
+          for archive in "${archives[@]}"; do
+            if tar tzf "$archive" | grep -iE '\.env|\.coverage'; then
+              echo "::error::Credential-shaped file found in $archive."
+              exit 1
+            fi
+          done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:

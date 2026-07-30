@@ -1,10 +1,8 @@
 """Tests for CacheService."""
 
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
-from bson import ObjectId
 
-import pytest
+from bson import ObjectId
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.services.cache import CacheService

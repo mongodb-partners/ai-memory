@@ -1,9 +1,7 @@
 """Tests for AuditFlushWorker."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.services.audit_flush_worker import AuditFlushWorker

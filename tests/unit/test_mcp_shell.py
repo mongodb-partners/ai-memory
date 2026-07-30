@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_memory.exceptions import AccessError, RateLimitError
-from agent_memory.shells.mcp.tools import register_all_tools
 from agent_memory.shells.mcp.auto_capture import AutoCaptureMiddleware
+from agent_memory.shells.mcp.tools import register_all_tools
 
 
 def _capture_tool(mcp_mock):
@@ -318,8 +318,8 @@ class TestLifespan:
     """TC-MCP-LIFE-001: lifespan creates and closes its own AsyncMemory."""
 
     async def test_lifespan_creates_and_closes_facade(self, monkeypatch):
-        from agent_memory.config import MemoryConfig
         import agent_memory.shells.mcp.server as server
+        from agent_memory.config import MemoryConfig
 
         instance = MagicMock()
         instance.close = AsyncMock()
@@ -337,8 +337,8 @@ class TestLifespan:
         instance.close.assert_awaited_once()
 
     async def test_lifespan_reuses_shared_app_without_closing(self, monkeypatch):
-        from agent_memory.config import MemoryConfig
         import agent_memory.shells.mcp.server as server
+        from agent_memory.config import MemoryConfig
 
         shared = MagicMock()
         shared.close = AsyncMock()

@@ -89,7 +89,7 @@ class TestSyncWrapper:
             m.close()
 
     def test_recall_returns_result(self):
-        m, core = _memory_with_fake()
+        m, _ = _memory_with_fake()
         try:
             out = m.recall("u1", "q")
             assert out["count"] == 1
@@ -98,7 +98,7 @@ class TestSyncWrapper:
 
     def test_works_inside_running_event_loop(self):
         # TC-SYNC-002 (notebook scenario, premortem #4, boundary #1)
-        m, core = _memory_with_fake()
+        m, _ = _memory_with_fake()
 
         async def notebook_cell():
             # Calling the *sync* API from within a running loop must not raise
@@ -126,7 +126,7 @@ class TestSyncWrapper:
 
     def test_all_blocking_twins_present(self):
         # every async facade method has a sync twin
-        m, core = _memory_with_fake()
+        m, _ = _memory_with_fake()
         try:
             for name in ("add", "recall", "search", "delete", "check_cache",
                          "store_cache", "invalidate_cache", "remember_decision",
@@ -175,7 +175,7 @@ class TestSyncWrapper:
         Routing it through the background loop would make an /health probe wait
         on whatever else that loop is doing — the one call that must never block.
         """
-        m, core = _memory_with_fake()
+        m, _ = _memory_with_fake()
         try:
             m._submit = lambda coro: pytest.fail("activity_stats went through _submit")
             assert m.activity_stats() == {"enqueued": 1}

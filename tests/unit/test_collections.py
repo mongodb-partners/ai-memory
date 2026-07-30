@@ -3,12 +3,27 @@
 import pytest
 
 from agent_memory.core.collections import (
-    MEMORIES,
-    SEMANTIC_CACHE,
     AUDIT_LOG,
-    STANDARD_INDEXES,
+    MEMORIES,
     SEARCH_INDEXES,
+    SEMANTIC_CACHE,
+    STANDARD_INDEXES,
 )
+
+
+def _search_index(name: str) -> dict:
+    """The one search index called ``name``, or a failure that says which is missing.
+
+    This was `[i for i in SEARCH_INDEXES if i["name"] == name][0]`, which raises a
+    bare `IndexError` on an empty list — so renaming an index failed several tests
+    at once with nothing in the output naming the index that had gone.
+    """
+    matches = [i for i in SEARCH_INDEXES if i["name"] == name]
+    assert matches, (
+        f"no search index named {name!r}; SEARCH_INDEXES has "
+        f"{sorted(i['name'] for i in SEARCH_INDEXES)}"
+    )
+    return matches[0]
 
 
 class TestCollectionNames:
@@ -97,6 +112,31 @@ class TestStandardIndexes:
         assert len(idx) == 1
 
 
+class TestTheSearchIndexHelper:
+    """The helper's whole purpose is its failure message, so test that.
+
+    Without this, deleting the `assert matches` line leaves every test still
+    passing — the diagnostic would silently revert to the bare `IndexError` it
+    exists to replace, and nothing would say so.
+    """
+
+    def test_a_known_index_is_returned(self):
+        assert _search_index("memories_fts_index")["name"] == "memories_fts_index"
+
+    def test_a_missing_index_names_itself_and_the_alternatives(self):
+        with pytest.raises(AssertionError) as exc:
+            _search_index("memories_no_such_index")
+        message = str(exc.value)
+        assert "memories_no_such_index" in message, (
+            "the failure must name the index that is missing, which is the only "
+            "reason this helper exists rather than a bare [0]"
+        )
+        assert "memories_fts_index" in message, (
+            "the failure must list what *is* defined, so a rename shows as a "
+            "rename rather than as an absence"
+        )
+
+
 class TestSearchIndexes:
     """REQ-DB-002: Atlas Search index definitions."""
 
@@ -137,7 +177,7 @@ class TestSearchIndexes:
                 assert vector_fields[0]["path"] == "embedding"
 
     def test_memories_vector_has_filter_fields(self):
-        idx = [i for i in SEARCH_INDEXES if i["name"] == "memories_vector_index"][0]
+        idx = _search_index("memories_vector_index")
         fields = idx["definition"]["fields"]
         filter_paths = {f["path"] for f in fields if f["type"] == "filter"}
         assert "user_id" in filter_paths
@@ -150,13 +190,13 @@ class TestSearchIndexes:
         assert "tags" in filter_paths
 
     def test_fts_index_has_content_and_summary(self):
-        idx = [i for i in SEARCH_INDEXES if i["name"] == "memories_fts_index"][0]
+        idx = _search_index("memories_fts_index")
         field_names = set(idx["definition"]["mappings"]["fields"].keys())
         assert "content" in field_names
         assert "summary" in field_names
 
     def test_fts_index_has_token_filters(self):
-        idx = [i for i in SEARCH_INDEXES if i["name"] == "memories_fts_index"][0]
+        idx = _search_index("memories_fts_index")
         fields = idx["definition"]["mappings"]["fields"]
         assert fields["user_id"]["type"] == "token"
         assert fields["tier"]["type"] == "token"
