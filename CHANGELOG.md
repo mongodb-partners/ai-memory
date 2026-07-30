@@ -116,6 +116,49 @@ independently, so a badly trained artifact cannot emit the value that means
 
 ### Fixed
 
+**The audit fallback file could not be located and grew without bound.**
+When a flush to MongoDB fails, `AuditService` appends the batch to a local JSONL
+file — the only copy of those records. That file was a bare relative
+`Path("audit_fallback.jsonl")`, rebuilt inside every write, with no size limit.
+
+Three problems in one line. *Nobody can name the location*: relative means
+"wherever the process was started", so an operator asked to produce the trail for
+an outage must first reconstruct a systemd unit's `WorkingDirectory` or a
+container's `WORKDIR`. *One incident's records scatter*: because the path was
+rebuilt per write rather than resolved once, a process that changes directory
+between two failed flushes leaves half the trail in each place and a complete
+trail in neither. And *the file grows unbounded exactly during an outage* — this
+code path runs only while MongoDB is refusing writes, so it is appended to for as
+long as the incident lasts, filling the disk of a host that is already unwell and
+stopping the process for a reason unrelated to the original fault.
+
+The path is now configurable, expanded, and resolved to an absolute path **once,
+at construction**; the file is capped and rotated to a single `.1` sibling. One
+generation, not zero and not many: `.1` holds where the outage began, the live
+file holds what is happening now, and disk cost stays bounded at twice the
+ceiling. Rotation uses `Path.replace` rather than `rename`, because on Windows a
+rename onto an existing path raises — which would have made the *second*
+rotation of a deployment's lifetime fail and the file resume growing without
+bound, reappearing only after the first fill.
+
+- `AUDIT_FALLBACK_PATH` — default `audit_fallback.jsonl`, preserving the historical
+  filename for deployments already collecting it. Set it explicitly. Empty
+  disables the fallback, discarding entries rather than writing them, for a
+  read-only filesystem where every failure otherwise logs a stack trace for a
+  write that can never succeed; the service warns once at startup, because losing
+  audit records is a legitimate choice but not a silent one.
+- `AUDIT_FALLBACK_MAX_BYTES` — default 50 MiB. `0` disables rotation.
+- Missing parent directories are created, so naming
+  `/var/log/agent-memory/audit.jsonl` does not fail every write over one absent
+  directory. A failed rotation logs and writes the entry anyway: exceeding the
+  ceiling beats dropping the record.
+- Entries are serialised with `default=str`, so one unserialisable value in
+  `metadata` can no longer take the whole batch — including the entries beside
+  it — with it.
+
+23 tests; 20 mutations, 20 caught. Recovery is documented in
+`docs/how-to/observability.md`.
+
 **A failed retention change was audited as a success.**
 `EpisodicService.set_retention` deliberately never raises — retention management
 should not be able to fail a request — so it reports a failure as

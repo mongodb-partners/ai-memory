@@ -151,3 +151,43 @@ turns in an audit trail is worse than having none.
 
 Governance and rate limiting still apply on every single `log_activity` call —
 it is the audit *record* that is batched, not the access check.
+
+### When MongoDB will not take the audit entries
+
+A flush that fails appends the batch to a local JSONL file instead. Those lines
+are the **only** copy of those records, so the two things worth setting are where
+the file goes and how large it may get:
+
+| Setting | Default | Notes |
+|---|---|---|
+| `audit_fallback_path` | `audit_fallback.jsonl` | Resolved to an absolute path once, at startup |
+| `audit_fallback_max_bytes` | `52428800` (50 MiB) | Rotates to a single `.1` sibling — twice this on disk. `0` disables rotation |
+
+Set the path explicitly. The default is relative, which means "wherever the
+process was started" — a systemd unit's `WorkingDirectory`, a container's
+`WORKDIR`, a developer's shell — and an operator asked to produce an audit trail
+should not have to reconstruct that first. It is resolved once at construction
+rather than per write, so a process that changes directory cannot split one
+incident's records across two files.
+
+The ceiling matters because this file is written *only while MongoDB is refusing
+writes*, so it is appended to for as long as the incident lasts. Unbounded, that
+fills the disk of a host that is already having an outage, and a full disk stops
+the process for a reason unrelated to the original fault. One rotation is kept
+because both ends of the window are informative: `.1` holds where the outage
+began, the live file holds what is happening now.
+
+Setting `audit_fallback_path=""` discards the entries instead of writing them.
+That is for a read-only filesystem, where every flush failure otherwise logs a
+stack trace for a write that can never succeed. It is a real loss of records, so
+the service says so once at startup.
+
+After an outage, the file is ordinary JSONL and can be replayed:
+
+```bash
+mongoimport --uri "$MONGODB_CONNECTION_STRING" \
+  --collection audit_log --file audit_fallback.jsonl
+```
+
+Check for a `.1` sibling first — it holds the beginning of the incident, and
+importing only the live file silently drops it.

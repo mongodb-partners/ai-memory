@@ -299,6 +299,8 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `episodic_retention_days` | `30` | Turn-log retention — see [Retention](#retention) |
 | `cache_ttl_seconds` | `3600` | Semantic-cache entry lifetime |
 | `audit_retention_days` | `365` | Audit-log retention |
+| `audit_fallback_path` | `audit_fallback.jsonl` | Where audit entries go when MongoDB refuses them; resolved to an absolute path once, at startup. Empty string discards them instead |
+| `audit_fallback_max_bytes` | `52428800` | Ceiling before the fallback rotates to one `.1` sibling — so twice this on disk. `0` disables rotation |
 | `episodic_enabled` | `True` | `False` accepts and discards, so callers need no conditionals |
 | `episodic_queue_size` | `1000` | Bounded; full → drop oldest |
 | `episodic_batch_size` | `20` | Turns per `insert_many` |

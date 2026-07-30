@@ -160,6 +160,44 @@ class MCPConfig(BaseSettings):
     audit_flush_interval_seconds: int = 60
     audit_flush_on_write: bool = False
     audit_retention_days: int = 365
+    # Where audit entries go when MongoDB cannot take them. This file is the last
+    # copy of a record that is otherwise gone, and it used to be the bare relative
+    # path `audit_fallback.jsonl`.
+    #
+    # Relative meant "wherever this process was started", which is not a location
+    # anyone can name afterwards: a systemd unit's WorkingDirectory, a container's
+    # WORKDIR, or the developer's shell. Worse, `Path` was resolved on every write
+    # rather than once, so a process that chdirs — a test using `monkeypatch.chdir`,
+    # a CLI that changes into a project root — scatters one outage's records across
+    # several files, and an operator looking for the trail finds a fraction of it.
+    #
+    # Now resolved to an absolute path once, at construction. Deployments should
+    # set this explicitly to somewhere durable and writable; the default keeps the
+    # old location for anyone relying on it, just pinned.
+    #
+    # Empty string disables the file. That is for a read-only filesystem, where
+    # every flush failure otherwise logs a fresh stack trace for a write that
+    # cannot ever succeed. Disabling is a real loss of records, so it is opt-in and
+    # the service says so once at startup rather than staying quiet about it.
+    audit_fallback_path: str = "audit_fallback.jsonl"
+    # Ceiling on the fallback file, in bytes, before it rotates to a single
+    # ``.1`` sibling — so the real cost on disk is twice this.
+    #
+    # The file had no bound at all, and it is written *only* while MongoDB is
+    # refusing writes: a condition that lasts as long as the incident does. An
+    # unbounded append during a sustained outage fills the disk of the host that is
+    # already having one, and a full disk takes down the process for a reason that
+    # has nothing to do with the original fault.
+    #
+    # One rotation rather than none or many, because both ends of the window
+    # matter: ``.1`` holds where the outage began, the live file holds what is
+    # happening now. Keeping only the newest loses the start; keeping only the
+    # oldest loses everything after the first fill.
+    #
+    # 0 disables rotation and restores the unbounded behaviour, for a deployment
+    # that has put this on a volume it is happy to fill and would rather lose
+    # nothing.
+    audit_fallback_max_bytes: int = 50 * 1024 * 1024
 
     # Soft Delete
     soft_delete_purge_days: int = 30

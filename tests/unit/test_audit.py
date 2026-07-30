@@ -1,9 +1,8 @@
 """Tests for AuditService (buffered writes)."""
 
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from agent_memory.core.config import MCPConfig
 from agent_memory.services.audit import AuditService
@@ -141,12 +140,17 @@ class TestAuditServiceTimerFlush:
 
 
 class TestAuditServiceWriteToFile:
-    """_write_to_file fallback writes JSONL to disk."""
+    """_write_to_file fallback writes JSONL to disk.
+
+    The destination is configured (``audit_fallback_path``) and resolved once at
+    construction, so these tests set it rather than patching ``Path`` at write
+    time — see ``test_audit_fallback_file.py`` for why that changed.
+    """
 
     def test_write_to_file_creates_jsonl(self, tmp_path):
-        from datetime import datetime, timezone
+        from datetime import UTC, datetime
         mock_collection = AsyncMock()
-        config = _make_config()
+        config = _make_config(audit_fallback_path=str(tmp_path / "audit.jsonl"))
         service = AuditService(mock_collection, config)
 
         entries = [{
@@ -155,23 +159,21 @@ class TestAuditServiceWriteToFile:
             "tool_name": "t",
             "status": "ok",
             "duration_ms": 0,
-            "timestamp": datetime(2025, 1, 1, tzinfo=timezone.utc),
+            "timestamp": datetime(2025, 1, 1, tzinfo=UTC),
             "metadata": {},
         }]
 
-        with patch("agent_memory.services.audit.Path", return_value=tmp_path / "audit.jsonl"):
-            service._write_to_file(entries)
+        service._write_to_file(entries)
 
         content = (tmp_path / "audit.jsonl").read_text()
         assert "u1" in content
         assert "2025-01-01" in content
 
-    def test_write_to_file_handles_io_error(self):
+    def test_write_to_file_handles_io_error(self, tmp_path):
         mock_collection = AsyncMock()
-        config = _make_config()
+        config = _make_config(audit_fallback_path=str(tmp_path / "audit.jsonl"))
         service = AuditService(mock_collection, config)
 
-        with patch("agent_memory.services.audit.Path") as mock_path:
-            mock_path.return_value.open.side_effect = OSError("disk full")
+        with patch.object(Path, "open", side_effect=OSError("disk full")):
             # Should not raise
             service._write_to_file([{"user_id": "u1", "timestamp": "now"}])
