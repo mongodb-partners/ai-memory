@@ -16,7 +16,7 @@ in the index definition (which returns zero rows rather than erroring).
 
     # Write runnable copies and check them
     uv run --extra demo python -m demo.compass_pipelines \\
-        --query "what can't I eat?" --user ai4-demo --out /tmp/pipelines
+        --query "what can't I eat?" --user memory-demo --out /tmp/pipelines
 
     # Regenerate the checked-in templates (placeholder instead of a real vector)
     uv run --extra demo python -m demo.compass_pipelines --write-templates
@@ -343,7 +343,7 @@ def write_templates() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--user", default="ai4-demo")
+    parser.add_argument("--user", default="memory-demo")
     parser.add_argument("--query", default="what can't I eat?")
     parser.add_argument(
         "--out", type=Path, default=None,

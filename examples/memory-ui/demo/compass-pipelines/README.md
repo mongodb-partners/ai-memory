@@ -28,7 +28,7 @@ and a screenful of decimals is not a thing to project. Fill it in:
 ```bash
 # From examples/memory-ui/
 uv run --extra demo python -m demo.compass_pipelines \
-    --query "what can't I eat?" --user ai4-demo --out /tmp/pipelines
+    --query "what can't I eat?" --user memory-demo --out /tmp/pipelines
 ```
 
 That writes runnable copies with the vector substituted, then prints the results

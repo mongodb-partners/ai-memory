@@ -112,22 +112,43 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
-      - name: Build the image
-        run: docker build -t agent-memory:ci .
+      # Both stages, each named. The Dockerfile is multi-stage and `demo` is
+      # last, so a bare `docker build .` tags the demo image as agent-memory:ci
+      # and every assertion below then describes the wrong container. Building
+      # demo covers its own drift too: it installs the `[all,demo]` extras and
+      # copies the sample UI's backend.
+      - name: Build both images
+        run: |
+          docker build --target server -t agent-memory:ci .
+          docker build --target demo -t agent-memory:ci-demo .
 
       # Asserting the USER directive took effect, not merely that it is present.
       # A chown that misses the venv, or a base-image change, would leave this
-      # reporting uid=0 while the Dockerfile still reads correctly.
-      - name: Assert the container does not run as root
+      # reporting uid=0 while the Dockerfile still reads correctly. Checked on
+      # both stages because demo switches to root to install, then back.
+      - name: Assert the containers do not run as root
         run: |
-          uid="$(docker run --rm agent-memory:ci id -u)"
-          if [ "$uid" = "0" ]; then
-            echo "::error::Container runs as root (uid 0)."
-            exit 1
-          fi
-          echo "Container runs as uid $uid."
+          for image in agent-memory:ci agent-memory:ci-demo; do
+            uid="$(docker run --rm "$image" id -u)"
+            if [ "$uid" = "0" ]; then
+              echo "::error::$image runs as root (uid 0)."
+              exit 1
+            fi
+            echo "$image runs as uid $uid."
+          done
 
       - name: Assert the package imports inside the image
         run: |
           docker run --rm agent-memory:ci uv run python -c \
             "from agent_memory import AsyncMemory, Memory, MemoryConfig, __version__; print(__version__)"
+
+      # The demo stage's CMD imports `server.app`, which reaches sse_starlette
+      # and its own `server.*` siblings as top-level modules from its WORKDIR.
+      # Nothing under server/ imports the demo package, so `demo.seed` is named
+      # explicitly here: that second import is what covers the second COPY.
+      # Only an import inside the image proves the COPYs and the workdir agree
+      # with the CMD.
+      - name: Assert the demo backend imports inside its image
+        run: |
+          docker run --rm agent-memory:ci-demo python -c \
+            "import server.app, demo.seed; print('demo backend imports')"

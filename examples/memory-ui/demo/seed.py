@@ -5,7 +5,7 @@ four tiers, so the Compass screen has real documents to open and the episodic
 panel has history that predates the live demo — "what have we worked on together?"
 is a much better question when the answer is not just the last two minutes.
 
-    uv run --extra demo python -m demo.seed --user ai4-demo
+    uv run --extra demo python -m demo.seed --user memory-demo
 
 Three things this script deliberately does *not* do.
 
@@ -408,8 +408,8 @@ async def seed(user_id: str, *, keep: bool, promote: bool) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--user", default="ai4-demo",
-        help="user id to seed; must match the UI's user field (default: ai4-demo)",
+        "--user", default="memory-demo",
+        help="user id to seed; must match the UI's user field (default: memory-demo)",
     )
     parser.add_argument(
         "--keep", action="store_true",

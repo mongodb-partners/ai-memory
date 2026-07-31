@@ -1,23 +1,39 @@
 services:
-  memory-mcp:
-    build: .
-    image: memory-mcp:latest
+  agent-memory:
+    build:
+      context: .
+      # Required: the Dockerfile's last stage is `demo`, so omitting the target
+      # would build the demo image instead of the memory server.
+      target: server
+    image: agent-memory:latest
     env_file: .env
     environment:
       # Required inside a container: the published port reaches the process only
       # if it binds every container interface. The library's own default is
       # 127.0.0.1, which is right for a bare `agent-memory` process and useless
-      # here. Because this address is routable, the runner refuses to start with
-      # AUTH_ENABLED=false unless you also assert the risk — see the note below.
+      # here.
       HOST: 0.0.0.0
+      # Binding a routable address with auth off is refused by default, and the
+      # refusal is correct: with AUTH_ENABLED=false every request names the
+      # user_id it acts as, so any client that reaches the port can read or erase
+      # any user's memories. This flag is the operator asserting that a container
+      # whose port is published only to the host's loopback is an acceptable
+      # place for that. It logs a warning on every start, by design.
+      #
+      # The `ports` mapping below does NOT satisfy this check — the guard reads
+      # the address the process binds *inside* the container and cannot see the
+      # host-side mapping at all. The two are independent: this flag is what
+      # allows the bind, and the mapping is what limits who can reach it.
+      ALLOW_UNAUTHENTICATED_NETWORK_ACCESS: "true"
     ports:
-      # Bound to the host's loopback, not every host interface. `"8000:8000"`
+      # Published to the host's loopback, not every host interface. `"8000:8000"`
       # publishes on 0.0.0.0 of the *host*, which on a laptop on shared wifi or
       # any cloud VM with a public IP means the memory store is reachable from
-      # off-box. Change the left side to `0.0.0.0:8000` only alongside auth.
+      # off-box. This is defense in depth, not what permits the bind above.
+      # Change the left side to `0.0.0.0:8000` only alongside AUTH_ENABLED=true.
       - "127.0.0.1:8000:8000"
     networks:
-      - memory-mcp-network
+      - agent-memory-network
     restart: unless-stopped
     deploy:
       resources:
@@ -29,6 +45,63 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  # ── The sample UI (docker compose --profile demo up) ────────────────────────
+  # Both services carry `profiles`, so a plain `docker compose up` starts only
+  # the memory server. The demo backend embeds the library in-process rather than
+  # calling the server on 8000, so these two are siblings sharing an Atlas
+  # database, not clients of the service above.
+  demo-api:
+    profiles: ["demo"]
+    build:
+      context: .
+      target: demo
+    image: agent-memory-demo:latest
+    env_file: .env
+    # No ALLOW_UNAUTHENTICATED_NETWORK_ACCESS: the demo backend never runs a
+    # library shell (it uses AsyncMemory.create in-process), so the bind guard
+    # in agent_memory/shells/runner.py cannot fire.
+    ports:
+      - "127.0.0.1:8100:8100"
+    networks:
+      - agent-memory-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "python", "-c", "import http.client; c = http.client.HTTPConnection('localhost', 8100, timeout=5); c.request('GET', '/health'); assert c.getresponse().status == 200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Same 60s as the server, but it is covering strictly more work, so do not
+      # read the two as equivalent and trim this one to match. Past create()
+      # provisioning indexes on a cold Atlas cluster, this service also runs
+      # DemoResponseCache.ensure_indexes, which builds two B-tree indexes and a
+      # vectorSearch index -- and computing numDimensions for it costs a live
+      # embedding round trip (cache_key.py's "dimension probe").
+      start_period: 60s
+
+  demo-ui:
+    profiles: ["demo"]
+    build:
+      context: ./examples/memory-ui/frontend
+    image: agent-memory-ui:latest
+    ports:
+      - "127.0.0.1:5173:5173"
+    networks:
+      - agent-memory-network
+    restart: unless-stopped
+    depends_on:
+      demo-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5173/ > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 # ── Before exposing this beyond the host ─────────────────────────────────────
 # With AUTH_ENABLED=false every request names the `user_id` it acts as, so any
@@ -44,5 +117,5 @@ services:
 # so explicitly and logs a warning on every start.
 
 networks:
-  memory-mcp-network:
+  agent-memory-network:
     driver: bridge

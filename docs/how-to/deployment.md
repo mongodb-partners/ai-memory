@@ -114,24 +114,56 @@ The image is `python:3.11-slim`, installs with `uv` from `uv.lock`, and runs as
 uid 10001. Nothing needs root, since it binds 8000 and every write goes to Atlas
 rather than the filesystem. Configuration comes from `.env` via `env_file`.
 
-Two lines in `docker-compose.yml` are load-bearing:
+Four lines in `docker-compose.yml` are load-bearing:
 
 ```yaml
+build:
+  context: .
+  target: server           # the Dockerfile is multi-stage and its last stage is
+                           # `demo`, so an omitted target builds the wrong image
 environment:
   HOST: 0.0.0.0            # the published port only reaches a process bound to
                            # every container interface
+  ALLOW_UNAUTHENTICATED_NETWORK_ACCESS: "true"
 ports:
   - "127.0.0.1:8000:8000"  # published on the *host's* loopback, not 0.0.0.0
 ```
 
-`HOST: 0.0.0.0` is routable, so the compose default only starts because the port
-mapping keeps it on the host's loopback. `"8000:8000"`, the spelling most
-examples use, publishes on every host interface, which on shared wifi or any VM
-with a public IP puts the memory store on the internet. Widen the left side only
-alongside `AUTH_ENABLED=true`.
+`target: server` selects the right stage from the multi-stage Dockerfile. Without
+it Docker builds the final stage, which is `demo`, producing an image that listens
+on 8100 rather than 8000. The healthcheck then fails because it probes the wrong
+port, and the documented command above silently starts the sample UI backend
+instead of the memory server.
+
+`HOST: 0.0.0.0` is routable, so the runner refuses it with auth disabled unless
+the operator says otherwise, hence `ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true`
+in the compose environment, which logs a warning on every start. The check reads
+the address the process binds inside the container; it cannot see the host-side
+port mapping, so the two are independent concerns.
+
+`"127.0.0.1:8000:8000"` is the second, separate control: it limits who can reach
+the published port. `"8000:8000"`, the spelling most examples use, publishes on
+every host interface, which on shared wifi or any VM with a public IP puts the
+memory store on the internet. Widen the left side only alongside
+`AUTH_ENABLED=true`.
 
 The healthcheck polls `/health` with a 60-second `start_period`, which covers
 `create()` provisioning indexes on a cold Atlas cluster.
+
+The sample UI is behind a compose profile, so it stays out of a plain `up`:
+
+```bash
+docker compose --profile demo up --build   # + demo backend (8100) and UI (5173)
+```
+
+The UI's nginx proxies `/api` to the demo backend with `proxy_buffering off`,
+without which SSE tokens arrive in one batch at the end of a turn. The demo
+backend embeds the library in-process rather than calling the server on 8000, so
+the two are siblings sharing an Atlas database. The UI works whether or not the
+server container is running.
+
+`scripts/docker_setup.sh` wraps all of this, waits on container health rather
+than on open ports, and seeds the demo user afterwards.
 
 ## Probe it
 

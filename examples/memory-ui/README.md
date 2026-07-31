@@ -21,6 +21,11 @@ hardcoded list, and the claim being made here is that the ranking is real.
 
 ## Run it
 
+`scripts/quick_setup.sh` from the repository root does everything below:
+dependency install, both processes, seeding, and opening the browser.
+`scripts/docker_setup.sh` does the same under Docker. The manual steps follow,
+because knowing them is what lets you debug the scripts.
+
 Two processes. From the repository root:
 
 ```bash
@@ -50,7 +55,7 @@ But the OFF-vs-ON contrast is sharper when the agent already knows things, so
 `demo/seed.py` plants a deterministic set spanning all four tiers:
 
 ```bash
-cd examples/memory-ui && uv run --extra demo python -m demo.seed --user ai4-demo
+cd examples/memory-ui && uv run --extra demo python -m demo.seed --user memory-demo
 ```
 
 **Seed after the server is up, not before.** `ConsolidationWorker` runs a
@@ -145,8 +150,8 @@ one is the "why it works" screen: the hybrid recall is `$rankFusion` over a
 `$vectorSearch` branch and a `$search` branch, in one pipeline, in one database.
 
 Two filters worth having ready, both against `memories`:
-`{ user_id: "ai4-demo", tier: "stm" }` and
-`{ user_id: "ai4-demo", tier: "ltm", enrichment_status: "complete" }`. Put them
+`{ user_id: "memory-demo", tier: "stm" }` and
+`{ user_id: "memory-demo", tier: "ltm", enrichment_status: "complete" }`. Put them
 side by side and the tier distinction is one field: both documents carry
 `expires_at`, roughly 24 hours out on the first and 90 days on the second, from
 the same TTL index and a different `retention_tier`. The long-term document also
