@@ -61,6 +61,22 @@ fi
 step "Checking .env"
 grep -Eq '^[[:space:]]*MONGODB_CONNECTION_STRING=.+' .env || fail \
     "MONGODB_CONNECTION_STRING is not set in .env"
+# Set is not the same as filled in. Every line of .env.example is a syntactically
+# valid non-empty value, so the "we wrote the template, fill it in, re-run"
+# handshake above did not actually gate the second run: the placeholders sailed
+# through this check and the failure surfaced much later, as an auth error from
+# Atlas. These three literals come from .env.example and no real credential
+# resembles them, so matching them is safe.
+for placeholder in 'user:password@cluster.mongodb.net' 'your-access-key' 'your-secret-key'; do
+    if grep -Fq "$placeholder" .env; then
+        fail ".env still holds the placeholder values from .env.example, so this is the
+  unedited template. Replace at least:
+    MONGODB_CONNECTION_STRING   your Atlas connection string
+    AWS_ACCESS_KEY_ID           your AWS access key id
+    AWS_SECRET_ACCESS_KEY       your AWS secret access key
+  then re-run this script."
+    fi
+done
 echo "  MONGODB_CONNECTION_STRING is set"
 # Note: the containers validate the rest through the library's own config at
 # startup. `docker compose logs demo-api` shows any refusal verbatim.
@@ -111,6 +127,15 @@ done
     "the server never became healthy. See: docker compose logs agent-memory"
 [ "$(health_of demo-api)" = healthy ] || fail \
     "the demo backend never became healthy. See: docker compose logs demo-api"
+# demo-ui too, symmetrically. Without this a UI stuck in `exited` or `created`
+# matches neither fast-fail arm above, so it burns the full timeout and then both
+# other assertions pass — and the script opens a browser at a UI that is not
+# there. `running` as well as `healthy`, matching the loop's own condition, since
+# this service may carry no healthcheck.
+case "$(health_of demo-ui)" in
+    healthy|running) ;;
+    *) fail "the UI never came up. See: docker compose logs demo-ui" ;;
+esac
 
 # ── 5. Seed ──────────────────────────────────────────────────────────────────
 # After health, never before: ConsolidationWorker runs a pass at startup and
@@ -119,7 +144,7 @@ if [ "$DO_SEED" = true ]; then
     step "Seeding ${SEED_USER} (this WIPES that user's existing memories)"
     docker compose exec -T demo-api python -m demo.seed --user "$SEED_USER" || fail \
         "seeding reported a problem above. Retry with:
-  docker compose exec -T demo-api python -m demo.seed --user $SEED_USER"
+  docker compose exec -T demo-api python -m demo.seed --user '${SEED_USER}'"
 fi
 
 # ── 6. Done ──────────────────────────────────────────────────────────────────
@@ -139,7 +164,7 @@ cat <<MSG
 
     Logs            docker compose --profile demo logs -f
     Stop            docker compose --profile demo down
-    Re-seed         docker compose exec -T demo-api python -m demo.seed --user ${SEED_USER}
+    Re-seed         docker compose exec -T demo-api python -m demo.seed --user '${SEED_USER}'
 
 Every port is published to 127.0.0.1 only. Widening that needs AUTH_ENABLED=true.
 MSG
