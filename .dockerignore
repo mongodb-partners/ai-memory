@@ -2,13 +2,30 @@
 .env.*
 !.env.example
 .git
-.venv
-__pycache__
-*.pyc
-.pytest_cache
-.mypy_cache
-.ruff_cache
-.tox
+# `**/` on every one of these, because a .dockerignore pattern with no slash and
+# no `**` matches only at the context ROOT. Plain `__pycache__` therefore excluded
+# a hypothetical /__pycache__ and nothing else, while the demo stage COPYs
+# examples/memory-ui/{server,demo}/ wholesale — so the host's cpython-311 .pyc
+# files went into an image whose interpreter is 3.11. COPY preserves mtimes, and a
+# .pyc whose embedded mtime and size match its .py is used without recompiling, so
+# the container could execute bytecode that does not match the source sitting next
+# to it in the image. Verified the anchoring directly: with the old patterns a
+# nested marker.pyc arrived in the image; with `**/` none does.
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.tox
+# node_modules is 75 MB and frontend/ ~89 MB of a 92 MB context, none of which any
+# stage copies — the root build only takes examples/memory-ui/{server,demo}/. The
+# frontend image builds from its own context (docker-compose.yml) and has its own
+# .dockerignore. Excluding it here keeps `npm install` from invalidating the root
+# build context and re-transferring ~90 MB on the "first build takes a few
+# minutes" path.
+**/node_modules
+examples/memory-ui/frontend/
 tests/
 docs/
 *.md
