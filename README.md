@@ -9,9 +9,9 @@ required — and none imported.
 Install from the repository — this is not on PyPI:
 
 ```bash
-uv add git+https://github.com/mongodb-partners/ai-memory.git
+uv add git+https://github.com/mongodb-partners/agent-memory.git
 # or
-pip install git+https://github.com/mongodb-partners/ai-memory.git
+pip install git+https://github.com/mongodb-partners/agent-memory.git
 ```
 
 ---
