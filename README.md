@@ -116,7 +116,7 @@ need to type the id in to see that user's panel.
 
 The local script runs `uv sync --extra demo`, which uninstalls dev tooling
 (pytest, ruff, scikit-learn). Correct for a demo environment, but if you run it
-on your working checkout, `uv sync --extra all` afterwards to restore them.
+on your working checkout, `uv sync --all-extras` afterwards to restore them.
 
 Every port is published to `127.0.0.1` only. See
 [Deploy the server](docs/how-to/deployment.md) before exposing any of them.
