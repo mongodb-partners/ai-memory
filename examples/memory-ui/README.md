@@ -21,6 +21,11 @@ hardcoded list, and the claim being made here is that the ranking is real.
 
 ## Run it
 
+`scripts/quick_setup.sh` from the repository root does everything below —
+dependency install, both processes, seeding, and opening the browser.
+`scripts/docker_setup.sh` does the same under Docker. The manual steps follow,
+because knowing them is what lets you debug the scripts.
+
 Two processes. From the repository root:
 
 ```bash

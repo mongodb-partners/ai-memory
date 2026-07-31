@@ -150,6 +150,21 @@ memory store on the internet. Widen the left side only alongside
 The healthcheck polls `/health` with a 60-second `start_period`, which covers
 `create()` provisioning indexes on a cold Atlas cluster.
 
+The sample UI is behind a compose profile, so it stays out of a plain `up`:
+
+```bash
+docker compose --profile demo up --build   # + demo backend (8100) and UI (5173)
+```
+
+The UI's nginx proxies `/api` to the demo backend with `proxy_buffering off`,
+without which SSE tokens arrive in one batch at the end of a turn. The demo
+backend embeds the library in-process rather than calling the server on 8000, so
+the two are siblings sharing an Atlas database — the UI works whether or not the
+server container is running.
+
+`scripts/docker_setup.sh` wraps all of this, waits on container health rather
+than on open ports, and seeds the demo user afterwards.
+
 ## Probe it
 
 `GET /health` is the one unauthenticated route, deliberately: a probe that needs a

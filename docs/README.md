@@ -33,6 +33,8 @@ These pages go deeper, organized by what you are trying to do.
   `collMod`, what TTL does and does not guarantee, and how to pick a number.
 - [Scope memory to a user](how-to/per-user-scoping.md): `scoped_user` for the
   gap between the code that knows the user and the code that logs the turn.
+- [Run the sample UI](../examples/memory-ui/README.md): the memory ON vs OFF
+  demo, what each panel shows, and the presenter's preflight.
 
 ## Explanation: the why
 

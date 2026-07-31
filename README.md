@@ -96,6 +96,31 @@ with Memory(MemoryConfig(mongodb_connection_string="mongodb+srv://...")) as memo
     print(memory.recall("user-1", "greeting"))
 ```
 
+## One-command setup
+
+Two scripts take a fresh checkout to a running demo — the memory server plus the
+sample UI, with a seeded user. Both need a filled-in `.env`; run either one
+without it and it writes the template and tells you what to fill in.
+
+```bash
+scripts/quick_setup.sh    # local: uv + npm, runs in the foreground
+scripts/docker_setup.sh   # Docker: compose, exits and leaves the stack running
+```
+
+Both end up at http://localhost:5173 with the demo backend on 8100. The Docker
+path also serves the MCP/REST shells on 8000; the local path adds them with
+`--with-server`, since the UI embeds the library in-process and does not call
+them. `--no-seed` skips seeding and `--user <id>` retargets it — seeding wipes
+the user it targets, and the UI still opens with `memory-demo` in the header, so
+you need to type the id in to see that user's panel.
+
+The local script runs `uv sync --extra demo`, which uninstalls dev tooling
+(pytest, ruff, scikit-learn). Correct for a demo environment, but if you run it
+on your working checkout, `uv sync --extra all` afterwards to restore them.
+
+Every port is published to `127.0.0.1` only. See
+[Deploy the server](docs/how-to/deployment.md) before exposing any of them.
+
 ## Library API
 
 Convention throughout: `user_id` is positional, everything else is keyword-only.
