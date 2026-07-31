@@ -1,6 +1,10 @@
 services:
   agent-memory:
-    build: .
+    build:
+      context: .
+      # Required: the Dockerfile's last stage is `demo`, so omitting the target
+      # would build the demo image instead of the memory server.
+      target: server
     image: agent-memory:latest
     env_file: .env
     environment:
@@ -41,6 +45,58 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  # ── The sample UI (docker compose --profile demo up) ────────────────────────
+  # Both services carry `profiles`, so a plain `docker compose up` starts only
+  # the memory server. The demo backend embeds the library in-process rather than
+  # calling the server on 8000, so these two are siblings sharing an Atlas
+  # database, not clients of the service above.
+  demo-api:
+    profiles: ["demo"]
+    build:
+      context: .
+      target: demo
+    image: agent-memory-demo:latest
+    env_file: .env
+    # No ALLOW_UNAUTHENTICATED_NETWORK_ACCESS: the demo backend never runs a
+    # library shell (it uses AsyncMemory.create in-process), so the bind guard
+    # in agent_memory/shells/runner.py cannot fire.
+    ports:
+      - "127.0.0.1:8100:8100"
+    networks:
+      - agent-memory-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "python", "-c", "import http.client; c = http.client.HTTPConnection('localhost', 8100, timeout=5); c.request('GET', '/health'); assert c.getresponse().status == 200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Matches the server's: create() provisions indexes on a cold Atlas cluster.
+      start_period: 60s
+
+  demo-ui:
+    profiles: ["demo"]
+    build:
+      context: ./examples/memory-ui/frontend
+    image: agent-memory-ui:latest
+    ports:
+      - "127.0.0.1:5173:5173"
+    networks:
+      - agent-memory-network
+    restart: unless-stopped
+    depends_on:
+      demo-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5173/ > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 # ── Before exposing this beyond the host ─────────────────────────────────────
 # With AUTH_ENABLED=false every request names the `user_id` it acts as, so any

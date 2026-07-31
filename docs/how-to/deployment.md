@@ -114,9 +114,13 @@ The image is `python:3.11-slim`, installs with `uv` from `uv.lock`, and runs as
 uid 10001. Nothing needs root, since it binds 8000 and every write goes to Atlas
 rather than the filesystem. Configuration comes from `.env` via `env_file`.
 
-Three lines in `docker-compose.yml` are load-bearing:
+Four lines in `docker-compose.yml` are load-bearing:
 
 ```yaml
+build:
+  context: .
+  target: server           # the Dockerfile is multi-stage and its last stage is
+                           # `demo`, so an omitted target builds the wrong image
 environment:
   HOST: 0.0.0.0            # the published port only reaches a process bound to
                            # every container interface
@@ -124,6 +128,12 @@ environment:
 ports:
   - "127.0.0.1:8000:8000"  # published on the *host's* loopback, not 0.0.0.0
 ```
+
+`target: server` selects the right stage from the multi-stage Dockerfile. Without
+it Docker builds the final stage, which is `demo`, producing an image that listens
+on 8100 rather than 8000. The healthcheck then fails because it probes the wrong
+port, and the documented command above silently starts the sample UI backend
+instead of the memory server.
 
 `HOST: 0.0.0.0` is routable, so the runner refuses it with auth disabled unless
 the operator says otherwise — hence `ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true`
