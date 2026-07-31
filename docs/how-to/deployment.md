@@ -136,7 +136,7 @@ port, and the documented command above silently starts the sample UI backend
 instead of the memory server.
 
 `HOST: 0.0.0.0` is routable, so the runner refuses it with auth disabled unless
-the operator says otherwise — hence `ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true`
+the operator says otherwise, hence `ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true`
 in the compose environment, which logs a warning on every start. The check reads
 the address the process binds inside the container; it cannot see the host-side
 port mapping, so the two are independent concerns.
@@ -159,7 +159,7 @@ docker compose --profile demo up --build   # + demo backend (8100) and UI (5173)
 The UI's nginx proxies `/api` to the demo backend with `proxy_buffering off`,
 without which SSE tokens arrive in one batch at the end of a turn. The demo
 backend embeds the library in-process rather than calling the server on 8000, so
-the two are siblings sharing an Atlas database — the UI works whether or not the
+the two are siblings sharing an Atlas database. The UI works whether or not the
 server container is running.
 
 `scripts/docker_setup.sh` wraps all of this, waits on container health rather
