@@ -603,6 +603,13 @@ Adding a path back is a test failure, not just a style choice.
 The integration tier gates on server reachability rather than an env flag: start
 the server against a real cluster, then run `uv run pytest tests/integration -q`.
 
+## Documentation
+
+This README is the overview. [`docs/`](docs/README.md) goes deeper — the full
+configuration table, both shells' surfaces, the document shapes, the governance
+and audit contracts, and how-to guides for deploying, monitoring, and tuning
+retention.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
