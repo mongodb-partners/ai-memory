@@ -106,16 +106,70 @@ PY
 step "Installing dependencies"
 uv sync --frozen --extra demo || uv sync --extra demo
 
-# ── 5. Processes ─────────────────────────────────────────────────────────────
+# ── 5. Port preflight ────────────────────────────────────────────────────────
+# Before anything starts. `wait_for` probes a URL, not a process it owns, so a
+# leftover listener from an earlier run satisfies it instantly while the process
+# this run spawned dies unobserved on EADDRINUSE. The operator then drives the
+# *previous* run's stack, and a --user change appears not to take.
+step "Checking that the ports are free"
+port_is_busy() {  # port_is_busy <port>
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
+if command -v lsof >/dev/null 2>&1; then
+    PORTS="8100 5173"
+    [ "$WITH_SERVER" = true ] && PORTS="8000 $PORTS"
+    for port in $PORTS; do
+        if port_is_busy "$port"; then
+            fail "port $port is already in use, and this script needs it. Something from
+  an earlier run may still be up. See what holds it with:
+  lsof -nP -iTCP:$port -sTCP:LISTEN"
+        fi
+    done
+    echo "  ${PORTS// /, } free"
+else
+    # Skipped rather than fatal: lsof ships with macOS and most Linux distros,
+    # but a slim container image may not have it, and that is not a reason to
+    # refuse to run.
+    echo "  lsof not found; skipping the port check"
+fi
+
+# ── 6. Processes ─────────────────────────────────────────────────────────────
 PIDS=()
+# Parallel to PIDS, so the watch loop at the end can name what died rather than
+# printing a bare pid. Two indexed arrays, not one associative array: bash 3.2.
+LABELS=()
+CLEANED_UP=false
+# On EXIT as well as the signals: `fail` ends in `exit 1`, so without EXIT every
+# failure after the first `&` left that child running, reparented to init, still
+# holding its port — and the next run then found a stale listener.
 cleanup() {
+    # First line, before anything can overwrite it: the status that triggered
+    # the EXIT trap is what this script must return, so that
+    # `scripts/quick_setup.sh && echo "demo is up"` cannot print on a failure.
+    local status=$?
+    # `exit` below re-enters this trap. The second pass must do nothing.
+    if [ "$CLEANED_UP" = true ]; then return 0; fi
+    CLEANED_UP=true
     printf '\n==> Shutting down\n'
+    local pid
     for pid in "${PIDS[@]:-}"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
     done
-    exit 0
+    # Drain before exiting: uvicorn holds 8100 until its own shutdown completes,
+    # so returning the prompt immediately would hand the next run a stale
+    # listener. Plain TERM above, not SIGKILL, because TERM is what `uv run`
+    # forwards to the interpreter underneath it — a KILL would orphan that
+    # grandchild instead of stopping it. `|| true` so an interrupted `wait` does
+    # not trip `set -e` and skip the exit below.
+    wait 2>/dev/null || true
+    exit "$status"
 }
-trap cleanup INT TERM
+trap cleanup EXIT
+# The signal traps only set the conventional status and exit; EXIT then runs
+# cleanup once. Calling cleanup directly from a signal trap instead leaves the
+# `wait` below hanging until killed, on both bash 3.2 and 5.3.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 wait_for() {  # wait_for <url> <label>
     local url="$1" label="$2" attempt=0
@@ -133,7 +187,7 @@ wait_for() {  # wait_for <url> <label>
 if [ "$WITH_SERVER" = true ]; then
     step "Starting the memory server on 8000"
     uv run agent-memory &
-    PIDS+=($!)
+    PIDS+=($!); LABELS+=("the memory server on 8000")
     wait_for http://localhost:8000/health "server" || fail \
         "the server did not become healthy. Run \`uv run agent-memory\` to see why."
 fi
@@ -144,12 +198,12 @@ fi
 step "Starting the demo backend on 8100"
 uv run --extra demo python -m uvicorn server.app:app \
     --port 8100 --app-dir examples/memory-ui &
-PIDS+=($!)
+PIDS+=($!); LABELS+=("the demo backend on 8100")
 wait_for http://localhost:8100/health "demo backend" || fail \
     "the demo backend did not become healthy. Start it alone to see the error:
   uv run --extra demo python -m uvicorn server.app:app --port 8100 --app-dir examples/memory-ui"
 
-# ── 6. Seed ──────────────────────────────────────────────────────────────────
+# ── 7. Seed ──────────────────────────────────────────────────────────────────
 # After the backend is up, never before: ConsolidationWorker runs a pass at
 # startup, so a server coming up behind a fresh seed promotes every eligible
 # short-term memory and the promotion candidates disappear.
@@ -162,18 +216,18 @@ if [ "$DO_SEED" = true ]; then
   cd examples/memory-ui && uv run --extra demo python -m demo.seed --user $SEED_USER"
 fi
 
-# ── 7. Frontend ──────────────────────────────────────────────────────────────
+# ── 8. Frontend ──────────────────────────────────────────────────────────────
 step "Installing frontend dependencies"
 ( cd examples/memory-ui/frontend && npm install )
 
 step "Starting the frontend on 5173"
 ( cd examples/memory-ui/frontend && npm run dev ) &
-PIDS+=($!)
+PIDS+=($!); LABELS+=("the frontend on 5173")
 wait_for http://localhost:5173/ "frontend" || fail \
     "the frontend did not come up. Start it alone to see the error:
   cd examples/memory-ui/frontend && npm run dev"
 
-# ── 8. Done ──────────────────────────────────────────────────────────────────
+# ── 9. Done ──────────────────────────────────────────────────────────────────
 UI_URL="http://localhost:5173"
 case "$OSTYPE" in
     darwin*) open "$UI_URL" >/dev/null 2>&1 || true ;;
@@ -191,4 +245,18 @@ $([ "$WITH_SERVER" = true ] && echo "    Memory server   http://localhost:8000/h
 Ctrl-C stops everything.
 MSG
 
-wait
+# Not a bare `wait`: that returns 0 unconditionally and only after *every* child
+# has finished, so a backend that crashes a minute from now would leave this
+# terminal reading "Running" over a UI whose every request fails, and say nothing.
+# Not `wait -n` either — that is bash 4.3+ and this runs on macOS's bash 3.2.
+# So poll the PIDs we recorded, and name whichever one goes away first. The
+# non-zero exit fires the EXIT trap, which tears down the rest.
+while :; do
+    for i in $(seq 0 $((${#PIDS[@]} - 1))); do
+        if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+            fail "${LABELS[$i]} (pid ${PIDS[$i]}) exited. The rest of the stack is
+being shut down. Its last output is above; start it alone to see the error."
+        fi
+    done
+    sleep 2
+done
