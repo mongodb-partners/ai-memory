@@ -142,9 +142,12 @@ jobs:
           docker run --rm agent-memory:ci uv run python -c \
             "from agent_memory import AsyncMemory, Memory, MemoryConfig, __version__; print(__version__)"
 
-      # The demo stage's CMD imports `server.app`, which reaches `demo.*` and
-      # sse_starlette as top-level modules from its own WORKDIR. Only an import
-      # inside the image proves the COPY and the workdir agree with the CMD.
+      # The demo stage's CMD imports `server.app`, which reaches sse_starlette
+      # and its own `server.*` siblings as top-level modules from its WORKDIR.
+      # Nothing under server/ imports the demo package, so `demo.seed` is named
+      # explicitly here: that second import is what covers the second COPY.
+      # Only an import inside the image proves the COPYs and the workdir agree
+      # with the CMD.
       - name: Assert the demo backend imports inside its image
         run: |
           docker run --rm agent-memory:ci-demo python -c \
