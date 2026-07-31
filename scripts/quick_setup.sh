@@ -75,6 +75,30 @@ config = MemoryConfig.from_env()
 if not config.mongodb_connection_string:
     sys.exit("MONGODB_CONNECTION_STRING is not set in .env")
 
+# Set is not the same as filled in. Every line of .env.example is a syntactically
+# valid non-empty value, so the "we wrote the template, fill it in, re-run"
+# handshake earlier in this script did not actually gate the second run: the
+# placeholders reached this preflight, passed it, and the failure surfaced much
+# later as an auth error from Atlas or AWS. These literals come from
+# .env.example; no real credential resembles them.
+placeholders = [
+    ("MONGODB_CONNECTION_STRING", "your Atlas connection string",
+     "user:password@cluster.mongodb.net", config.mongodb_connection_string),
+    ("AWS_ACCESS_KEY_ID", "your AWS access key id",
+     "your-access-key", config.aws_access_key_id),
+    ("AWS_SECRET_ACCESS_KEY", "your AWS secret access key",
+     "your-secret-key", config.aws_secret_access_key),
+]
+unedited = [(name, hint) for name, hint, literal, value in placeholders
+            if literal in (value or "")]
+if unedited:
+    sys.exit(
+        ".env still holds the placeholder values from .env.example, so this is\n"
+        "the unedited template. Replace:\n"
+        + "\n".join(f"    {name:<27} {hint}" for name, hint in unedited)
+        + "\n  then re-run this script."
+    )
+
 needs = {
     "voyage": ("voyage_api_key", "VOYAGE_API_KEY"),
     "openai": ("openai_api_key", "OPENAI_API_KEY"),
