@@ -1,9 +1,11 @@
 {
-  "_comment": "Copy one of the examples below into your mcp.json",
+  "_comment": "Copy one of the `servers*` blocks below into your mcp.json, renamed to `servers`.",
 
-  "_1_http": "Connect to a running memory-mcp HTTP server (no auth)",
+  "_note_transport": "agent-memory serves MCP over streamable HTTP only. There is no stdio subprocess mode: TRANSPORT=stdio is accepted as a legacy alias and still serves streamable-http, so an MCP client must connect by URL rather than launch the server itself. Start the server separately with `TRANSPORT=mcp agent-memory`.",
+
+  "_1_http": "Connect to a running agent-memory HTTP server (no auth)",
   "servers": {
-    "memory-mcp": {
+    "agent-memory": {
       "url": "http://localhost:8000/mcp",
       "type": "http"
     }
@@ -11,7 +13,7 @@
 
   "_2_http_with_auth": "HTTP with API key or JWT authentication",
   "servers_http_auth": {
-    "memory-mcp": {
+    "agent-memory": {
       "url": "http://localhost:8000/mcp",
       "headers": {
         "Authorization": "Bearer your-api-key-here"
@@ -20,28 +22,12 @@
     }
   },
 
-  "_3_stdio": "Launch memory-mcp as a stdio subprocess (no auth)",
-  "servers_stdio": {
-    "memory-mcp": {
-      "command": "memory-mcp",
-      "env": {
-        "TRANSPORT": "stdio",
-        "MONGODB_CONNECTION_STRING": "mongodb+srv://user:pass@cluster.mongodb.net/memory_mcp"
-      }
-    }
-  },
-
-  "_4_stdio_with_auth": "Stdio with auth enabled (server-side API key validation)",
-  "servers_stdio_auth": {
-    "memory-mcp": {
-      "command": "memory-mcp",
-      "env": {
-        "TRANSPORT": "stdio",
-        "MONGODB_CONNECTION_STRING": "mongodb+srv://user:pass@cluster.mongodb.net/memory_mcp",
-        "AUTH_ENABLED": "true",
-        "AUTH_SECRET": "your-hs256-secret-key-min-32-chars",
-        "MEMORY_MCP_API_KEYS": "your-api-key-here=user1"
-      }
-    }
+  "_3_server_side_env": "Set on the *server* process, not in mcp.json — the client only holds the URL and the token.",
+  "_server_env_example": {
+    "TRANSPORT": "mcp",
+    "MONGODB_CONNECTION_STRING": "mongodb+srv://user:pass@cluster.mongodb.net/agent_memory",
+    "AUTH_ENABLED": "true",
+    "AUTH_SECRET": "your-hs256-secret-key-min-32-chars",
+    "MEMORY_MCP_API_KEYS": "your-api-key-here=user1"
   }
 }

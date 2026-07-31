@@ -1,19 +1,19 @@
-# Sample UI — memory ON vs memory OFF
+# Sample UI: memory ON vs memory OFF
 
 A one-screen demo of `agent-memory`: chat on the left, the memories that produced
 each answer on the right, and a switch that turns the whole memory layer off.
 
-The switch is the point. Same model, same prompt, same question — flip it and the
+The switch is the point. Same model, same prompt, same question. Flip it and the
 answer changes, because the second time the agent had somewhere to look.
 
 ## What's on screen
 
 | Panel | Shows |
 |---|---|
-| **Semantic cache** | HIT / MISS, and which path matched. Runs first — a hit means the tiers below were never queried. |
+| **Semantic cache** | HIT / MISS, and which path matched. Runs first, so a hit means the tiers below were never queried. |
 | **Short-term** | This thread's state, TTL-expired. |
 | **Long-term** | Durable facts with importance and access counts. |
-| **Episodic** | What the agent *did* — step number, tools, files touched. |
+| **Episodic** | What the agent *did*: step number, tools, files touched. |
 
 Every recalled row carries its rank and raw fused score. That is deliberate: a
 memory panel that shows text without scores is indistinguishable from a
@@ -24,7 +24,7 @@ hardcoded list, and the claim being made here is that the ranking is real.
 Two processes. From the repository root:
 
 ```bash
-# 1. Backend — needs Atlas, an embedding provider, and an LLM provider.
+# 1. Backend. Needs Atlas, an embedding provider, and an LLM provider.
 uv run --extra demo python -m uvicorn server.app:app --port 8100 --app-dir examples/memory-ui
 
 # 2. Frontend, in a second shell.
@@ -37,7 +37,7 @@ is absolute and is not rewritten if the virtualenv is ever copied, moved, or
 recreated from another checkout. When it goes stale, `uv run` resolves the correct
 *script* and that script then re-execs a **different interpreter**, whose
 `site-packages` provides a different `agent_memory`. The symptom is a
-`ModuleNotFoundError` for a submodule you can see on disk — which reads as a
+`ModuleNotFoundError` for a submodule you can see on disk, which reads as a
 library bug and is not one. `-m` resolves the module through the interpreter
 already running, so no shebang is consulted and the failure cannot occur.
 
@@ -45,7 +45,7 @@ Then open http://localhost:5173.
 
 ### Optional: seed a user, and mind the order
 
-The UI works against an empty user — the memory-ON pass fills the panel as you go.
+The UI works against an empty user: the memory-ON pass fills the panel as you go.
 But the OFF-vs-ON contrast is sharper when the agent already knows things, so
 `demo/seed.py` plants a deterministic set spanning all four tiers:
 
@@ -57,14 +57,14 @@ cd examples/memory-ui && uv run --extra demo python -m demo.seed --user ai4-demo
 consolidation pass at startup rather than after its first interval, so a server
 starting up behind a fresh seed immediately promotes every eligible short-term
 memory. The seeded promotion candidates vanish, the STM/LTM split shifts, and the
-promotion pipeline in `demo/compass-pipelines/` returns nothing. Nothing errors —
-the state just quietly stops matching what the seed reported.
+promotion pipeline in `demo/compass-pipelines/` returns nothing. Nothing errors.
+The state just quietly stops matching what the seed reported.
 
 Expect `stm 12 · ltm 6 · episodes 3 · candidates 5`. If `candidates` is 0, the
 order was wrong; re-seed and leave the server running.
 
 Leave a second user id unseeded. Typing it into the header is how you show that
-per-user isolation is enforced inside the query rather than in the prompt — and
+per-user isolation is enforced inside the query rather than in the prompt, and
 that only works if the second user has nothing to recall.
 
 Unseeded is not the same as empty, though. Asking that user a question with memory
@@ -76,10 +76,10 @@ uv run --extra demo python -m demo.seed --user alex --wipe-only
 ```
 
 Configuration comes from the repository root's `.env` (see `.env.example`), which
-`server/app.py` loads explicitly. The library itself never reads a `.env` — that
+`server/app.py` loads explicitly. The library itself never reads a `.env`. That
 is correct for a library, and it is why the server does it.
 
-### Preflight — run this before you present
+### Preflight: run this before you present
 
 ```bash
 # The import that matters, from the venv that will actually serve the demo.
@@ -90,7 +90,7 @@ print(sys.prefix); print(agent_memory.__file__)"
 ```
 
 Both paths must be inside *this* checkout. If either points somewhere else, or the
-import raises `ModuleNotFoundError`, the environment is stale — recreate it with
+import raises `ModuleNotFoundError`, the environment is stale. Recreate it with
 `uv sync --extra demo` and run the check again. Worth the thirty seconds: this
 failure surfaces at server startup as a missing-submodule traceback that looks
 like a library bug, and it surfaces at the moment you have an audience.
@@ -114,7 +114,7 @@ curl -s localhost:8100/health | python -m json.tool
 
 `llm_model`, `embedding_model`, `embedding_dimension`, and
 `episodic.worker_alive` all come from the live config. The UI header renders the
-same values from `/config` for the same reason — an audience notices when the
+same values from `/config` for the same reason: an audience notices when the
 slide and the screen disagree.
 
 ## The demo script
@@ -134,7 +134,7 @@ buttons in the UI carry them verbatim so you never have to retype them on stage.
 Step 4 works because the cache tries an exact-match lookup on a B-tree index
 before the vector search. Atlas Search indexes are eventually consistent, so a
 response cached at the end of one turn is typically not `$vectorSearch`-queryable
-for a few seconds — and this demo asks the repeat question immediately. The fast
+for a few seconds, and this demo asks the repeat question immediately. The fast
 path is not a demo cheat; a production semantic cache wants it for the same
 reason an exact repeat should not pay for an embedding round-trip.
 
@@ -156,13 +156,13 @@ so the provenance chain is on screen rather than asserted.
 A note on reading those scores live: `$rankFusion` returns a reciprocal-rank sum,
 so with the default `k` of 60 a **first-place** document scores about 1/61 ≈
 `0.016`. On a projector that reads as a failed match. The panel therefore leads
-with `#1`, `#2` and keeps the raw value beside it — no rescaled "relevance
+with `#1`, `#2` and keeps the raw value beside it, with no rescaled "relevance
 percentage", because that number would be invented rather than measured.
 
 ## Layout
 
 ```
-server/          FastAPI + SSE. No agent framework — the loop in turn.py is the agent.
+server/          FastAPI + SSE. No agent framework; the loop in turn.py is the agent.
   app.py         Routes: /chat (SSE), /memories, /reset, /health, /config
   turn.py        recall → prompt → stream → write back
   cache_key.py   Semantic cache keyed on user_id AND memory_enabled

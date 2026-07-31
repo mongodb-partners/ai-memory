@@ -1,8 +1,8 @@
 # How to scope memory to a user
 
 Every memory operation is scoped to a user. `user_id` is the first positional
-argument on every method, and there is no unscoped read — not a convention you
-should follow, but a signature you cannot avoid.
+argument on every method, and there is no unscoped read. That is not a convention
+you should follow, but a signature you cannot avoid.
 
 That covers the easy case. The hard case is when the code that *knows* the user is
 not the code that *logs the turn*.
@@ -10,7 +10,7 @@ not the code that *logs the turn*.
 ## The problem
 
 An HTTP handler knows the user id. A callback buried inside an agent loop is where
-the turn actually gets logged — and it has no argument for it. Threading
+the turn actually gets logged, and it has no argument for it. Threading
 `user_id` down through every layer works, but it means every intermediate function
 grows a parameter it does not use, and any framework in the middle that does not
 forward it breaks the chain.
@@ -34,14 +34,14 @@ async def on_turn_end(messages):
 ```
 
 `current_user_id()` returns `None` outside any `scoped_user` block. Treat that as
-"do not log" rather than "log unscoped" — a turn without a `user_id` is discarded
+"do not log" rather than "log unscoped". A turn without a `user_id` is discarded
 by the write path anyway, so guarding explicitly just makes the intent visible.
 
 ## Why `ContextVar` and not a global
 
 A module-level global would be shared by every concurrent request in the process.
 Two users hitting the same server would overwrite each other's id, and the bug
-would appear as cross-tenant data — the worst possible failure for a memory
+would appear as cross-tenant data: the worst possible failure for a memory
 system, and one that only shows up under concurrency.
 
 `ContextVar` gives each asyncio Task and each thread its own copy. Concurrent
@@ -54,7 +54,7 @@ requests cannot see each other's value. This is the same primitive
 nothing else. The `ContextVar` itself is module-private on purpose.
 
 An exposed variable invites `_user_id_var.set(x)` without a matching `reset()`.
-That leaks the id into whatever the framework schedules next on that task —
+That leaks the id into whatever the framework schedules next on that task,
 which, in an async server reusing tasks, can be a different user's request. The
 context manager always resets its token in a `finally`, including on an
 exception, so the leak is not possible through the public surface.
@@ -74,7 +74,7 @@ with scoped_user("u1"):
 Set the scope once, at the edge, where the user id is first authenticated:
 
 ```python
-# FastAPI middleware — one place, every route
+# FastAPI middleware: one place, every route
 @app.middleware("http")
 async def bind_user(request, call_next):
     user_id = request.headers.get("x-user-id")
@@ -102,7 +102,7 @@ ctx = contextvars.copy_context()
 await loop.run_in_executor(None, lambda: ctx.run(sync_work))
 ```
 
-Without that, the worker thread sees `None` — which fails closed (no `user_id`, no
+Without that, the worker thread sees `None`, which fails closed (no `user_id`, no
 document) rather than misattributing the turn.
 
 ## Isolation on the read side
@@ -113,13 +113,13 @@ the `$vectorSearch` filter *and* in the `$search` compound clause, so neither
 branch of the hybrid pipeline can surface another user's turn.
 
 This is why the vector index declares `user_id` as a filter field. An undeclared
-filter field in a `$vectorSearch` pre-filter does not raise — the branch silently
+filter field in a `$vectorSearch` pre-filter does not raise: the branch silently
 returns nothing. In this case the failure direction is safe (no results rather
 than the wrong results), but it means an index misconfiguration looks exactly like
 an empty collection.
 
 ## See also
 
-- [The document shape](../reference/episodic-document-shape.md) — required fields
+- [The document shape](../reference/episodic-document-shape.md): required fields
   and the filter-field declarations
-- [Architecture](../explanation/architecture.md) — where the access check sits
+- [Architecture](../explanation/architecture.md): where the access check sits

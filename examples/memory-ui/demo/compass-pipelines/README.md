@@ -6,12 +6,12 @@ and it is one pipeline against one database.
 
 | File | Collection | Shows |
 |---|---|---|
-| `01-hybrid-recall-memories.json` | `memories` | `$rankFusion` fusing a `$vectorSearch` branch and a `$search` branch — semantic recall |
-| `02-hybrid-recall-episodes.json` | `episodes` | the same fusion over the activity log — "what did we actually do?" |
+| `01-hybrid-recall-memories.json` | `memories` | `$rankFusion` fusing a `$vectorSearch` branch and a `$search` branch: semantic recall |
+| `02-hybrid-recall-episodes.json` | `episodes` | the same fusion over the activity log: "what did we actually do?" |
 | `03-stm-to-ltm-promotion.json` | `memories` | the promotion criteria, as a query: which short-term memories have earned durability |
-| `04-tier-inventory.json` | `memories` | one row per tier with counts and mean importance — the four-tier slide, live |
+| `04-tier-inventory.json` | `memories` | one row per tier with counts and mean importance: the four-tier slide, live |
 
-Seed a user first, or these run over an empty collection. The order matters —
+Seed a user first, or these run over an empty collection. The order matters:
 seeding before the server is up leaves pipeline 03 with no rows at all, for a
 reason worth knowing: see [Optional: seed a user, and mind the
 order](../../README.md#optional-seed-a-user-and-mind-the-order).
@@ -41,7 +41,7 @@ audience. `--query` and `--user` should match what you are about to demo.
 document ranked **first** in one branch contributes `1/61 ≈ 0.016`. So a perfect
 top hit displays as `0.0164`, and on a projector that reads as a failed match.
 
-Say the number is a rank sum, not a similarity, and move on — or point at the
+Say the number is a rank sum, not a similarity, and move on, or point at the
 panel, which pre-renders `#1 · rrf 0.0164` for exactly this reason. Do not rescale
 it into a "relevance percentage": that number would be invented, and someone in a
 booth crowd at an AI conference will ask how it was computed.
@@ -55,5 +55,5 @@ remembering to add a `WHERE` clause.
 
 **The `$addFields` stage is not decoration.** `$rankFusion` does not project its
 own fused rank. Worse, writing `{"score": {"$meta": "score"}}` inside an exclusion
-`$project` does not error — it silently yields `null`. It has to be its own stage.
+`$project` does not error, it silently yields `null`. It has to be its own stage.
 Verified against Atlas 8.3; this is the kind of thing that costs an afternoon.

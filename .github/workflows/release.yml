@@ -1,5 +1,5 @@
 # Publishing is deliberately NOT automatic. agent-memory is not on PyPI and is
-# installed with `uv add git+https://github.com/mongodb-partners/ai-memory.git`.
+# installed with `uv add git+https://github.com/mongodb-partners/agent-memory.git`.
 # A tag push therefore builds and verifies only — the publish jobs are reachable
 # solely by a manual workflow_dispatch, so nobody releases the name by tagging.
 # Both publish jobs also need a GitHub environment (`testpypi` / `pypi`) with

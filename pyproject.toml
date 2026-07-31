@@ -100,14 +100,14 @@ dev = [
 ]
 
 # PyPI metadata is immutable per release, so these point at the repository's
-# current name. GitHub issues a permanent redirect after a rename, so an
-# ai-memory URL keeps resolving once the repo becomes agent-memory; the reverse
-# would 404 until the rename actually happened.
+# current name. The rename from ai-memory has happened, so agent-memory is the
+# name that resolves directly; GitHub's permanent redirect keeps any older
+# ai-memory URL working, which is why nothing published earlier is broken.
 [project.urls]
-Homepage = "https://github.com/mongodb-partners/ai-memory"
-Repository = "https://github.com/mongodb-partners/ai-memory"
-Issues = "https://github.com/mongodb-partners/ai-memory/issues"
-Changelog = "https://github.com/mongodb-partners/ai-memory/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/mongodb-partners/agent-memory"
+Repository = "https://github.com/mongodb-partners/agent-memory"
+Issues = "https://github.com/mongodb-partners/agent-memory/issues"
+Changelog = "https://github.com/mongodb-partners/agent-memory/blob/main/CHANGELOG.md"
 
 [project.scripts]
 agent-memory = "agent_memory.__main__:main"

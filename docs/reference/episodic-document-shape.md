@@ -17,7 +17,7 @@ service, this is what you can rely on.
   "messages": [ /* below */ ],
   "todos": [ /* below */ ],
   "files_touched": [ /* below */ ],
-  "correlation_id": "trace-abc",  // "" when absent — never null
+  "correlation_id": "trace-abc",  // "" when absent, never null
   "step": 0,                   // monotonic per thread; null if the counter failed
   "parent_step": null,         // step - 1, or null at step 0
   "search_text": "…",          // OMITTED unless the turn is searchable
@@ -26,8 +26,8 @@ service, this is what you can rely on.
 ```
 
 **What the library returns is not quite what is stored.** Reads project
-`embedding` out — a 1536-float array per turn would dominate the response for no
-reader benefit — and coerce BSON to JSON-safe values in place: `_id` becomes a
+`embedding` out (a 1536-float array per turn would dominate the response for no
+reader benefit) and coerce BSON to JSON-safe values in place: `_id` becomes a
 string, `ts` becomes an ISO string, and the coercion recurses into `messages[]`,
 `todos[]`, and `files_touched[]`. Query the collection directly (Compass, an
 aggregation) and you see the raw BSON above, `embedding` included.
@@ -36,7 +36,7 @@ Four of those defaults are load-bearing:
 
 **`user_id` and `thread_id` are required.** A turn missing either is discarded
 with a warning rather than stored unscoped. This is the write-side half of tenant
-isolation — there is no such thing as an episodic record you can read without a
+isolation: there is no such thing as an episodic record you can read without a
 `user_id`.
 
 **`correlation_id` is `""`, not `null`, when absent.** A null would create a null
@@ -53,7 +53,7 @@ embedding is generated *before* `search_text` is assigned, so a failure leaves
 neither field. You will never find a document that has searchable text but no
 vector to match it, which would look indexed while being unfindable.
 
-## `messages[]` — seven keys, in order
+## `messages[]`: seven keys, in order
 
 ```jsonc
 {
@@ -79,24 +79,24 @@ answer.
 Messages may be passed as objects with attributes *or* as plain dicts. Both
 project identically, which is what keeps this framework-neutral.
 
-## `todos[]` — three keys
+## `todos[]`: three keys
 
 ```jsonc
 { "id": "1", "content": "Check availability", "status": "pending" }
 ```
 
 `status` is one of `pending`, `in_progress`, `completed`. An unrecognized status
-clamps to `pending` rather than raising — a malformed todo should not cost you
+clamps to `pending` rather than raising, since a malformed todo should not cost you
 the whole turn. `text` is accepted as an alias for `content`, since agent
 frameworks disagree about which name to use.
 
-## `files_touched[]` — four keys, sorted by path
+## `files_touched[]`: four keys, sorted by path
 
 ```jsonc
 { "path": "plan.md", "size": 1284, "content_hash": null, "op": "write" }
 ```
 
-Derived from tool calls on assistant messages, never from the filesystem — this
+Derived from tool calls on assistant messages, never from the filesystem. This
 projection does no I/O.
 
 - **Latest call per path wins.** A write followed by an edit produces one entry,
@@ -113,14 +113,14 @@ no files touched.
 
 ## When a turn is searchable
 
-By default only **final steps** get embedded — a step that ends in a tool request
+By default only **final steps** get embedded. A step that ends in a tool request
 has a question but no answer yet, so its vector would represent half a turn. Set
 `episodic_embed_final_steps_only=False` to embed every turn instead: more recall
 surface, more embedding cost.
 
 The searchable text is built from the turn's first question and last answer,
 capped at `episodic_search_text_cap` (2000 characters). A turn with only one role
-— all human, or all assistant — produces no text, so it is **stored but not
+(all human, or all assistant) produces no text, so it is **stored but not
 recallable** by `recall_activity`. The library logs a warning once per thread
 when that happens, because the document silently lacks two fields and would
 otherwise just seem to be missing from search results.
@@ -152,6 +152,6 @@ against it quietly stops matching.
 ## A note on `episodes_counters`
 
 Per-thread step counters live in their own collection, not in `episodes`. That
-keeps `episodes` homogeneous — one document shape, one TTL policy, one index set.
+keeps `episodes` homogeneous: one document shape, one TTL policy, one index set.
 A counter document is not a turn, and mixing them would mean the TTL index either
 expires counters that are still in use or retains turns longer than intended.

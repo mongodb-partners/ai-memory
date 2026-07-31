@@ -2,14 +2,14 @@
 
 Episodic logging is deliberately fire-and-forget: `log_activity` builds the
 document, enqueues it, and returns without awaiting Atlas or the embedder. That
-is what keeps it off the agent's critical path — and it is also why it can
+is what keeps it off the agent's critical path, and it is also why it can
 degrade without anyone noticing. Nothing raises. The counters are how you find
 out.
 
 ## The counters
 
 ```python
-stats = memory.activity_stats()     # synchronous — safe inside a health probe
+stats = memory.activity_stats()     # synchronous: safe inside a health probe
 ```
 
 ```jsonc
@@ -39,7 +39,7 @@ The counters are cumulative since process start, so what matters is the
 | Signal | What it means | What to do |
 |---|---|---|
 | `enqueued - written - queue_depth > 0` | Turns went in and did not come out | Check `dropped` and `write_failures` |
-| `dropped` rising | The queue filled; the oldest turns were evicted | The writer cannot keep up — raise `episodic_batch_size`, or check Atlas latency |
+| `dropped` rising | The queue filled; the oldest turns were evicted | The writer cannot keep up. Raise `episodic_batch_size`, or check Atlas latency |
 | `queue_depth` near `queue_capacity` | Saturation is imminent | Same as above, before data loss starts |
 | `worker_alive: false` with `episodic_enabled: true` | No consumer. The queue will fill, then drop | Usually `workers_in_process=False` without an external runtime |
 | `write_failures` rising | `insert_many` is failing | Connection, auth, or a write concern that cannot be satisfied |
@@ -52,14 +52,14 @@ than outages:
 **`embed_failures` means searchable recall is broken while everything looks
 fine.** The turn is in Atlas. `get_thread` returns it. `get_activity_by_correlation`
 returns it. Only `recall_activity` cannot find it, because the document has
-neither `search_text` nor `embedding` — the embedding is generated *before*
+neither `search_text` nor `embedding`. The embedding is generated *before*
 `search_text` is assigned, so a failure leaves both absent rather than leaving a
 searchable document with no vector to match. That is the safe failure, but it
 still costs you recall.
 
 **`dropped` is the only counter that means data is gone.** When the queue is
-full the *oldest* pending turn is evicted, never the newest — a stale turn is
-worth less than a fresh one, and dropping the newest would mean the log goes
+full the *oldest* pending turn is evicted, never the newest, because a stale turn
+is worth less than a fresh one, and dropping the newest would mean the log goes
 blind exactly when the agent is busiest. But a drop is unrecoverable.
 
 ## Wiring it to `/health`
@@ -78,7 +78,7 @@ curl localhost:8000/health
 ```
 
 `/health` returns the counters alongside liveness because a 200 with a saturated
-queue and climbing `write_failures` is not health — it is a process that is up and
+queue and climbing `write_failures` is not health. It is a process that is up and
 losing data. Reporting both lets the probe be honest.
 
 If `activity_stats()` itself raises, `/health` still returns 200 with the
@@ -88,10 +88,10 @@ takes down a healthy process.
 ## Suggested alerts
 
 ```
-rate(dropped) > 0                        page — data is being lost
-rate(write_failures) > 0 for 5m          page — nothing is reaching Atlas
-rate(embed_failures) / rate(enqueued) > 0.05 for 10m   warn — recall degrading
-queue_depth / queue_capacity > 0.8 for 5m              warn — saturation ahead
+rate(dropped) > 0                        page: data is being lost
+rate(write_failures) > 0 for 5m          page: nothing is reaching Atlas
+rate(embed_failures) / rate(enqueued) > 0.05 for 10m   warn: recall degrading
+queue_depth / queue_capacity > 0.8 for 5m              warn: saturation ahead
 worker_alive == false                    page (unless episodic_enabled is false)
 ```
 
@@ -122,7 +122,7 @@ is fixed rather than incidental.
 The counters tell you about the writer. Compass tells you about the result:
 
 ```javascript
-// Turns stored but not recallable — should track embed_failures
+// Turns stored but not recallable: should track embed_failures
 db.episodes.countDocuments({ search_text: { $exists: false } })
 
 // Turns whose step counter failed. Nonzero means the counter collection is
@@ -137,7 +137,7 @@ db.episodes.aggregate([
 ```
 
 A large `search_text: {$exists: false}` count with `embed_failures: 0` is not a
-failure — it is `episodic_embed_final_steps_only` doing its job. Mid-turn steps
+failure. It is `episodic_embed_final_steps_only` doing its job. Mid-turn steps
 are stored unembedded by design.
 
 ## Audit trail
@@ -149,8 +149,8 @@ costs more writes than the agent itself. Grouping by user rather than emitting
 one entry per batch matters because a batch can span users, and misattributing
 turns in an audit trail is worse than having none.
 
-Governance and rate limiting still apply on every single `log_activity` call —
-it is the audit *record* that is batched, not the access check.
+Governance and rate limiting still apply on every single `log_activity` call. It
+is the audit *record* that is batched, not the access check.
 
 ### When MongoDB will not take the audit entries
 
@@ -161,11 +161,11 @@ the file goes and how large it may get:
 | Setting | Default | Notes |
 |---|---|---|
 | `audit_fallback_path` | `audit_fallback.jsonl` | Resolved to an absolute path once, at startup |
-| `audit_fallback_max_bytes` | `52428800` (50 MiB) | Rotates to a single `.1` sibling — twice this on disk. `0` disables rotation |
+| `audit_fallback_max_bytes` | `52428800` (50 MiB) | Rotates to a single `.1` sibling, so twice this on disk. `0` disables rotation |
 
 Set the path explicitly. The default is relative, which means "wherever the
-process was started" — a systemd unit's `WorkingDirectory`, a container's
-`WORKDIR`, a developer's shell — and an operator asked to produce an audit trail
+process was started" (a systemd unit's `WorkingDirectory`, a container's
+`WORKDIR`, a developer's shell), and an operator asked to produce an audit trail
 should not have to reconstruct that first. It is resolved once at construction
 rather than per write, so a process that changes directory cannot split one
 incident's records across two files.
@@ -189,5 +189,5 @@ mongoimport --uri "$MONGODB_CONNECTION_STRING" \
   --collection audit_log --file audit_fallback.jsonl
 ```
 
-Check for a `.1` sibling first — it holds the beginning of the incident, and
+Check for a `.1` sibling first. It holds the beginning of the incident, and
 importing only the live file silently drops it.
