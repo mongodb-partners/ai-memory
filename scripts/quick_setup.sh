@@ -221,7 +221,13 @@ step "Installing frontend dependencies"
 ( cd examples/memory-ui/frontend && npm install )
 
 step "Starting the frontend on 5173"
-( cd examples/memory-ui/frontend && npm run dev ) &
+# `--host 127.0.0.1` explicitly, because vite.config.ts sets `host: true`, which
+# binds every interface. That config also proxies /api to the demo backend, and
+# that backend has no auth — so the default would publish every route of an
+# unauthenticated memory store to the LAN. README.md also promises that this
+# setup binds loopback only. The flag overrides the config; the config is left
+# alone because it predates this script and `npm run dev` by hand is its own case.
+( cd examples/memory-ui/frontend && npm run dev -- --host 127.0.0.1 ) &
 PIDS+=($!); LABELS+=("the frontend on 5173")
 wait_for http://localhost:5173/ "frontend" || fail \
     "the frontend did not come up. Start it alone to see the error:
