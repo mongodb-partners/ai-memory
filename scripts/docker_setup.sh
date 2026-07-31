@@ -94,9 +94,13 @@ while [ "$attempt" -lt 60 ]; do
         echo; break
     fi
     for name in agent-memory demo-api demo-ui; do
-        if [ "$(health_of "$name")" = restarting ]; then
+        status="$(health_of "$name")"
+        if [ "$status" = restarting ]; then
             echo
             fail "$name is crash-looping. Its error is in: docker compose logs $name"
+        elif [ "$status" = unhealthy ]; then
+            echo
+            fail "$name is up but failing its healthcheck. Its error is in: docker compose logs $name"
         fi
     done
     attempt=$((attempt + 1))
