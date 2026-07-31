@@ -236,7 +236,7 @@ const ChatContext = createContext<ChatContextValue | null>(null);
 const initialState: State = {
   messages: [],
   isLoading: false,
-  userId: 'ai4-demo',
+  userId: 'memory-demo',
   threadId: genId(),
   streamingId: null,
   // Starts ON. The demo's arc is ON → OFF → ON, and a UI that boots into the

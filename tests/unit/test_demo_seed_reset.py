@@ -299,10 +299,10 @@ class TestWipeOnlyPlantsNothing:
             lambda user, **kwargs: calls.append(f"seed:{user}") or 0,
         )
         monkeypatch.setattr("demo.seed.asyncio.run", lambda coro: coro)
-        monkeypatch.setattr(sys, "argv", ["seed", "--user", "ai4-demo"])
+        monkeypatch.setattr(sys, "argv", ["seed", "--user", "memory-demo"])
 
         assert main() == 0
-        assert calls == ["seed:ai4-demo"]
+        assert calls == ["seed:memory-demo"]
 
     def test_wipe_only_with_keep_is_rejected(self, monkeypatch) -> None:
         """`--keep` means "add to existing data"; together they contradict.
@@ -388,11 +388,11 @@ class TestTheResetRouteReportsRealCounts:
     @pytest.mark.asyncio
     async def test_the_episode_count_is_the_librarys_own(self) -> None:
         async for client, db in self._client():
-            db["episodes"].docs.extend([{"user_id": "ai4-demo"}] * 9)
-            db["memories"].docs.extend([{"user_id": "ai4-demo"}] * 4)
+            db["episodes"].docs.extend([{"user_id": "memory-demo"}] * 9)
+            db["memories"].docs.extend([{"user_id": "memory-demo"}] * 4)
 
             r = client.post("/reset",
-                            json={"user_id": "ai4-demo", "confirm": True})
+                            json={"user_id": "memory-demo", "confirm": True})
 
             assert r.status_code == 200, r.text
             body = r.json()
@@ -410,10 +410,10 @@ class TestTheResetRouteReportsRealCounts:
         happened is that some of the user's data is still there — and the
         difference decides whether the operator retries or starts debugging."""
         async for client, db in self._client(failing={"decisions"}):
-            db["memories"].docs.extend([{"user_id": "ai4-demo"}] * 3)
+            db["memories"].docs.extend([{"user_id": "memory-demo"}] * 3)
 
             r = client.post("/reset",
-                            json={"user_id": "ai4-demo", "confirm": True})
+                            json={"user_id": "memory-demo", "confirm": True})
 
             assert r.status_code == 409, r.text
             detail = r.json()["detail"]
@@ -424,9 +424,9 @@ class TestTheResetRouteReportsRealCounts:
     @pytest.mark.asyncio
     async def test_the_confirm_gate_still_holds(self) -> None:
         async for client, db in self._client():
-            db["memories"].docs.append({"user_id": "ai4-demo"})
+            db["memories"].docs.append({"user_id": "memory-demo"})
 
-            r = client.post("/reset", json={"user_id": "ai4-demo"})
+            r = client.post("/reset", json={"user_id": "memory-demo"})
 
             assert r.status_code == 400
             assert db["memories"].docs, "a reset ran without confirmation"

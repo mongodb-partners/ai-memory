@@ -255,7 +255,7 @@ export default function Header() {
             style={userInputStyle}
             value={userId}
             onChange={(e) => setUserId(e.target.value)}
-            placeholder="ai4-demo"
+            placeholder="memory-demo"
             aria-label="User ID"
             spellCheck={false}
           />
