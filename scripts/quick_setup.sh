@@ -128,7 +128,14 @@ PY
 
 # ── 4. Dependencies ──────────────────────────────────────────────────────────
 step "Installing dependencies"
-uv sync --frozen --extra demo || uv sync --extra demo
+# --frozen first so a clean checkout installs exactly the locked versions; the
+# unpinned retry covers a lock that is behind pyproject.toml. If both fail the
+# script would otherwise die on `set -e` showing only uv's stderr.
+uv sync --frozen --extra demo || uv sync --extra demo || fail \
+    "installing dependencies failed. Both \`uv sync --frozen --extra demo\` and the
+  unpinned retry failed — uv's own error is above. Common causes: no network, or a
+  uv.lock that no longer matches pyproject.toml. To see it alone:
+  uv sync --extra demo"
 
 # ── 5. Port preflight ────────────────────────────────────────────────────────
 # Before anything starts. `wait_for` probes a URL, not a process it owns, so a
@@ -237,12 +244,15 @@ if [ "$DO_SEED" = true ]; then
     # diagnosis, so the script surfaces that rather than re-deriving thresholds.
     ( cd examples/memory-ui && uv run --extra demo python -m demo.seed --user "$SEED_USER" ) || fail \
         "seeding reported a problem above. Retry with:
-  cd examples/memory-ui && uv run --extra demo python -m demo.seed --user $SEED_USER"
+  cd examples/memory-ui && uv run --extra demo python -m demo.seed --user '${SEED_USER}'"
 fi
 
 # ── 8. Frontend ──────────────────────────────────────────────────────────────
 step "Installing frontend dependencies"
-( cd examples/memory-ui/frontend && npm install )
+( cd examples/memory-ui/frontend && npm install ) || fail \
+    "installing the frontend dependencies failed. npm's own error is above. To see
+  it alone:
+  cd examples/memory-ui/frontend && npm install"
 
 step "Starting the frontend on 5173"
 # `--host 127.0.0.1` explicitly, because vite.config.ts sets `host: true`, which
