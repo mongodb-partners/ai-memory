@@ -75,7 +75,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      # Matches the server's: create() provisions indexes on a cold Atlas cluster.
+      # Same 60s as the server, but it is covering strictly more work, so do not
+      # read the two as equivalent and trim this one to match. Past create()
+      # provisioning indexes on a cold Atlas cluster, this service also runs
+      # DemoResponseCache.ensure_indexes, which builds two B-tree indexes and a
+      # vectorSearch index -- and computing numDimensions for it costs a live
+      # embedding round trip (cache_key.py's "dimension probe").
       start_period: 60s
 
   demo-ui:
