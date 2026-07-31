@@ -165,6 +165,11 @@ else
 fi
 
 # ── 6. Processes ─────────────────────────────────────────────────────────────
+# Job control, so each `&` below leads its own process group and cleanup can
+# signal a whole wrapper-plus-grandchild tree at once. Enabled here rather than
+# at the top of the file so the preflight steps keep the shell's default
+# behaviour; `set +m` is not needed, nothing after this point depends on it.
+set -m
 PIDS=()
 # Parallel to PIDS, so the watch loop at the end can name what died rather than
 # printing a bare pid. Two indexed arrays, not one associative array: bash 3.2.
@@ -182,16 +187,23 @@ cleanup() {
     if [ "$CLEANED_UP" = true ]; then return 0; fi
     CLEANED_UP=true
     printf '\n==> Shutting down\n'
+    # The process *group*, not just the pid. Every child here is a wrapper —
+    # `uv run` around uvicorn, `npm` around vite — and the thing actually holding
+    # the port is the grandchild. If a wrapper dies without passing the signal on
+    # (a SIGKILL, say) that grandchild is reparented to init, and a pid-only kill
+    # can no longer see it: it survives, still bound to 8100. `set -m` above gave
+    # each job its own group, so signalling -pid reaches the whole tree.
+    # Plain TERM, so uvicorn and vite run their own shutdown; the drain below
+    # waits for it.
     local pid
     for pid in "${PIDS[@]:-}"; do
-        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+        [ -n "$pid" ] || continue
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
     done
     # Drain before exiting: uvicorn holds 8100 until its own shutdown completes,
     # so returning the prompt immediately would hand the next run a stale
-    # listener. Plain TERM above, not SIGKILL, because TERM is what `uv run`
-    # forwards to the interpreter underneath it — a KILL would orphan that
-    # grandchild instead of stopping it. `|| true` so an interrupted `wait` does
-    # not trip `set -e` and skip the exit below.
+    # listener. `|| true` so an interrupted `wait` does not trip `set -e` and
+    # skip the exit below.
     wait 2>/dev/null || true
     exit "$status"
 }
