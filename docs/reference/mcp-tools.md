@@ -15,7 +15,7 @@ connects by URL rather than launching the server. See
 ## Two conventions that govern every tool
 
 **`user_id` is a declared parameter, but it is not believed.** Every tool takes
-`user_id` — an MCP client legitimately names the user in single-tenant use — and
+`user_id` (an MCP client legitimately names the user in single-tenant use) and
 routes it through one identity resolver first:
 
 | `auth_enabled` | Who the call acts as |
@@ -24,7 +24,7 @@ routes it through one identity resolver first:
 | `true` | The verified token's identity. Naming a **different** user returns an error dict |
 
 With auth on, a token that cannot be read is a refusal rather than a downgrade to
-the client-supplied `user_id` — failing open there would honour the argument on
+the client-supplied `user_id`. Failing open there would honour the argument on
 exactly the deployment that configured tenant binding.
 
 **A refusal is a return value, not an exception.** `AccessError`, its
@@ -36,7 +36,7 @@ That matters to anything wrapping these tools: "returned without raising" is not
 evidence the call was authorised. A wrapper that assumes it, then re-reads
 `user_id` from the raw arguments, reintroduces a cross-tenant write.
 
-Anything else — a MongoDB failure, an `EmbeddingError` — propagates as an
+Anything else (a MongoDB failure, an `EmbeddingError`) propagates as an
 exception and FastMCP reports it as a tool error.
 
 ## Response envelopes
@@ -56,7 +56,7 @@ more keys appear:
  "max_response_bytes": 16777216}
 ```
 
-At least one document is always kept, even if it alone exceeds the cap — a
+At least one document is always kept, even if it alone exceeds the cap. A
 too-large answer is more useful than no answer.
 
 ## Semantic memory
@@ -88,7 +88,7 @@ re-ranking. The tool to build a prompt from.
 
 `tier` is a list drawn from `["stm", "ltm"]`; omitted, both are searched. Each
 result carries a `final_score`. `memory_type` is accepted and is a declared filter
-field on both indexes, but nothing populates it — see
+field on both indexes, but nothing populates it. See
 [the memory document shape](memory-document-shape.md).
 
 ### `hybrid_search`
@@ -99,7 +99,7 @@ hybrid_search(user_id: str, query: str, tier: list[str] | None = None,
               tags: list[str] | None = None) -> dict
 ```
 
-The raw `$rankFusion` result — reciprocal rank fusion over a vector branch and a
+The raw `$rankFusion` result: reciprocal rank fusion over a vector branch and a
 full-text branch in one round trip, so exact terms (SKUs, error codes, names) and
 meaning both count. No re-ranking, no duplicate collapsing. Use it to see what the
 index actually thinks.
@@ -197,7 +197,7 @@ recall_decision(user_id: str, key: str) -> dict
 ```
 
 → missing or expired: `{"key": "<key>", "value": null}`. An expired decision is
-indistinguishable from one that never existed, which is the point — an expiry is
+indistinguishable from one that never existed, which is the point: an expiry is
 the decision ceasing to apply.
 
 ## Episodic memory
@@ -217,7 +217,7 @@ Atlas or the embedder.
 → `{"enqueued": true, "thread_id": "t-1"}`
 
 `enqueued: false` means the bounded queue was full and the **oldest** pending turn
-was dropped to make room. A `true` means accepted, not durable — the
+was dropped to make room. A `true` means accepted, not durable. The
 [counters](../how-to/observability.md) are how you confirm turns are landing.
 
 This is the one tool whose successes are not individually audited. A turn log is
@@ -232,7 +232,7 @@ search_activity(user_id: str, query: str, thread_id: str | None = None,
                 agent_name: str | None = None, limit: int = 5) -> dict
 ```
 
-Hybrid recall over logged turns — "what did the agent actually do?"
+Hybrid recall over logged turns: "what did the agent actually do?"
 
 → the `results` envelope, with `count` labelled over turns.
 
@@ -255,7 +255,7 @@ get_correlation(user_id: str, correlation_id: str,
                 limit: int | None = None) -> dict
 ```
 
-Every logged turn sharing a trace id — the join back to your tracing stack.
+Every logged turn sharing a trace id, the join back to your tracing stack.
 Accepts a W3C `traceparent`. → the `results` envelope.
 
 Withheld from `end_user` by default: trace ids come from operators.
@@ -283,7 +283,7 @@ the index changed.
 turns forever.
 
 `user_id` here is the principal the call is authorised and audited against, not a
-scope — a TTL index belongs to the collection, hence `scope: "collection"`. Admin
+scope. A TTL index belongs to the collection, hence `scope: "collection"`. Admin
 only, and enforced independently of whether governance is switched on, because
 one tenant must not be able to shorten another's retention. See
 [Configure retention](../how-to/configure-ttl.md).
@@ -309,7 +309,7 @@ key is absent rather than zero when nothing is in that state. Soft-deleted
 memories are excluded from every count.
 
 Per-user counts, not process health. For the process, use the unauthenticated
-`GET /health` route the shell registers alongside the MCP endpoint — it returns
+`GET /health` route the shell registers alongside the MCP endpoint. It returns
 the same body the REST shell serves, so a monitor gets one answer about one
 process regardless of which port it targets. Before lifespan startup it returns
 `{"status": "starting"}`.
@@ -321,7 +321,7 @@ wipe_user_data(user_id: str, confirm: bool = False) -> dict
 ```
 
 Permanently deletes every document this user owns, in every user-scoped
-collection. Irreversible — not a soft delete.
+collection. Irreversible, and not a soft delete.
 
 → without `confirm`, nothing is deleted:
 
@@ -379,8 +379,8 @@ account to file a refusal under: not the named user's, and not the caller's,
 since it records an operation that did not happen.
 
 The stored text is `Tool: <name> | Query: <params> | Result: <result>`, with each
-part given its own share of the character budget — two thirds to the result, one
-third to the params — and each truncation marked with an ellipsis. Budgeting per
+part given its own share of the character budget (two thirds to the result, one
+third to the params) and each truncation marked with an ellipsis. Budgeting per
 part is what keeps the result present at all; a single cut across the joined
 string let a long params dict consume the whole budget and drop the outcome, and a
 cut inside a repr reads as a complete sentence that happens to be false.
@@ -390,8 +390,8 @@ message, authorised as the calling identity and role.
 
 ## See also
 
-- [REST API](rest-api.md) — the other shell, and where its surface is narrower
-- [Configuration](configuration.md) — every setting named above
-- [Governance](governance.md) — which roles may call which of these
-- [The memory document shape](memory-document-shape.md) — what a stored memory looks like
-- [The episodic document shape](episodic-document-shape.md) — what `log_activity` produces
+- [REST API](rest-api.md): the other shell, and where its surface is narrower
+- [Configuration](configuration.md): every setting named above
+- [Governance](governance.md): which roles may call which of these
+- [The memory document shape](memory-document-shape.md): what a stored memory looks like
+- [The episodic document shape](episodic-document-shape.md): what `log_activity` produces

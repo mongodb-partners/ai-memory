@@ -2,12 +2,12 @@
 
 Three separate mechanisms, in the order a request meets them:
 
-1. **Authentication** — is this a valid token? (401)
-2. **Identity resolution** — which user does it act as? (403)
-3. **Access check** — may that user perform this operation, this often? (403 / 429)
+1. **Authentication**: is this a valid token? (401)
+2. **Identity resolution**: which user does it act as? (403)
+3. **Access check**: may that user perform this operation, this often? (403 / 429)
 
 Each is independently switchable, and the defaults are `auth_enabled=False`,
-`governance_enabled=False`, `rate_limit_enabled=False` — a library embedded in one
+`governance_enabled=False`, `rate_limit_enabled=False`. A library embedded in one
 process needs none of them.
 
 ## Authentication
@@ -18,8 +18,8 @@ warning and serve every route unauthenticated.
 
 Both shells accept the same bearer token, verified two ways:
 
-**API keys**, from the `MEMORY_MCP_API_KEYS` environment variable — not a config
-field:
+**API keys**, from the `MEMORY_MCP_API_KEYS` environment variable rather than a
+config field:
 
 ```bash
 export MEMORY_MCP_API_KEYS="abc123=alice@acme.com,xyz789=bob@acme.com"
@@ -33,7 +33,7 @@ constant time with respect to the submitted key. A resolved key produces claims
 *required*, not merely honoured when present:
 
 - Without `exp`, PyJWT accepts a token forever, and there is no other revocation
-  path here — a leaked token would be valid until the secret is rotated.
+  path here: a leaked token would be valid until the secret is rotated.
 - Without `iat`, "reject everything issued before the breach" stops being
   available as an incident response.
 
@@ -60,14 +60,14 @@ One function, `resolve_caller`, used by both shells. It returns a `Caller`:
 | `user_id` | The identity every downstream query is scoped to |
 | `role` | The role claim, or `None` meaning "use `auth_default_role`" |
 | `scopes` | The token's scopes |
-| `authenticated` | Where the identity came from — **not** whether it is valid |
+| `authenticated` | Where the identity came from, **not** whether it is valid |
 
 | `auth_enabled` | Behaviour |
 |---|---|
 | `false` | The caller-supplied `user_id` is the identity. Absent, that is a malformed request (REST: 400) |
 | `true` | The token's `auth_user_id_claim` (`sub`) decides, falling back to the token's `client_id` |
 
-With auth on, a request naming a **different** `user_id` is refused — never
+With auth on, a request naming a **different** `user_id` is refused, never
 silently rewritten, because a request asking for someone else's data is a request
 whose author is confused about whose data it is, and answering a different question
 hides that. The refusal is logged at warning: in a multi-tenant deployment it is
@@ -78,7 +78,7 @@ of "no identity" is not "any identity".
 
 `IdentityError` maps to **403, not 401**. The token is valid; retrying with it will
 not help, and the fix is to stop naming someone else. In MCP it comes back as an
-error dict — [see the convention](mcp-tools.md).
+error dict. [See the convention](mcp-tools.md).
 
 `authenticated` is a stored fact rather than something inferred from `role` and
 `scopes` being empty. A legitimate JWT can carry neither, so inferring would
@@ -97,7 +97,7 @@ wiped. It is first because it is cheapest, because a write about to be refused
 should not consume the caller's rate-limit budget, and because it is the one
 refusal about the state of the data rather than the identity of the caller.
 
-Only writes are barred — `store_memory`, `store_cache`, `store_decision`,
+Only writes are barred: `store_memory`, `store_cache`, `store_decision`,
 `log_activity`, `delete_memory`, `cache_invalidate`. Reads stay available and
 return progressively less as collections empty, which is honest.
 `ErasureInProgressError` subclasses `AccessError`, so it travels the existing
@@ -110,7 +110,7 @@ operation. Otherwise `AccessError`.
 compared. Over the limit is `RateLimitError`.
 
 All three refusals are **audited**. The check used to run ahead of the audit block
-entirely, so a denied operation and a throttled one left no record — the two events
+entirely, so a denied operation and a throttled one left no record. The two events
 an audit log exists to capture were the only two it could not show.
 
 The audit status distinguishes them: `denied` is a decision about who the caller
@@ -139,14 +139,14 @@ Per operation:
 | `log_activity` | ✅ | ✅ | ✅ |
 | `search_activity` | ✅ | ✅ | ✅ |
 | `get_thread` | ✅ | ✅ | ✅ |
-| `get_correlation` | ✅ | ✅ | — |
-| `delete_memory` | ✅ | ✅ | — |
-| `memory_health` | ✅ | ✅ | — |
-| `set_activity_retention` | ✅ | — | — |
-| `cache_invalidate` | ✅ | — | — |
-| `wipe_user_data` | ✅ | — | — |
-| `store_decision` | ✅ | — | — |
-| `recall_decision` | ✅ | — | — |
+| `get_correlation` | ✅ | ✅ | ❌ |
+| `delete_memory` | ✅ | ✅ | ❌ |
+| `memory_health` | ✅ | ✅ | ❌ |
+| `set_activity_retention` | ✅ | ❌ | ❌ |
+| `cache_invalidate` | ✅ | ❌ | ❌ |
+| `wipe_user_data` | ✅ | ❌ | ❌ |
+| `store_decision` | ✅ | ❌ | ❌ |
+| `recall_decision` | ✅ | ❌ | ❌ |
 
 `get_correlation` is withheld from `end_user` because trace ids come from
 operators. `set_activity_retention` is withheld from `power_user` because a TTL
@@ -155,11 +155,11 @@ retention.
 
 The two decision operations are in no default profile but `admin`'s wildcard, so
 with governance on, sticky decisions are effectively admin-only unless you add them
-to a profile. That is a gap rather than a policy — worth knowing before enabling
-governance on a deployment that uses them.
+to a profile. That is a gap rather than a policy, and worth knowing before
+enabling governance on a deployment that uses them.
 
 `governance_default_profile` defaults to `"default"`, and no profile is named
-`default`, so an unknown role falls through to `end_user` — the most restrictive
+`default`, so an unknown role falls through to `end_user`, the most restrictive
 profile, which is the right direction for a fallback.
 
 ### Editing a profile
@@ -182,28 +182,28 @@ to five minutes to take effect.
 an operation, every existing deployment would keep a profile that silently denies
 it, and the symptom is an `AccessError` on a feature the user just upgraded to get.
 
-So an existing profile gets `$addToSet` of any operations it is missing — additive
+So an existing profile gets `$addToSet` of any operations it is missing, additive
 only. Custom limits and operations an operator added by hand are left untouched,
 and **nothing is ever removed**. A backfill also evicts that role's cache entry
 rather than waiting out the TTL, since a stale copy is stale in exactly the
 direction that denies access.
 
 To restrict a default operation, remove it from the document *and* accept that the
-next upgrade adding operations will not put it back — only the operations in that
+next upgrade adding operations will not put it back. Only the operations in that
 release's defaults are re-added, and only if absent.
 
 ## Rate limiting
 
 A **fixed** window, counted atomically in MongoDB. The window bucket's `_id` is
 the composite `(user_id, operation, window_start)`, and the decision is the
-post-increment value of a single `$inc` — so N concurrent callers get N distinct
+post-increment value of a single `$inc`, so N concurrent callers get N distinct
 values and only those within the limit proceed.
 
 Window boundaries are derived from the epoch rather than from first-request time,
 so every process in a deployment agrees where a window starts without
 coordinating and all of them increment the same document.
 
-**A fixed window can admit up to `2 × max` across a boundary** — `max` late in one
+**A fixed window can admit up to `2 × max` across a boundary**: `max` late in one
 window, `max` early in the next. That is taken deliberately. A sliding window needs
 either a count over per-request documents or a read-modify-write over a sorted
 structure, and both reintroduce the race this replaced: under a burst, every
@@ -236,20 +236,20 @@ Governance has already run and is the control that must not be bypassed; this on
 is a throughput guard, and the safe failure for a throughput guard is to allow.
 
 Spent counters expire after `rate_limit_retention_seconds` (86400), raised to
-`rate_limit_window_seconds` when that is longer — a counter *is* the enforcement
+`rate_limit_window_seconds` when that is longer. A counter *is* the enforcement
 state, so expiring it inside its own window would reset a caller who had exhausted
 the limit.
 
 ## Two guards that do not depend on governance
 
 Governance is opt-in, and an authorisation rule that only exists when an optional
-subsystem is enabled is not an authorisation rule — it is a default-open one. Two
+subsystem is enabled is not an authorisation rule. It is a default-open one. Two
 checks therefore sit underneath it:
 
 **`set_activity_retention` requires the `admin` role**, enforced in the facade
 rather than by the governance service. Without this, on a default multi-tenant
 deployment any authenticated caller could shorten every other tenant's retention
-through a public REST endpoint — and quietly, since Atlas expires the documents
+through a public REST endpoint, and quietly, since Atlas expires the documents
 later and the caller sees only `{"scope": "collection"}`. The guard applies only
 when auth is on, where a role claim exists and "every tenant" means something.
 
@@ -275,16 +275,16 @@ Every `_run` operation writes one record:
 ```
 
 Records are buffered (`audit_buffer_size`, 10) and flushed on an interval
-(`audit_flush_interval_seconds`, 60). A flush never raises — a failure here must
-not fail the operation being audited, which has usually already succeeded. When
-MongoDB refuses the batch it goes to `audit_fallback_path` instead, rotated at
+(`audit_flush_interval_seconds`, 60). A flush never raises, since a failure here
+must not fail the operation being audited, which has usually already succeeded.
+When MongoDB refuses the batch it goes to `audit_fallback_path` instead, rotated at
 `audit_fallback_max_bytes`. Setting that path to `""` **discards** the records, and
 the library warns once at construction rather than per failure.
 
 Two deliberate exceptions:
 
 **`log_activity` is not audited per call.** A turn log is high-volume by nature, and
-routing it through `_run` produces audit amplification — logging the agent costs
+routing it through `_run` produces audit amplification: logging the agent costs
 more writes than the agent. The episodic writer emits one entry per flushed batch
 instead. Refusals *are* audited individually: skipping the per-call record is a
 volume decision about the success path, and a denial is rare, security-relevant,
@@ -292,7 +292,7 @@ and the thing an audit log is for.
 
 **A successful `wipe_user_data` is filed against `_erased`**, a reserved principal,
 not the `user_id`. `_run` audits after the service call, and the service call
-deletes every `audit_log` row for that `user_id` — so the success record was written
+deletes every `audit_log` row for that `user_id`, so the success record was written
 into the collection the wipe had just cleared, under the identifier it had just
 erased. A user who asked to be forgotten was left with a row naming them, dated a
 millisecond after the deletion, created *by* the erasure and therefore surviving
@@ -305,7 +305,7 @@ so it is audited the ordinary way, against the real identity.
 
 ## See also
 
-- [Configuration](configuration.md) — every `auth_*`, `governance_*`, and `rate_limit_*` field
-- [Deployment](../how-to/deployment.md) — turning this on for a served deployment
-- [REST API](rest-api.md) — status codes
-- [MCP tools](mcp-tools.md) — refusal as a return value
+- [Configuration](configuration.md): every `auth_*`, `governance_*`, and `rate_limit_*` field
+- [Deployment](../how-to/deployment.md): turning this on for a served deployment
+- [REST API](rest-api.md): status codes
+- [MCP tools](mcp-tools.md): refusal as a return value

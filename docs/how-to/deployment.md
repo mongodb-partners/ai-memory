@@ -3,7 +3,7 @@
 The library runs in your process and needs no deployment. This page is for the
 other case: running `agent-memory` as a server that other things connect to.
 
-Three decisions, in order — which transport, how it authenticates, and where it
+Three decisions, in order: which transport, how it authenticates, and where it
 binds. The third one will refuse to start if you get the second one wrong, which
 is deliberate.
 
@@ -23,7 +23,7 @@ TRANSPORT=both agent-memory
 Unset, `transport` defaults to `streamable-http`, which means `mcp`.
 
 `both` is one process, one Atlas connection pool, one set of workers, and **one
-shared facade** — not two servers in a trench coat. Anything written over REST is
+shared facade**, not two servers in a trench coat. Anything written over REST is
 immediately visible over MCP.
 
 `streamable-http` and `stdio` are accepted as legacy aliases and both mean `mcp`.
@@ -35,7 +35,7 @@ Any other value raises at startup rather than falling back to a default.
 ## Turn on authentication
 
 With `AUTH_ENABLED=false` every request names the `user_id` it acts as. In-process
-that is correct — the calling app has already authenticated its user. On a port
+that is correct, since the calling app has already authenticated its user. On a port
 that anything can reach, it means any client can read or permanently erase any
 tenant's memories, with no record of who did.
 
@@ -49,7 +49,7 @@ a warning and serve every route unauthenticated, which is the worst available
 outcome: the operator asked for auth, the deployment reports healthy, and the only
 evidence is one startup log line.
 
-Then give callers a credential — either works, on both shells, as
+Then give callers a credential. Either works, on both shells, as
 `Authorization: Bearer <token>`:
 
 ```bash
@@ -65,13 +65,13 @@ print(MemoryMCPTokenVerifier(secret=AUTH_SECRET).create_token("alice@acme.com"))
 ```
 
 Multi-tenant deployments want `GOVERNANCE_ENABLED=true` and
-`RATE_LIMIT_ENABLED=true` alongside this — see [Governance](../reference/governance.md)
+`RATE_LIMIT_ENABLED=true` alongside this. See [Governance](../reference/governance.md)
 for what the roles allow and how the quotas are counted.
 
 For a deployment where unauthenticated access is never acceptable regardless of
 how the rest of the environment ends up set, add
-`REQUIRE_AUTH_FOR_MULTI_TENANT=true`. It is the inverse assertion — refuse to start
-*without* auth — and it is worth setting even when `AUTH_ENABLED=true` is already
+`REQUIRE_AUTH_FOR_MULTI_TENANT=true`. It is the inverse assertion (refuse to start
+*without* auth), and it is worth setting even when `AUTH_ENABLED=true` is already
 there, because it survives someone else's `.env` edit.
 
 ## Where it binds, and the refusal
@@ -84,7 +84,7 @@ RuntimeError: Refusing to serve 0.0.0.0:8000 with authentication disabled.
 ```
 
 Loopback means anything in `127.0.0.0/8`, plus `localhost` and `::1`. Everything
-else is treated as routable — including the empty string and `0.0.0.0` — because
+else is treated as routable, including the empty string and `0.0.0.0`, because
 when an address is not recognizably local, the safe reading is that it is
 reachable.
 
@@ -96,7 +96,7 @@ HOST=127.0.0.1                       # keep it local (the default)
 ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true   # accept the risk
 ```
 
-The third is a real configuration — an internal service behind its own gateway —
+The third is a real configuration (an internal service behind its own gateway)
 and it logs a warning on **every** start rather than once, because "we set that
 flag for a spike" is how it survives into production unnoticed.
 
@@ -111,7 +111,7 @@ docker compose up --build
 ```
 
 The image is `python:3.11-slim`, installs with `uv` from `uv.lock`, and runs as
-uid 10001 — nothing needs root, since it binds 8000 and every write goes to Atlas
+uid 10001. Nothing needs root, since it binds 8000 and every write goes to Atlas
 rather than the filesystem. Configuration comes from `.env` via `env_file`.
 
 Two lines in `docker-compose.yml` are load-bearing:
@@ -125,8 +125,8 @@ ports:
 ```
 
 `HOST: 0.0.0.0` is routable, so the compose default only starts because the port
-mapping keeps it on the host's loopback. `"8000:8000"` — the spelling most
-examples use — publishes on every host interface, which on shared wifi or any VM
+mapping keeps it on the host's loopback. `"8000:8000"`, the spelling most
+examples use, publishes on every host interface, which on shared wifi or any VM
 with a public IP puts the memory store on the internet. Widen the left side only
 alongside `AUTH_ENABLED=true`.
 
@@ -157,9 +157,9 @@ curl -s localhost:8000/health
 ```
 
 **Alert on `status != "ok"`, not on the HTTP code.** A crashed enrichment or
-consolidation loop leaves reads and writes working perfectly — only the reactive
-half of the system stops — so the process would otherwise report healthy while
-memories are never enriched, promoted, or forgotten. `status` degrades to
+consolidation loop leaves reads and writes working perfectly, since only the
+reactive half of the system stops, so the process would otherwise report healthy
+while memories are never enriched, promoted, or forgotten. `status` degrades to
 `degraded` when a worker that should be running is not.
 
 Two things this route will not do:
@@ -171,7 +171,7 @@ Two things this route will not do:
   strings are redacted, because a crashed worker's exception is usually a driver
   error and driver errors quote the connection string they failed on.
 
-Before lifespan startup — and after shutdown — the MCP shell's route returns
+Before lifespan startup, and after shutdown, the MCP shell's route returns
 `{"status": "starting"}`. Treat that as not-ready rather than as failed.
 
 The episodic counters in that body are the ones worth alerting on; see
@@ -190,7 +190,7 @@ explicit rather than inferred from a full queue.
 
 A worker that crashes is logged and **not restarted**. A crash-looping worker that
 silently recovers forever is harder to diagnose than one that stops and says so,
-and the restart policy belongs to whatever supervises the process —
+and the restart policy belongs to whatever supervises the process:
 `restart: unless-stopped`, a systemd unit, a Kubernetes probe. That is why
 `/health` reports per-worker liveness: it is the input your supervisor needs.
 
@@ -201,14 +201,14 @@ definitions, so there is no DDL step. Two things about that are worth knowing
 before the first deploy:
 
 **Search indexes are provisioned in the background by default.** A long-running
-server is fine with that — it will be serving for hours before anyone notices a
+server is fine with that, and will be serving for hours before anyone notices a
 few seconds of empty search results. A short-lived script is not: the process can
 exit before its indexes are queryable. Set `AWAIT_SEARCH_INDEXES=true` there.
 
 **Startup reconciles every TTL index to the configuration, and shortening a
 retention deletes data.** The rebuilt index applies to documents already stored,
 so anything past the new cutoff is expired by Atlas's TTL monitor within a minute
-or two of the restart — no confirmation step. Check the retention values before
+or two of the restart, with no confirmation step. Check the retention values before
 restarting a deployment whose history matters. See
 [Configuration](../reference/configuration.md#memory-lifetimes).
 
@@ -219,7 +219,7 @@ against a corrected config is safe and there is no cleanup path to write.
 
 | Setting | Why the default is wrong for a server |
 |---|---|
-| `AUDIT_FALLBACK_PATH` | Relative, so it resolves to whatever the working directory happens to be — a container's `WORKDIR`, a unit's `WorkingDirectory`. An operator asked to produce an audit trail should not have to reconstruct that. `""` discards the records |
+| `AUDIT_FALLBACK_PATH` | Relative, so it resolves to whatever the working directory happens to be: a container's `WORKDIR`, a unit's `WorkingDirectory`. An operator asked to produce an audit trail should not have to reconstruct that. `""` discards the records |
 | `HOST` | `127.0.0.1`, which inside a container means the published port reaches nothing |
 | `EPISODIC_RETENTION_DAYS` | 30 days is a convenience, not a policy. If you are storing turns to satisfy a retention *requirement*, set it explicitly |
 
@@ -238,7 +238,7 @@ curl -s -G localhost:8000/memories/recall -H "Authorization: Bearer $TOKEN" \
 ```
 
 A `403` on the second call with a valid token means the `user_id` did not match the
-token's identity — with auth on, the token decides and a mismatch is refused
+token's identity. With auth on, the token decides and a mismatch is refused
 rather than rewritten. A `502` means the embedding provider answered with something
 that did not describe its input; nothing was written, and the same request is worth
 sending again.
@@ -250,8 +250,8 @@ nothing a second after its first write is working correctly.
 
 ## See also
 
-- [Configuration](../reference/configuration.md) — every setting named here
-- [Governance](../reference/governance.md) — auth, roles, quotas, and the audit trail
-- [Observability](observability.md) — the counters `/health` reports
-- [REST API](../reference/rest-api.md) / [MCP tools](../reference/mcp-tools.md) — the surfaces being served
-- `.env.example` — a commented starting point
+- [Configuration](../reference/configuration.md): every setting named here
+- [Governance](../reference/governance.md): auth, roles, quotas, and the audit trail
+- [Observability](observability.md): the counters `/health` reports
+- [REST API](../reference/rest-api.md) / [MCP tools](../reference/mcp-tools.md): the surfaces being served
+- `.env.example`: a commented starting point

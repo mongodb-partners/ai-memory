@@ -47,7 +47,7 @@ forgets the access check requires bypassing `_run` deliberately, which is visibl
 in review rather than inferable only from behaviour.
 
 Both shells wrap the same facade. The MCP tools and the REST routes are
-adapters — argument shapes and error mapping — with no logic of their own. That is
+adapters (argument shapes and error mapping) with no logic of their own. That is
 why `TRANSPORT=both` can share a single instance: there is only one place the
 behaviour lives.
 
@@ -57,15 +57,15 @@ behaviour lives.
 
 `_run` writes one audit record per call. A turn log is high-volume by nature, so
 routing it through `_run` means logging the agent costs more writes than the agent
-does — audit amplification, where the observability system becomes the load.
+does. That is audit amplification, where the observability system becomes the load.
 
 Governance and rate limiting still apply to every call. What is batched is the
 audit *record*: the worker emits one entry per flushed batch, grouped by
 `user_id`. Grouping by user matters because a batch can span users, and
 misattributing turns in an audit trail is worse than not having one.
 
-This exception is pinned by tests from three directions — that no audit record is
-written, that governance still denies, and that rate limits still throttle — so a
+This exception is pinned by tests from three directions (that no audit record is
+written, that governance still denies, and that rate limits still throttle), so a
 future refactor cannot quietly turn it back into a full `_run` call or quietly
 drop the access check.
 
@@ -128,7 +128,7 @@ round trip and can fail. A logged turn without ordering beats no logged turn, so
 
 **Embed before assigning `search_text`.** An embedding failure then leaves
 *neither* field. The alternative ordering produces a document with searchable text
-and no vector to match it — indexed-looking and unfindable, the worst outcome
+and no vector to match it: indexed-looking and unfindable, the worst outcome
 because it is invisible.
 
 Every exception in the worker is swallowed and counted rather than raised. There is
@@ -143,7 +143,7 @@ connection is still open, bounded by `episodic_shutdown_timeout_seconds`. Only t
 are the workers cancelled, the audit buffer flushed, and the connection closed.
 
 Cancelling workers first would leave queued turns with no consumer and a closing
-connection — silently discarding writes the caller believes succeeded. The
+connection, silently discarding writes the caller believes succeeded. The
 ordering is a correctness requirement, not a tidiness preference.
 
 The audit flush comes *after* the cancellations for the mirror-image reason.
@@ -154,7 +154,7 @@ open.
 
 `AuditService.flush()` is serialised on a lock, and what it buys is a
 postcondition rather than throughput: when it returns, everything buffered at
-call time has reached MongoDB or the fallback file — *including* entries a
+call time has reached MongoDB or the fallback file, *including* entries a
 concurrent flush had already taken out of the buffer. `wipe_user_data` depends on
 that. It flushes before deleting so no buffered row naming the user outlives the
 wipe; a flush that returned while another's write was still in flight would let
@@ -179,8 +179,8 @@ logic cannot land in only one of them.
 
 ## Hybrid retrieval
 
-Both semantic and episodic recall use `$rankFusion` — MongoDB's native reciprocal
-rank fusion — over two branches: `$vectorSearch` for meaning, `$search` for exact
+Both semantic and episodic recall use `$rankFusion` (MongoDB's native reciprocal
+rank fusion) over two branches: `$vectorSearch` for meaning, `$search` for exact
 terms. Fusion happens *in the database*, not in application code, so there is no
 round trip to merge result sets and no re-implementation of RRF to get subtly
 wrong.
@@ -198,7 +198,7 @@ stops matching.
 Both failures look identical to "no matching documents," which is why they are
 called out here rather than left to discovery.
 
-`user_id` goes into **both** branches — the `$vectorSearch` filter and the
+`user_id` goes into **both** branches: the `$vectorSearch` filter and the
 `$search` compound clause. Isolation is enforced by the engine, not by callers
 remembering to add it. `since` is applied *after* fusion, because `ts` is high
 cardinality and declaring it as a vector-index filter field would bloat the index
@@ -209,7 +209,7 @@ for a rarely-used narrowing.
 There is no agent framework in the dependency list, and no framework-specific code
 in the library. `core/projection.py` accepts both attribute-style message objects
 and plain dicts, and projects them identically. That is the entire adaptation
-layer — everything above it is a MongoDB library.
+layer. Everything above it is a MongoDB library.
 
 The practical consequence: a hand-rolled agent loop, a framework, or a background
 job all feed the same API, and switching frameworks does not migrate your memory.
@@ -224,7 +224,7 @@ One asymmetry worth knowing: `ProviderManager` **mutates config in place** durin
 vector indexes must then agree on `numDimensions`, so `create()` validates that the
 configured dimension matches what the provider actually returns and fails fast if
 not. A mismatch otherwise surfaces much later as an empty result set with no
-error — the same silent-failure class as the index gotchas above.
+error: the same silent-failure class as the index gotchas above.
 
 ## Background work
 
@@ -239,7 +239,7 @@ inferred from a full queue and a climbing `dropped` counter.
 
 ## See also
 
-- [Why episodic memory](why-episodic-memory.md) — what the tier is for
-- [The document shape](../reference/episodic-document-shape.md) — the contract
-- [Observability](../how-to/observability.md) — the counters
-- [Per-user scoping](../how-to/per-user-scoping.md) — the context var
+- [Why episodic memory](why-episodic-memory.md): what the tier is for
+- [The document shape](../reference/episodic-document-shape.md): the contract
+- [Observability](../how-to/observability.md): the counters
+- [Per-user scoping](../how-to/per-user-scoping.md): the context var

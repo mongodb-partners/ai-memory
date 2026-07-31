@@ -7,8 +7,8 @@ exception handlers that map typed errors to status codes. No logic of its own.
 Start it with `TRANSPORT=rest agent-memory`, or `TRANSPORT=both` to serve REST at
 `/` and MCP at `/mcp` from one process and one facade.
 
-REST is the **explicit-control** surface. There is no auto-capture here — that is
-MCP-only — so nothing is persisted that a caller did not ask for.
+REST is the **explicit-control** surface. There is no auto-capture here (that is
+MCP-only), so nothing is persisted that a caller did not ask for.
 
 ## Identity
 
@@ -21,7 +21,7 @@ anything. What it resolves to depends on whether auth is on:
 | `true` | The token's identity. A request naming a **different** `user_id` is refused with 403 |
 
 With auth on, `user_id` in a body or query string is honoured only when it
-matches the token, and it is never silently rewritten — a request asking for
+matches the token, and it is never silently rewritten. A request asking for
 someone else's data is a request whose author is confused about whose data it is.
 
 The role is read from the token's `auth_role_claim`, which is what makes the
@@ -42,7 +42,7 @@ with `auth_secret`) or an API key from `MEMORY_MCP_API_KEYS`.
 | `502` | `EmbeddingError` |
 
 `502` rather than `500` is the whole message: the request was fine and this
-service is fine — the embedding provider returned a reply that did not describe
+service is fine. The embedding provider returned a reply that did not describe
 its input, so **nothing was written** and the same request is worth sending
 again. A `500` would tell the caller they found a bug and should stop.
 
@@ -57,8 +57,8 @@ than in either shell:
 
 `count` is the length of `results`, not the number of matches found. When the
 serialised documents would exceed `max_response_bytes` (16 MiB) the list is
-truncated from the end — by whole documents, never mid-document — and three more
-keys appear:
+truncated from the end, by whole documents rather than mid-document, and three
+more keys appear:
 
 ```jsonc
 {"results": [ … ], "count": 40, "truncated": true, "total_count": 100,
@@ -72,7 +72,7 @@ input: a hundred long episodic turns is tens of megabytes in one response body.
 ## Error bodies
 
 Error bodies come in two shapes, because they come from two mechanisms. The typed
-exception handlers — 403 `AccessError`, 404, 429, 502 — return
+exception handlers (403 `AccessError`, 404, 429, 502) return
 `{"error": "<message>"}`. The identity and token checks run as FastAPI
 dependencies and raise `HTTPException`, so 401, 400, and the cross-tenant 403
 return `{"detail": "<message>"}`. Branch on the status code, not on a key.
@@ -113,7 +113,7 @@ re-ranking. This is the one to build a prompt from.
 
 ### `GET /memories/search`
 
-The raw `$rankFusion` result with scores intact — no re-ranking, no duplicate
+The raw `$rankFusion` result with scores intact: no re-ranking, no duplicate
 collapsing. Use it to see what the index actually thinks.
 
 Same parameters and response shape as `/memories/recall`.
@@ -141,7 +141,7 @@ Anything other than a single `memory_id` is a bulk delete and requires
 writing. The library's `tags` and `time_range` selectors are not exposed here.
 
 For erasure obligations use the library's `wipe_user_data`, which deletes
-permanently across every collection — it has no REST route.
+permanently across every collection. It has no REST route.
 
 ## Sticky decisions
 
@@ -212,7 +212,7 @@ Replay a thread's turns in step order.
 | `limit` | int | `null` |
 | `ascending` | bool | `true` |
 
-Reaches turns that hybrid search cannot — a turn with only one role produces no
+Reaches turns that hybrid search cannot: a turn with only one role produces no
 searchable text, so it is stored but not recallable by `/activity/search`.
 
 ### `GET /activity/correlation/{correlation_id}`
@@ -235,7 +235,7 @@ Change episodic retention in place, via `collMod` on the existing TTL index.
 
 ```jsonc
 // every response also carries "scope": "collection"
-{"status": "updated", "ttl_seconds": 7200}   // collMod — modified in place
+{"status": "updated", "ttl_seconds": 7200}   // collMod: modified in place
 {"status": "created", "ttl_seconds": 7200}   // collMod unavailable; rebuilt
 {"status": "removed", "ttl_seconds": null}   // TTL index dropped
 {"status": "error",   "ttl_seconds": 7200, "error": "..."}
@@ -244,7 +244,7 @@ Change episodic retention in place, via `collMod` on the existing TTL index.
 **This route's failure is a return value, not a status code.** It never raises,
 so a `200` with `{"status": "error"}` means nothing changed. Read the `status`.
 
-`ttl_seconds: null` is meaningful, not missing — it drops the TTL index and keeps
+`ttl_seconds: null` is meaningful, not missing: it drops the TTL index and keeps
 the log permanently. Omitting the field is the same as sending `null`, so a
 truncated request means "keep forever" rather than "no change".
 
@@ -264,12 +264,12 @@ during exactly the incident it exists to detect.
 }
 ```
 
-`status` degrades to `"degraded"` when a worker that should be running is not — a
+`status` degrades to `"degraded"` when a worker that should be running is not. A
 crashed enrichment loop leaves reads and writes working perfectly while the
 reactive half of the system stops, so a probe that only ever said `ok` would not
 be a probe.
 
-Everything in this body is a counter, a boolean, or a name — never a document, a
+Everything in this body is a counter, a boolean, or a name, never a document, a
 user id, or a raw exception. Worker error strings are redacted, because a crashed
 worker's exception is usually a driver error and driver errors quote the
 connection string they failed on.
@@ -285,7 +285,7 @@ interactive docs at `/docs`. The version there comes from the installed package.
 
 ## See also
 
-- [MCP tools](mcp-tools.md) — the other shell, with the full parameter surface
-- [Configuration](configuration.md) — `transport`, `host`, `auth_*`
-- [Deployment](../how-to/deployment.md) — why binding a routable address without auth is refused
-- [Governance](governance.md) — which roles may call what
+- [MCP tools](mcp-tools.md): the other shell, with the full parameter surface
+- [Configuration](configuration.md): `transport`, `host`, `auth_*`
+- [Deployment](../how-to/deployment.md): why binding a routable address without auth is refused
+- [Governance](governance.md): which roles may call what

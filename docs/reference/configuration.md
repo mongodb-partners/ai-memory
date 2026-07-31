@@ -3,7 +3,7 @@
 Every setting, its default, and what it controls. Two classes back this surface:
 `MCPConfig` (`agent_memory/core/config.py`) holds the substrate, and
 `MemoryConfig` (`agent_memory/config.py`) extends it with the provider and
-lifecycle fields. `MemoryConfig` is the public one — construct it directly, or
+lifecycle fields. `MemoryConfig` is the public one. Construct it directly, or
 build it from the environment:
 
 ```python
@@ -17,7 +17,7 @@ Environment names are the field names, upper-cased, and matching is
 **case-insensitive**. Unknown environment variables are ignored rather than
 rejected. `mongodb_connection_string` is the only required field.
 
-The library itself never reads a `.env` file on your behalf — but these are
+The library itself never reads a `.env` file on your behalf, but these are
 pydantic-settings models, so *they* do: `env_file` is `.env`, so constructing a
 config in a directory that has one picks it up. That is why tests pass
 `_env_file=None`; see [tests/README.md](../../tests/README.md).
@@ -29,7 +29,7 @@ config in a directory that has one picks it up. That is why tests pass
 | `app_name` | `agent-memory` | Declared, but nothing reads it. Both shells use the literal name |
 | `app_version` | the installed version | Defaults from the package rather than a literal. The OpenAPI document reads the package directly, so overriding this does not change what `/openapi.json` reports |
 | `port` | `8000` | |
-| `host` | `127.0.0.1` | Loopback. Binding a routable address without auth is refused — see [Deployment](../how-to/deployment.md) |
+| `host` | `127.0.0.1` | Loopback. Binding a routable address without auth is refused. See [Deployment](../how-to/deployment.md) |
 | `transport` | `streamable-http` | `mcp` \| `rest` \| `both`. `streamable-http` and `stdio` are legacy aliases for `mcp` |
 | `debug` | `False` | |
 | `allow_unauthenticated_network_access` | `False` | The operator's assertion that serving unauthenticated on a routable address is intended. Warns on every start |
@@ -41,7 +41,7 @@ raises `ValueError` at startup rather than defaulting.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `mongodb_connection_string` | — | **Required** |
+| `mongodb_connection_string` | *no default* | **Required** |
 | `mongodb_database_name` | `agent_memory` | |
 | `mongodb_max_pool_size` | `20` | |
 | `mongodb_min_pool_size` | `2` | |
@@ -59,7 +59,7 @@ process share one pool.
 | `allow_embedding_dimension_change` | `False` | Startup refuses a dimension change that would orphan stored vectors |
 
 A vector index cannot have its `numDimensions` edited, so a changed dimension
-means dropping and rebuilding the index — which leaves every already-stored
+means dropping and rebuilding the index, which leaves every already-stored
 vector at the old width and unreturnable by `$vectorSearch`, with no error. That
 is why the guard exists and why it is on by default.
 
@@ -70,7 +70,7 @@ is why the guard exists and why it is on by default.
 | `llm_provider` | `bedrock` | `bedrock` \| `openai` \| `anthropic` |
 | `llm_model` | `global.anthropic.claude-sonnet-5` | A cross-region inference profile, not a bare model id |
 
-The LLM does importance scoring and summarization — short, high-volume calls
+The LLM does importance scoring and summarization: short, high-volume calls
 where latency matters more than depth.
 
 ## AWS (Bedrock)
@@ -90,8 +90,8 @@ where latency matters more than depth.
 | `voyage_model` | `voyage-3` | |
 
 The key decides the endpoint: a Voyage key against the Atlas gateway (or the
-reverse) fails with a 403. Gateway models are 1024 dimensions — `voyage-3-lite`
-is 512 — against the `1536` default.
+reverse) fails with a 403. Gateway models are 1024 dimensions (`voyage-3-lite` is
+512) against the `1536` default.
 
 ## OpenAI
 
@@ -112,7 +112,7 @@ Needs the `openai` extra.
 | `anthropic_base_url` | `None` | Set for a compatible gateway |
 | `anthropic_model` | `claude-sonnet-5` | |
 
-LLM only — Anthropic has no embeddings API. Needs the `anthropic` extra.
+LLM only, since Anthropic has no embeddings API. Needs the `anthropic` extra.
 
 ## Memory lifetimes
 
@@ -121,7 +121,7 @@ LLM only — Anthropic has no embeddings API. Needs the `anthropic` extra.
 | `stm_ttl_hours` | `24` | Short-term memories |
 | `ltm_retention_critical_days` | `365` | Long-term, `critical` retention tier |
 | `ltm_retention_reference_days` | `180` | Long-term, `reference` |
-| `ltm_retention_standard_days` | `90` | Long-term, `standard` — where promotion lands |
+| `ltm_retention_standard_days` | `90` | Long-term, `standard`, where promotion lands |
 | `ltm_retention_temporary_days` | `7` | Long-term, `temporary` |
 | `episodic_retention_days` | `30` | Logged turns |
 | `cache_ttl_seconds` | `3600` | Semantic-cache entries |
@@ -133,14 +133,14 @@ LLM only — Anthropic has no embeddings API. Needs the `anthropic` extra.
 **Shortening a retention deletes data.** Startup reconciles each TTL index to
 the configuration, and the rebuilt index applies to documents already stored, so
 anything past the new cutoff is expired by Atlas's TTL monitor within a minute or
-two of the restart — no confirmation step. Lengthening is safe.
+two of the restart, with no confirmation step. Lengthening is safe.
 
 The long-term durations work differently from the rest: they are applied as a
 per-document `expires_at` at write time, not as one collection-wide duration, so
 changing them affects memories written afterwards only.
 
 `rate_limit_retention_seconds` is raised to `rate_limit_window_seconds` when that
-is longer — a counter *is* the enforcement state, so expiring it inside its own
+is longer. A counter *is* the enforcement state, so expiring it inside its own
 window would reset a caller who had exhausted the limit.
 
 ## What becomes long-term
@@ -170,7 +170,7 @@ enrichment per turn. Assistant messages are never candidates at any threshold.
 | `promotion_age_minutes` | `60` | |
 
 The two thresholds are **absolute**, which is what makes importance-scorer
-calibration matter rather than just ranking quality — see below.
+calibration matter rather than just ranking quality. See below.
 
 ## Enrichment
 
@@ -184,7 +184,7 @@ calibration matter rather than just ranking quality — see below.
 
 The claim is a lease, not a lock: a worker that dies mid-LLM-call would otherwise
 leave a document nobody enriches again. The floor is the slowest legitimate
-enrichment — a merge makes an LLM call and then an embedding call.
+enrichment: a merge makes an LLM call and then an embedding call.
 
 ## Importance scoring
 
@@ -246,10 +246,10 @@ produce and [Observability](../how-to/observability.md) for the counters.
 | `audit_flush_on_write` | `False` | |
 | `audit_retention_days` | `365` | |
 | `audit_fallback_path` | `audit_fallback.jsonl` | Where entries go when MongoDB refuses them. Resolved to an absolute path once, at startup. `""` discards them |
-| `audit_fallback_max_bytes` | `52428800` | 50 MiB, then rotation to a single `.1` sibling — so twice this on disk. `0` disables rotation |
+| `audit_fallback_max_bytes` | `52428800` | 50 MiB, then rotation to a single `.1` sibling, so twice this on disk. `0` disables rotation |
 
 Set `audit_fallback_path` explicitly. The default is relative, which means
-"wherever the process was started" — a systemd unit's `WorkingDirectory`, a
+"wherever the process was started": a systemd unit's `WorkingDirectory`, a
 container's `WORKDIR`, a developer's shell.
 
 ## Authentication
@@ -265,8 +265,8 @@ container's `WORKDIR`, a developer's shell.
 | `auth_default_role` | `end_user` | Used when no role claim is present |
 | `require_auth_for_multi_tenant` | `False` | Refuse to serve with auth off |
 
-API keys come from the `MEMORY_MCP_API_KEYS` environment variable — not a config
-field — formatted `key1=user1,key2=user2`.
+API keys come from the `MEMORY_MCP_API_KEYS` environment variable rather than a
+config field, formatted `key1=user1,key2=user2`.
 
 With auth off, the caller supplies its own `user_id` and that is all there is;
 with auth on, the token decides and a request naming anyone else is refused. See
@@ -321,7 +321,7 @@ Auto-capture is MCP-only by design; REST is the explicit-control surface.
 | `workers_in_process` | `True` | `False` → an external runtime owns background work |
 | `await_search_indexes` | `False` | `True` blocks `create()` until Atlas Search indexes are queryable |
 
-`workers_in_process=False` disables all four workers — enrichment,
+`workers_in_process=False` disables all four workers: enrichment,
 consolidation, audit flush, and the episodic writer. Without a consumer,
 `log_activity` fills its bounded queue and then discards the oldest turns, so set
 `episodic_enabled=False` alongside it when that is what you intend.
@@ -333,7 +333,7 @@ before its indexes are queryable and search returns nothing.
 
 Two configurations are refused at construction or startup rather than degraded:
 
-- `auth_enabled=True` with an empty `auth_secret` — this used to log a warning
+- `auth_enabled=True` with an empty `auth_secret`. This used to log a warning
   and serve every route unauthenticated.
 - An `embedding_dimension` that disagrees with what the provider returns, or a
   change that would orphan stored vectors without
@@ -346,7 +346,7 @@ correct and no socket exists.
 
 ## See also
 
-- [Deployment](../how-to/deployment.md) — which of these matter when serving
-- [Governance](governance.md) — profiles, quotas, identity
-- [Configure retention](../how-to/configure-ttl.md) — changing episodic TTL at runtime
-- `.env.example` — a commented starting point for the deployed shells
+- [Deployment](../how-to/deployment.md): which of these matter when serving
+- [Governance](governance.md): profiles, quotas, identity
+- [Configure retention](../how-to/configure-ttl.md): changing episodic TTL at runtime
+- `.env.example`: a commented starting point for the deployed shells

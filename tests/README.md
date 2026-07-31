@@ -10,7 +10,7 @@ CI runs exactly the first and third of those. The unit suite is the gate.
 
 ## The `REQ-*` labels
 
-Most test docstrings open with an id — `REQ-E-108`, `REQ-DB-002`. They are stable
+Most test docstrings open with an id: `REQ-E-108`, `REQ-DB-002`. They are stable
 names for behaviours, so that a test asserting one, a second test asserting its
 inverse, and the comment in the source explaining why it holds are all reachable
 from each other:
@@ -29,7 +29,7 @@ The prefix says which surface, and the numbers group by area:
 |---|---|
 | `REQ-E-001`..`009` | Exceptions, the ranking formula, memory evolution and merge |
 | `REQ-E-010`..`019` | `MemoryConfig` and `from_env()` |
-| `REQ-E-020`..`039` | `AsyncMemory` facade — `create`, `recall`, `remember` |
+| `REQ-E-020`..`039` | `AsyncMemory` facade: `create`, `recall`, `remember` |
 | `REQ-E-040`..`049` | The synchronous `Memory` wrapper |
 | `REQ-E-050`..`059` | OpenAI and Anthropic providers, `ProviderManager` |
 | `REQ-E-060`..`069` | MCP shell |
@@ -39,7 +39,7 @@ The prefix says which surface, and the numbers group by area:
 | `REQ-E-090`..`099` | Episodic projection, context, correlation ids |
 | `REQ-E-100`..`129` | The episodic write path and LLM reply handling |
 | `REQ-E-140`..`150` | Prompt contract, promotion retention, identity binding, search filters, rate limits, refusals |
-| `REQ-E-160`..`172` | Importance scoring — features, artifact, training, selection |
+| `REQ-E-160`..`172` | Importance scoring: features, artifact, training, selection |
 | `REQ-DB-*` | Collections and index migrations |
 | `REQ-EC-*` | Memory and cache service edge cases |
 | `REQ-VP-*` | The Voyage embedding provider |
@@ -59,7 +59,7 @@ MCPConfig(**defaults, _env_file=None)      # or MemoryConfig, which subclasses i
 
 The `_env_file=None` is not decoration. Both are pydantic-settings models and
 read `.env` on their own, so on a developer machine that is configured for real,
-omitting it lets a live connection string and a live API key into the test —
+omitting it lets a live connection string and a live API key into the test,
 which passes locally, fails in CI, and for the interval in between is a test
 asserting something about your deployment rather than about the code.
 
@@ -67,7 +67,7 @@ The same trap applies to the demo modules under `examples/memory-ui/`. Both
 `server/app.py` and `demo/seed.py` call `load_dotenv()` at module scope, which is
 correct for an application and means importing one from a test loads the
 repository root's real `.env`. Import them only through a fixture that patches
-`dotenv.load_dotenv` first — `tests/unit/test_demo_seed_reset.py` has one.
+`dotenv.load_dotenv` first. `tests/unit/test_demo_seed_reset.py` has one.
 
 ## Integration tests skip themselves
 
@@ -91,7 +91,7 @@ repository; patch one line; run the suite; restore.
 
 A mutation that survives is information about the test, not only about the code.
 Gathering the step-counter calls (`REQ-E-103`) survived its first run, and the
-guard was fine — the test's fake was delaying the provider's *reply*, and reply
+guard was fine: the test's fake was delaying the provider's *reply*, and reply
 latency reorders nothing, because `asyncio.gather` starts its coroutines in order.
 The real wait is for a connection from the pool, before the `$inc` is claimed. Move
 the delay there and the mutation dies.

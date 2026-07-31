@@ -1,12 +1,12 @@
 # agent-memory
 
 **Four kinds of agent memory in one MongoDB Atlas cluster.** No agent framework
-required — and none imported.
+required, and none imported.
 
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Install from the repository — this is not on PyPI:
+Install from the repository. This is not on PyPI:
 
 ```bash
 uv add git+https://github.com/mongodb-partners/agent-memory.git
@@ -18,7 +18,7 @@ pip install git+https://github.com/mongodb-partners/agent-memory.git
 
 ## The problem
 
-The model forgets. A bigger context window does not fix that — it just makes
+The model forgets. A bigger context window does not fix that. It just makes
 forgetting more expensive. So teams bolt on a vector store for semantic recall, a
 key-value store for session state, a separate log for what the agent actually
 did, and a cache in front of the model. Four systems, four consistency stories,
@@ -40,7 +40,7 @@ different questions.
 
 Episodic is the one most libraries skip. Short-term state holds what the agent is
 doing and long-term memory holds what it knows, but neither records what it
-*did* — which tool it called, which file it wrote, how many steps it took, and
+*did*: which tool it called, which file it wrote, how many steps it took, and
 under which trace id. That is the tier you need when something goes wrong, and
 it is the tier an agent needs to reason about its own past work.
 
@@ -61,7 +61,7 @@ async def main():
     # importance-scored and happens in the background.
     await memory.add("user-1", "conv-1", [
         {"message_type": "human", "content": "I'm vegetarian, and I hate cilantro."},
-        {"message_type": "ai", "content": "Noted — no meat, no cilantro."},
+        {"message_type": "ai", "content": "Noted: no meat, no cilantro."},
     ])
 
     # Record what the agent did. Non-blocking: this never awaits Atlas.
@@ -72,10 +72,10 @@ async def main():
         ]},
     ], correlation_id="trace-abc")
 
-    # Recall knowledge — hybrid vector + full-text, importance-ranked.
+    # Recall knowledge: hybrid vector + full-text, importance-ranked.
     print(await memory.recall("user-1", "what should I cook?"))
 
-    # Recall actions — the same hybrid search over the turn log.
+    # Recall actions: the same hybrid search over the turn log.
     print(await memory.recall_activity("user-1", "friday dinner booking"))
 
     await memory.close()   # drains queued turns before closing the connection
@@ -99,7 +99,7 @@ with Memory(MemoryConfig(mongodb_connection_string="mongodb+srv://...")) as memo
 ## Library API
 
 Convention throughout: `user_id` is positional, everything else is keyword-only.
-Every method is scoped to a user — there is no unscoped read.
+Every method is scoped to a user, and there is no unscoped read.
 
 ### Semantic memory
 
@@ -139,11 +139,11 @@ Three behaviours worth knowing, because they are the ones that matter when
 something is already going wrong:
 
 - When the queue is full, the **oldest** pending turn is dropped and counted. The
-  newest turn always survives — a stale turn is worth less than a fresh one.
+  newest turn always survives, since a stale turn is worth less than a fresh one.
 - If the durable step counter fails, the document is inserted with a null step
   rather than dropped. A logged turn beats a lost one.
 - The embeddings are generated *before* `search_text` is assigned, so an embedding
-  failure leaves neither field — never a searchable document with no vector. One
+  failure leaves neither field, never a searchable document with no vector. One
   provider call covers the whole batch, so a provider failure degrades every turn
   in that batch to text-only rather than just one. `embed_failures` counts
   documents rather than calls, so the number means the same thing either way.
@@ -162,7 +162,7 @@ await memory.remember_decision(user_id, key, value, *, ttl_days=None)
 await memory.recall_decision(user_id, key)
 ```
 
-A sticky decision is a durable key/value the agent should not re-litigate — a
+A sticky decision is a durable key/value the agent should not re-litigate: a
 chosen shipping address, a confirmed plan step, a locked-in preference.
 
 ### Health and teardown
@@ -181,8 +181,8 @@ discard turns that never reached Atlas.
 `close()` is idempotent on both facades, so calling it explicitly inside a `with`
 block is safe.
 
-A **failed** `create()` releases everything it acquired before raising — the
-connection pool, the worker tasks, the episodic queue — so you do not need (and
+A **failed** `create()` releases everything it acquired before raising (the
+connection pool, the worker tasks, the episodic queue), so you do not need (and
 cannot write) a cleanup path for it: `create()` did not return, so there is no
 object to close. This matters because the pool is shared per process and
 reference-counted: a leaked claim would not fail loudly, it would make a *later*
@@ -199,7 +199,7 @@ transport with `TRANSPORT`:
 
 ```bash
 export MONGODB_CONNECTION_STRING="mongodb+srv://..."
-TRANSPORT=both agent-memory        # mcp | rest | both — 'both' shares one instance
+TRANSPORT=both agent-memory        # mcp | rest | both; 'both' shares one instance
 ```
 
 ### MCP tools
@@ -231,12 +231,12 @@ design; REST is the explicit-control surface.
 `NotFoundError` to 404, `EmbeddingError` to 502.
 
 502 is the embedding provider answering with something that does not describe the
-request — fewer vectors than inputs, or a vector of the wrong width. Nothing was
+request: fewer vectors than inputs, or a vector of the wrong width. Nothing was
 written, and retrying is the right response: the write is refused precisely so the
 caller still holds its own data. See [Embedding replies are
 validated](#embedding-replies-are-validated).
 
-`/health` also returns the episodic writer's counters — queue depth, throughput,
+`/health` also returns the episodic writer's counters: queue depth, throughput,
 write and embed failures. A 200 with a saturated queue and rising failures is not
 health, so the probe reports both.
 
@@ -247,9 +247,9 @@ Embeddings and chat are pluggable; nothing above changes when you switch.
 | Provider | Embeddings | LLM |
 |---|---|---|
 | Amazon Bedrock (default) | ✅ | ✅ |
-| Voyage AI (direct or via the Atlas embeddings gateway) | ✅ | — |
+| Voyage AI (direct or via the Atlas embeddings gateway) | ✅ | ❌ |
 | OpenAI (any `base_url`) | ✅ | ✅ |
-| Anthropic | — | ✅ |
+| Anthropic | ❌ | ✅ |
 
 `create()` validates on startup that the configured embedding dimension matches
 what the provider actually returns, and fails fast if not. A mismatch otherwise
@@ -263,23 +263,23 @@ manage indexes yourself:
 
 1. **Any field used in a `$vectorSearch` pre-filter must be declared as
    `{"type": "filter"}`** in the index definition. An undeclared filter field
-   does not raise — the branch just returns nothing, which looks exactly like
+   does not raise. The branch just returns nothing, which looks exactly like
    "no matches."
 2. **Fields backing an exact `equals` filter in Atlas Search must use the
    `token` type, not `string`.** A `string` field is analyzed, so exact
    equality quietly stops matching.
 
-Retention is configured, and reconciled to the configuration on every startup —
-see [Retention](#retention) below. `set_activity_retention` is the runtime
+Retention is configured, and reconciled to the configuration on every startup.
+See [Retention](#retention) below. `set_activity_retention` is the runtime
 override for episodic retention specifically: it issues a `collMod` on the
 existing TTL index rather than dropping and rebuilding it (falling back to
 `create_index` where `collMod` is unavailable), which makes it cheap but not
-durable — the next startup reconciles the index back to
+durable: the next startup reconciles the index back to
 `episodic_retention_days`.
 
 It is also the one method whose failure is a **return value** rather than an
 exception, so read the `status`: `updated`/`created`/`removed` mean the index
-changed, `error` means it did not. The audit entry now agrees — it used to record
+changed, `error` means it did not. The audit entry now agrees. It used to record
 every call as a success, including the ones that changed nothing, which mattered
 most in the destructive direction: shortening retention collection-wide and having
 it silently fail is indistinguishable, from the response alone, from having it
@@ -292,19 +292,19 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 
 | Setting | Default | Notes |
 |---|---|---|
-| `mongodb_connection_string` | — | The only required field |
+| `mongodb_connection_string` | *no default* | The only required field |
 | `mongodb_database_name` | `agent_memory` | |
 | `embedding_provider` / `llm_provider` | `bedrock` | `voyage`, `openai`, `anthropic` |
 | `embedding_dimension` | `1536` | Auto-aligned to the model for Voyage while left at the default; a mismatch raises at startup |
-| `allow_embedding_dimension_change` | `False` | Startup refuses when the dimension changed and existing vectors would be orphaned — see below |
+| `allow_embedding_dimension_change` | `False` | Startup refuses when the dimension changed and existing vectors would be orphaned. See below |
 | `stm_ttl_hours` | `24` | Short-term retention |
-| `ltm_candidate_min_chars` | `31` | Shortest human message promoted to a long-term candidate. Below it, a message is stored as STM but never enriched or recalled — see [What becomes long-term](#what-becomes-long-term) |
+| `ltm_candidate_min_chars` | `31` | Shortest human message promoted to a long-term candidate. Below it, a message is stored as STM but never enriched or recalled. See [What becomes long-term](#what-becomes-long-term) |
 | `soft_delete_purge_days` | `30` | How long a soft-deleted memory survives before purge |
-| `episodic_retention_days` | `30` | Turn-log retention — see [Retention](#retention) |
+| `episodic_retention_days` | `30` | Turn-log retention. See [Retention](#retention) |
 | `cache_ttl_seconds` | `3600` | Semantic-cache entry lifetime |
 | `audit_retention_days` | `365` | Audit-log retention |
 | `audit_fallback_path` | `audit_fallback.jsonl` | Where audit entries go when MongoDB refuses them; resolved to an absolute path once, at startup. Empty string discards them instead |
-| `audit_fallback_max_bytes` | `52428800` | Ceiling before the fallback rotates to one `.1` sibling — so twice this on disk. `0` disables rotation |
+| `audit_fallback_max_bytes` | `52428800` | Ceiling before the fallback rotates to one `.1` sibling, so twice this on disk. `0` disables rotation |
 | `episodic_enabled` | `True` | `False` accepts and discards, so callers need no conditionals |
 | `episodic_queue_size` | `1000` | Bounded; full → drop oldest |
 | `episodic_batch_size` | `20` | Turns per `insert_many` |
@@ -313,7 +313,7 @@ via `MemoryConfig.from_env()` (case-insensitive names). The frequently-used ones
 | `workers_in_process` | `True` | `False` → an external runtime owns background work |
 | `await_search_indexes` | `False` | Set `True` in short-lived scripts, or the process can exit before indexes are queryable |
 | `importance_scorer` | `llm` | `local` scores in-process instead of calling the LLM |
-| `importance_model_path` | — | Explicit coefficient artifact; unset auto-selects a bundled one |
+| `importance_model_path` | `None` | Explicit coefficient artifact; unset auto-selects a bundled one |
 
 ### Retention
 
@@ -331,7 +331,7 @@ restarting rebuilds the index at the new duration:
 
 **Shortening a retention deletes data.** The rebuilt index applies to documents
 already stored, so anything past the new cutoff is expired by Atlas's TTL monitor
-within a minute or two of the restart — not at the next write, and with no
+within a minute or two of the restart, not at the next write, and with no
 confirmation step. Check the value before restarting a deployment whose history
 matters. Lengthening one is safe; it only stops future expiry, and nothing
 already deleted comes back.
@@ -343,7 +343,7 @@ window would let a caller who had exhausted the limit start a fresh count.
 Long-term retention works differently: it is per-tier, applied as a per-document
 `expires_at` at write time rather than as one collection-wide duration, via
 `ltm_retention_critical_days` / `_reference_days` / `_standard_days` /
-`_temporary_days`. Changing those affects memories written afterwards — the
+`_temporary_days`. Changing those affects memories written afterwards. The
 `expires_at` already stamped on existing documents is not rewritten.
 
 ### What becomes long-term
@@ -355,7 +355,7 @@ characters (default `31`). Only candidates are enriched, promoted, and returned 
 
 It is a length, not a measure of meaning, and that is why it is a setting rather
 than a cleverer inline rule. The default drops the acknowledgements that dominate
-a real transcript — "ok", "thanks", "yes do that" — and it also drops *"I'm
+a real transcript ("ok", "thanks", "yes do that"), and it also drops *"I'm
 allergic to penicillin"*, which is 26 characters. Adjust it to your traffic:
 
 - **Lower it** where users write telegraphically, or where short facts matter more
@@ -363,7 +363,7 @@ allergic to penicillin"*, which is 26 characters. Adjust it to your traffic:
 - **Raise it** where every turn is a paragraph and you would rather not pay an
   enrichment per turn.
 - **`0`** keeps every human message, which is the honest way to say "let
-  importance scoring decide" — and means one LLM enrichment per turn.
+  importance scoring decide", and means one LLM enrichment per turn.
 
 Assistant messages are never candidates at any threshold. Promoting the agent's
 own output would let its summaries become the facts it later recalls.
@@ -375,7 +375,7 @@ step.
 ### Changing the embedding model later
 
 Switching embedding provider or model usually changes the vector width, and a
-vector index cannot have its `numDimensions` edited — it has to be dropped and
+vector index cannot have its `numDimensions` edited, so it has to be dropped and
 rebuilt. The documents are untouched by that, which sounds safe and is the
 problem: every vector already stored keeps the old width, and the rebuilt index
 returns none of them from `$vectorSearch`.
@@ -384,7 +384,7 @@ Nothing about that failure is visible. No exception, no change in document count
 `find` still shows every memory. Recall goes empty for the whole history while
 working perfectly for anything written afterwards, so it reads as "the user has no
 memories about that". Undoing it means re-embedding every document with the
-*previous* provider — the config you just replaced.
+*previous* provider, the config you just replaced.
 
 So startup refuses, naming the affected indexes and the counts at risk. An empty
 collection is not affected and never triggers this. To proceed, pick one:
@@ -407,13 +407,13 @@ insert succeeds, and the call returns nine ids to a caller that handed over ten.
 Nothing raised, nothing logged, and no record existed of which message was lost.
 
 **A wrong width.** Atlas accepts a 1024-wide vector into a 1536-wide index. The
-document is stored, the count goes up, `find` returns it — and `$vectorSearch`
+document is stored, the count goes up, `find` returns it, and `$vectorSearch`
 never does. The memory exists and is not recallable.
 
 Both are refused now, before anything is written, with `EmbeddingError` (a
 `MemoryError`, so an existing `except MemoryError` catches it; 502 over REST). The
-width compared against is the *resolved* one — Voyage's native 1024, not the
-1536 a config may still declare — so a correct Voyage deployment is unaffected.
+width compared against is the *resolved* one (Voyage's native 1024, not the
+1536 a config may still declare), so a correct Voyage deployment is unaffected.
 
 There is no repair, only a refusal. Padding a short vector, truncating a long one,
 or re-embedding the missing tail all invent data and store it as though the
@@ -432,7 +432,7 @@ it is promoted to long-term memory, and how it ranks in recall. By default it co
 one LLM round trip per long-term memory, on the enrichment worker's path.
 
 `IMPORTANCE_SCORER=local` replaces that call with a logistic model evaluated
-in-process — microseconds, no network, no tokens. It works because the embedding
+in-process: microseconds, no network, no tokens. It works because the embedding
 already exists by the time enrichment runs, so scoring is a dot product over a
 vector the worker was already holding. No encoder, no new dependency; the scorer is
 pure Python.
@@ -443,16 +443,16 @@ embedding, so it is provider-independent and applies to every deployment.
 
 Earlier versions shipped `titan-1536` and `voyage-3-1024`
 alongside it; both were zero-coefficient placeholders that scored every memory
-0.5 — above the forgetting threshold, below the promotion threshold — so
+0.5 (above the forgetting threshold, below the promotion threshold), so
 `IMPORTANCE_SCORER=local` on those embedders did not approximate the LLM, it
 quietly turned importance-based promotion off while looking healthy. They have been
 deleted rather than trained, and selection now resolves to `lexical` **by design
 rather than by fallthrough**.
 
 Skipping the embedding head is a measurement, not a shortcut. Its held-out Spearman
-tops out near 0.45 and its *in-sample* ceiling — fitted and scored on the same
-1,234 rows — is only 0.70, so more labels buy at most part of that gap on a
-mediocre maximum. `assess_importance` returns a 1–10 integer, which is 9 distinct
+tops out near 0.45 and its *in-sample* ceiling (fitted and scored on the same
+1,234 rows) is only 0.70, so more labels buy at most part of that gap on a
+mediocre maximum. `assess_importance` returns a 1-10 integer, which is 9 distinct
 label values for a 1024-coefficient fit to aim at. Regularization does not rescue
 it either (alpha 1 → 100,000 moves Spearman 0.45 → 0.34, shrinking toward the
 constant). A trained lexical model beats an untrained embedding head at any
@@ -480,17 +480,17 @@ readable in the file and match the design: `preference` and `identity` positive,
 `temporal` and `interrogative` negative.
 
 Two limits worth knowing before you tune it. The seven lexical features cannot
-separate 31.5% of the label variance — measured, as rows sharing a feature vector
-while carrying different labels — and the learning curve is flat past ~460 rows, so
-a larger training set will not improve this artifact. And `assess_importance` returns
-a 1-10 integer, so the distilled labels take only 9 distinct values; the local
-scorer cannot be more granular than its teacher.
+separate 31.5% of the label variance (measured, as rows sharing a feature vector
+while carrying different labels), and the learning curve is flat past ~460 rows,
+so a larger training set will not improve this artifact. And `assess_importance`
+returns a 1-10 integer, so the distilled labels take only 9 distinct values; the
+local scorer cannot be more granular than its teacher.
 
 **Check calibration before switching a production deployment.** Consolidation
 compares importance against *absolute* thresholds: below `forgetting_score_threshold`
 (0.1) a memory is deleted, at or above `promotion_importance_threshold` (0.6) it is
 promoted. So a model that ranks memories perfectly but sits systematically low will
-forget more and promote less than the LLM did — and the symptom is degraded recall
+forget more and promote less than the LLM did, and the symptom is degraded recall
 weeks later, not an error. Read `forget_agreement` and `promote_agreement` from the
 artifact's `training.metrics` and compare against your own thresholds first.
 
@@ -507,7 +507,7 @@ scikit-learn or numpy, and a packaging test enforces it.
 
 The trainer refuses to write a model that ranks expiring task chatter above standing
 preferences, on eight held-out cases, regardless of how good its aggregate metrics
-look. That gate is not redundant with the metrics — it rejected a candidate scoring
+look. That gate is not redundant with the metrics: it rejected a candidate scoring
 0.85 on the composite. Calibration metrics are satisfiable by a model that predicts
 the training mean for every input and discriminates nothing, which is exactly the
 model a threshold-based consolidator must not be given.
@@ -526,7 +526,7 @@ rejected by the other with a `403`:
 | Key from | `voyage_base_url` | Models |
 |---|---|---|
 | Voyage AI | `https://api.voyageai.com/v1/embeddings` (default) | the full Voyage catalogue |
-| MongoDB Atlas | `https://ai.mongodb.com/v1/embeddings` | a subset — `voyage-4*`, `voyage-3*`, `voyage-code-*`, `voyage-law-2`, `voyage-finance-2` |
+| MongoDB Atlas | `https://ai.mongodb.com/v1/embeddings` | a subset: `voyage-4*`, `voyage-3*`, `voyage-code-*`, `voyage-law-2`, `voyage-finance-2` |
 
 An Atlas key (`al-…`) against the default URL fails with *"Voyage AI API keys
 work with Voyage AI endpoints, and MongoDB Atlas API keys work with MongoDB
@@ -539,7 +539,7 @@ VOYAGE_MODEL=voyage-4
 
 The gateway models are **1024** dimensions (`voyage-3-lite` is 512), against the
 `1536` default. That is handled: `ProviderManager` aligns `embedding_dimension` to
-the model — but *only* while `embedding_dimension` is still the default. Pin it
+the model, but *only* while `embedding_dimension` is still the default. Pin it
 explicitly and you own it, alignment is skipped, and a wrong value is your value.
 
 The dimension is baked into the vector indexes at creation, so switching provider
@@ -548,7 +548,7 @@ or model after documents exist means re-creating `memories_vector_index`,
 
 **A mismatch is caught at startup, not at recall.** `AsyncMemory.create()` compares
 the declared `embedding_dimension` against the model's documented output and raises
-`ConfigError` if they disagree — from a built-in table for known models, so the
+`ConfigError` if they disagree: from a built-in table for known models, so the
 check works even when the embedding endpoint is down, and by probing the embedder
 otherwise. If neither can answer, it logs a warning saying so rather than passing
 quietly. This matters because the underlying failure is silent: Atlas accepts a
@@ -556,7 +556,7 @@ quietly. This matters because the underlying failure is silent: Atlas accepts a
 that document from `$vectorSearch`, so recall goes empty and every write until
 someone notices has to be re-embedded.
 
-The realistic way to hit this is a model upgrade within one provider —
+The realistic way to hit this is a model upgrade within one provider:
 `amazon.titan-embed-text-v1` is 1536 and `amazon.titan-embed-text-v2:0` is 1024.
 When the guard fires, set `embedding_dimension` to the value it names and
 re-provision the index `numDimensions` to match.
@@ -572,9 +572,9 @@ explicit rather than inferred from a full queue.
 ## Governance and audit
 
 Access is profile-based: `admin`, `power_user`, `end_user`, each with allowed
-operations and per-day quotas. Every operation goes through one path —
-access check, then the service call, then an audit record — so there is no
-surface that skips governance.
+operations and per-day quotas. Every operation goes through one path (access
+check, then the service call, then an audit record), so there is no surface that
+skips governance.
 
 One exception, and it is deliberate: `log_activity` does not write a
 per-call audit record. A turn log is high-volume by nature, and one audit write
@@ -584,19 +584,19 @@ entry per flushed batch, grouped by `user_id`, since a batch can span users and
 misattributing turns would be worse than no audit trail.
 
 Profile seeding is additive. When a release adds an operation, existing profiles
-gain it via `$addToSet` — custom quotas and any operations an operator added by
+gain it via `$addToSet`. Custom quotas and any operations an operator added by
 hand are preserved, and nothing is ever removed.
 
 ## Development
 
 ```bash
 uv sync --all-extras
-uv run pytest -q          # unit suite, fully mocked — no Atlas needed
-uv run ruff check         # whole repo, matching CI — no path argument
+uv run pytest -q          # unit suite, fully mocked; no Atlas needed
+uv run ruff check         # whole repo, matching CI; no path argument
 ```
 
 The lint gate takes no path. It used to be `ruff check agent_memory/`, which left
-the tests unlinted for long enough to accumulate 134 findings — two of them real
+the tests unlinted for long enough to accumulate 134 findings, two of them real
 defects in assertions, where a weakened check has nothing above it to catch it.
 Adding a path back is a test failure, not just a style choice.
 
@@ -605,7 +605,7 @@ the server against a real cluster, then run `uv run pytest tests/integration -q`
 
 ## Documentation
 
-This README is the overview. [`docs/`](docs/README.md) goes deeper — the full
+This README is the overview. [`docs/`](docs/README.md) goes deeper: the full
 configuration table, both shells' surfaces, the document shapes, the governance
 and audit contracts, and how-to guides for deploying, monitoring, and tuning
 retention.

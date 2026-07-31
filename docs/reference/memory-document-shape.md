@@ -1,7 +1,7 @@
 # Reference: the memory document shape
 
 One document per memory, in the `memories` collection. Both semantic tiers live
-here — short-term and long-term are a field, not a collection. This page is the
+here: short-term and long-term are a field, not a collection. This page is the
 contract: if you query these documents from Compass, an aggregation, or another
 service, this is what you can rely on.
 
@@ -18,7 +18,7 @@ shape](episodic-document-shape.md).
   "content": "I'm vegetarian", // the memory itself
   "summary": null,             // set by enrichment or STM compression
   "embedding": [ /* floats */ ],
-  "memory_type": null,         // see below — filterable, never populated
+  "memory_type": null,         // see below: filterable, never populated
   "retention_tier": "ephemeral",  // decides expires_at
   "tags": [],                  // from the caller's message
   "importance": 0.5,           // neutral prior until scored
@@ -50,8 +50,8 @@ vanished. Without it, an operator seeing the count drop cannot tell deliberate
 deduplication from data loss.
 
 **What a read returns is not quite what is stored.** Reads project `embedding` out
-— a 1024- or 1536-float array per document would dominate the response for no
-reader benefit — and coerce BSON to JSON-safe values: `_id` becomes a string and
+(a 1024- or 1536-float array per document would dominate the response for no
+reader benefit) and coerce BSON to JSON-safe values: `_id` becomes a string and
 every `datetime` becomes an ISO string. `recall` also strips its internal
 `vs_score` after ranking, leaving `final_score`; `search` leaves the fused `score`
 in place. Query the collection directly and you see the raw BSON above.
@@ -94,14 +94,14 @@ the retention tier:
 An unrecognized tier falls back to `standard` rather than raising.
 
 Because the duration is applied per document at write time, changing one of these
-settings affects memories written afterwards only — unlike the collection-wide TTL
+settings affects memories written afterwards only, unlike the collection-wide TTL
 indexes on the cache, audit log, and episodes.
 
 Promotion re-stamps `expires_at` against the new tier. It has to: a promoted
 document that kept its ~24-hour short-term expiry would be deleted the next day
 while every other field said it was long-term.
 
-## `tier` and `enrichment_status` — the lifecycle
+## `tier` and `enrichment_status`: the lifecycle
 
 `enrichment_status` is the state machine the background workers run on. Values:
 
@@ -116,19 +116,19 @@ while every other field said it was long-term.
 The enrichment worker claims the oldest `pending` or `merge_pending` document,
 scores its importance, summarizes it, and asks the evolution check what to do:
 
-- **`created`** — nothing similar. Status → `complete`, with `importance` and
+- **`created`**: nothing similar. Status → `complete`, with `importance` and
   `summary` written.
-- **`reinforced`** — similarity above `reinforce_threshold` (0.85). The existing
+- **`reinforced`**: similarity above `reinforce_threshold` (0.85). The existing
   memory's `importance` is multiplied by 1.1 (capped at 1.0) and its
   `access_count` incremented; this document is soft-deleted with `duplicate_of`
   set. Exactly one live document per piece of content.
-- **`merge_queued`** — similarity above `merge_threshold` (0.70). This document
+- **`merge_queued`**: similarity above `merge_threshold` (0.70). This document
   goes to `merge_pending` with `merge_target_id` set, and `enrichment_retries` is
   reset, because a merge is a fresh unit of work rather than a continuation.
 
 A `merge_pending` document is then claimed again: the LLM merges the two contents,
 the result is **re-embedded**, and both `content` and `embedding` are written
-together. That ordering is load-bearing — a merged `content` beside a pre-merge
+together. That ordering is load-bearing. A merged `content` beside a pre-merge
 `embedding` reads correctly in Compass and searches as only half of itself. If the
 target has since been deleted, the merge is abandoned and the status goes to
 `complete` rather than resurrecting deleted content.
@@ -144,14 +144,14 @@ mid-LLM-call would otherwise strand it forever.
 The consolidation worker runs on a longer cycle and does three things:
 
 - **Compress.** An STM document older than `stm_compression_age_hours` with no
-  `summary` gets one. Very short content is skipped — a single conversational turn
-  is already as short as its summary would be.
+  `summary` gets one. Very short content is skipped, since a single conversational
+  turn is already as short as its summary would be.
 - **Forget.** An `ltm`, `complete` document whose `importance` is below
   `forgetting_score_threshold` (0.1) is soft-deleted.
 - **Promote.** An `stm` document at or above `promotion_importance_threshold`
   (0.6) *and* `promotion_access_threshold` accesses (2) *and* older than
   `promotion_age_minutes` becomes `tier: "ltm"`, `retention_tier: "standard"`,
-  `enrichment_status: "pending"` — so it is enriched as a long-term memory — with
+  `enrichment_status: "pending"` (so it is enriched as a long-term memory), with
   `expires_at` re-stamped.
 
 Forgetting and promotion compare against **absolute** thresholds, which is why
@@ -167,19 +167,19 @@ immediately.
 Both fields exist because the two query paths need different types: the vector
 index and every `find` filter on `deleted_at: null`, and the Atlas Search index
 filters on `is_deleted: false`, because a `token` field cannot express "is null".
-They must agree — a document with one set and not the other is visible to one
+They must agree. A document with one set and not the other is visible to one
 branch of a hybrid search and not the other.
 
 A separate TTL index on `deleted_at` reaps soft-deleted documents after
 `soft_delete_purge_days` (30). It carries
-`partialFilterExpression: {"deleted_at": {"$type": "date"}}`, so live documents —
-whose `deleted_at` is `null` — are not candidates for expiry.
+`partialFilterExpression: {"deleted_at": {"$type": "date"}}`, so live documents,
+whose `deleted_at` is `null`, are not candidates for expiry.
 
 `wipe_user_data` is the hard delete, and it is a different operation: permanent,
 across every user-scoped collection, and irreversible. See
 [MCP tools](mcp-tools.md).
 
-## `memory_type` — filterable, never populated
+## `memory_type`: filterable, never populated
 
 `memory_type` is a parameter on `recall` and `search`, and a declared filter field
 in **both** the vector and full-text indexes. Nothing writes a value to it: every
@@ -187,7 +187,7 @@ insert path sets it to `null`, and no worker populates it.
 
 So a `memory_type`-scoped query is well-formed and returns nothing. The field is
 reserved for a caller that classifies its own memories by writing to the
-collection directly, and the filter plumbing exists and is correct — but treat it
+collection directly, and the filter plumbing exists and is correct, but treat it
 as unused rather than as a working feature.
 
 `tags`, by contrast, is populated from the caller's message and works end to end.
@@ -197,7 +197,7 @@ as unused rather than as a working feature.
 Tags are matched all-of, and the spelling matters in both branches:
 
 - The `$vectorSearch` pre-filter uses `$and` of single-value equalities, one per
-  tag — **not** `{"tags": {"$all": [...]}}`. `$all` is not a supported pre-filter
+  tag, **not** `{"tags": {"$all": [...]}}`. `$all` is not a supported pre-filter
   operator, and an unsupported operator does not raise: the branch matches nothing,
   so every tag-filtered search comes back empty and reads as "no memories carry
   those tags".
@@ -222,7 +222,7 @@ any element matches, which is what makes an `$and` of equalities mean all-of.
 `ix_memories_enrichment_queue` puts `enrichment_claimed_at` between the equality
 prefix and the sort deliberately. It cannot serve the claim's `$or` as an index
 bound, but keeping the field in the index means the filter is applied without
-fetching each document — and the claim runs on every poll of a busy queue.
+fetching each document, and the claim runs on every poll of a busy queue.
 
 The vector index declares `user_id`, `tier`, `deleted_at`, `memory_type`, and
 `tags` as filter fields. This is not optional: **a field used in a
@@ -236,15 +236,15 @@ are filtered). An analyzed `string` field cannot back an exact `equals` filter, 
 gets it wrong quietly.
 
 `memory_type` and `tags` are declared in **both** indexes on purpose. A pre-filter
-that only one branch of a `$rankFusion` applies is not a filter — the unfiltered
-branch contributes matches that ignore it and fusion mixes them into the same
+that only one branch of a `$rankFusion` applies is not a filter. The unfiltered
+branch contributes matches that ignore it, and fusion mixes them into the same
 ranked list.
 
 `numDimensions` on the vector index comes from `embedding_dimension`, and Atlas
 cannot edit it in place. Changing the dimension therefore means dropping and
 rebuilding the index, which leaves every already-stored vector at the old width
 and unreturnable by `$vectorSearch`, silently. That is what
-`allow_embedding_dimension_change` guards — see
+`allow_embedding_dimension_change` guards. See
 [Configuration](configuration.md).
 
 ## How `recall` ranks
@@ -260,7 +260,7 @@ importance_score = importance * min(1 + ln(access_count + 1), 3.0) / 3
 relevance        = the vector score
 ```
 
-Defaults are `ranking_alpha=0.2`, `ranking_beta=0.3`, `ranking_gamma=0.5` — so
+Defaults are `ranking_alpha=0.2`, `ranking_beta=0.3`, `ranking_gamma=0.5`, so
 relevance dominates, with recency and reinforcement as tiebreakers.
 
 Returned documents have their `access_count` incremented and `last_accessed`
@@ -269,7 +269,7 @@ also a write.
 
 ## See also
 
-- [The episodic document shape](episodic-document-shape.md) — the other tier
-- [Configuration](configuration.md) — every threshold and duration named here
-- [MCP tools](mcp-tools.md) / [REST API](rest-api.md) — the read and write surfaces
-- [Architecture](../explanation/architecture.md) — why the workers are shaped this way
+- [The episodic document shape](episodic-document-shape.md): the other tier
+- [Configuration](configuration.md): every threshold and duration named here
+- [MCP tools](mcp-tools.md) / [REST API](rest-api.md): the read and write surfaces
+- [Architecture](../explanation/architecture.md): why the workers are shaped this way
