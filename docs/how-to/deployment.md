@@ -114,21 +114,28 @@ The image is `python:3.11-slim`, installs with `uv` from `uv.lock`, and runs as
 uid 10001. Nothing needs root, since it binds 8000 and every write goes to Atlas
 rather than the filesystem. Configuration comes from `.env` via `env_file`.
 
-Two lines in `docker-compose.yml` are load-bearing:
+Three lines in `docker-compose.yml` are load-bearing:
 
 ```yaml
 environment:
   HOST: 0.0.0.0            # the published port only reaches a process bound to
                            # every container interface
+  ALLOW_UNAUTHENTICATED_NETWORK_ACCESS: "true"
 ports:
   - "127.0.0.1:8000:8000"  # published on the *host's* loopback, not 0.0.0.0
 ```
 
-`HOST: 0.0.0.0` is routable, so the compose default only starts because the port
-mapping keeps it on the host's loopback. `"8000:8000"`, the spelling most
-examples use, publishes on every host interface, which on shared wifi or any VM
-with a public IP puts the memory store on the internet. Widen the left side only
-alongside `AUTH_ENABLED=true`.
+`HOST: 0.0.0.0` is routable, so the runner refuses it with auth disabled unless
+the operator says otherwise — hence `ALLOW_UNAUTHENTICATED_NETWORK_ACCESS=true`
+in the compose environment, which logs a warning on every start. The check reads
+the address the process binds inside the container; it cannot see the host-side
+port mapping, so the two are independent concerns.
+
+`"127.0.0.1:8000:8000"` is the second, separate control: it limits who can reach
+the published port. `"8000:8000"`, the spelling most examples use, publishes on
+every host interface, which on shared wifi or any VM with a public IP puts the
+memory store on the internet. Widen the left side only alongside
+`AUTH_ENABLED=true`.
 
 The healthcheck polls `/health` with a 60-second `start_period`, which covers
 `create()` provisioning indexes on a cold Atlas cluster.

@@ -1,23 +1,35 @@
 services:
-  memory-mcp:
+  agent-memory:
     build: .
-    image: memory-mcp:latest
+    image: agent-memory:latest
     env_file: .env
     environment:
       # Required inside a container: the published port reaches the process only
       # if it binds every container interface. The library's own default is
       # 127.0.0.1, which is right for a bare `agent-memory` process and useless
-      # here. Because this address is routable, the runner refuses to start with
-      # AUTH_ENABLED=false unless you also assert the risk — see the note below.
+      # here.
       HOST: 0.0.0.0
+      # Binding a routable address with auth off is refused by default, and the
+      # refusal is correct: with AUTH_ENABLED=false every request names the
+      # user_id it acts as, so any client that reaches the port can read or erase
+      # any user's memories. This flag is the operator asserting that a container
+      # whose port is published only to the host's loopback is an acceptable
+      # place for that. It logs a warning on every start, by design.
+      #
+      # The `ports` mapping below does NOT satisfy this check — the guard reads
+      # the address the process binds *inside* the container and cannot see the
+      # host-side mapping at all. The two are independent: this flag is what
+      # allows the bind, and the mapping is what limits who can reach it.
+      ALLOW_UNAUTHENTICATED_NETWORK_ACCESS: "true"
     ports:
-      # Bound to the host's loopback, not every host interface. `"8000:8000"`
+      # Published to the host's loopback, not every host interface. `"8000:8000"`
       # publishes on 0.0.0.0 of the *host*, which on a laptop on shared wifi or
       # any cloud VM with a public IP means the memory store is reachable from
-      # off-box. Change the left side to `0.0.0.0:8000` only alongside auth.
+      # off-box. This is defense in depth, not what permits the bind above.
+      # Change the left side to `0.0.0.0:8000` only alongside AUTH_ENABLED=true.
       - "127.0.0.1:8000:8000"
     networks:
-      - memory-mcp-network
+      - agent-memory-network
     restart: unless-stopped
     deploy:
       resources:
@@ -44,5 +56,5 @@ services:
 # so explicitly and logs a warning on every start.
 
 networks:
-  memory-mcp-network:
+  agent-memory-network:
     driver: bridge
