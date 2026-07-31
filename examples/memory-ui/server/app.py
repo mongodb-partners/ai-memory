@@ -45,6 +45,10 @@ log = logging.getLogger(__name__)
 # here keeps the documented one-line run command working. `override=False` so an
 # explicitly exported value still wins, which is how the booth machine can point
 # at a different cluster without editing the file.
+# Repository root, three parents up. Inside the demo container this path does not
+# exist; `load_dotenv` on a missing file is a silent no-op and compose supplies
+# the same values through `env_file`, so both deployments read one config source.
+# `override=False` so a real environment variable always wins over the file.
 load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
 
 # Per-turn ceiling. Generous enough for a cold Bedrock call on booth wifi, short
