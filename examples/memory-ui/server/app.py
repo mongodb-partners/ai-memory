@@ -106,11 +106,16 @@ def create_app() -> FastAPI:
             history=history,
         )
         state["config"] = config
+        # Resolved embedding, not the declared config fields — same reason as in
+        # `/config` below: the declared pair is Titan's default on a Voyage
+        # deployment, and a startup line naming the wrong embedder is the first
+        # thing anyone greps when retrieval looks wrong.
+        spec = memory.providers.embedding_spec
         log.info(
             "demo server ready (llm=%s/%s embeddings=%s/%s dims=%s)",
             config.llm_provider, config.llm_model,
-            config.embedding_provider, config.embedding_model,
-            config.embedding_dimension,
+            config.embedding_provider, spec.model,
+            spec.dimension,
         )
         try:
             yield
@@ -259,12 +264,13 @@ def create_app() -> FastAPI:
         if memory is None:
             raise HTTPException(status_code=503, detail="starting")
         config = state["config"]
+        spec = memory.providers.embedding_spec
         return {
             "status": "ok",
             "llm_provider": config.llm_provider,
             "llm_model": config.llm_model,
-            "embedding_model": config.embedding_model,
-            "embedding_dimension": config.embedding_dimension,
+            "embedding_model": spec.model,
+            "embedding_dimension": spec.dimension,
             # A 200 with a full queue and rising write failures is not health.
             "episodic": memory.activity_stats(),
             "threads_in_memory": state["history"].thread_count(),
@@ -274,14 +280,23 @@ def create_app() -> FastAPI:
     async def config_route():
         """What the UI header displays. Read from the live config, never
         hardcoded — a slide claiming one model while the server runs another is
-        the kind of error an audience catches."""
+        the kind of error an audience catches.
+
+        The embedding pair comes from ``providers.embedding_spec``, not from
+        ``config.embedding_model``/``embedding_dimension``. Those two are the
+        *declared* values and keep Titan's defaults on a Voyage deployment, so
+        this route used to put `amazon.titan-embed-text-v1 (1536d)` in the header
+        while every vector on screen came from voyage-4 at 1024 — the exact
+        mislabelling the docstring above warns about.
+        """
         config = _require("config")
+        spec = _require("memory").providers.embedding_spec
         return {
             "llm_provider": config.llm_provider,
             "llm_model": config.llm_model,
             "embedding_provider": config.embedding_provider,
-            "embedding_model": config.embedding_model,
-            "embedding_dimension": config.embedding_dimension,
+            "embedding_model": spec.model,
+            "embedding_dimension": spec.dimension,
             "database": config.mongodb_database_name,
         }
 

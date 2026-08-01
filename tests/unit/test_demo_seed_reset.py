@@ -637,6 +637,104 @@ async def _collect(iterator) -> list:
     return [frame async for frame in iterator]
 
 
+class TestTheHeaderNamesTheEmbedderActuallyInUse:
+    """`/config` and `/health` must report the *resolved* embedding, not the declared.
+
+    `MCPConfig.embedding_model` and `embedding_dimension` are declared values that
+    keep Titan's defaults on a Voyage deployment — the canonical pair lives on
+    `providers.embedding_spec`, which is what every vector, every index, and the
+    dimension guard actually use. Both routes read the config fields, so the demo
+    header advertised `amazon.titan-embed-text-v1 (1536d)` for an entire talk while
+    the retrieval on screen came from voyage-4 at 1024.
+
+    The failure is invisible to any test that stubs the two sources to the same
+    value, so they are deliberately made to disagree here: config says Titan/1536,
+    the spec says voyage-4/1024, and the assertion is that the route picks the spec.
+    """
+
+    SPEC = ("voyage-4", 1024)
+    DECLARED = ("amazon.titan-embed-text-v1", 1536)
+
+    @staticmethod
+    async def _client():
+        from agent_memory.providers.manager import ResolvedEmbedding
+        from tests.unit.test_erasure_is_final import _DB
+
+        model, dimension = TestTheHeaderNamesTheEmbedderActuallyInUse.SPEC
+        declared_model, declared_dim = (
+            TestTheHeaderNamesTheEmbedderActuallyInUse.DECLARED
+        )
+
+        memory = MagicMock()
+        memory._db_manager.db = _DB()
+        memory.close = AsyncMock()
+        memory.providers.embedding_spec = ResolvedEmbedding(
+            model=model, dimension=dimension
+        )
+        memory.activity_stats = MagicMock(return_value={"queued": 0})
+
+        cache = MagicMock()
+        cache.ensure_indexes = AsyncMock()
+
+        with patch("server.app.MemoryConfig") as config_cls, \
+             patch("server.app.AsyncMemory") as memory_cls, \
+             patch("server.app.DemoResponseCache", return_value=cache), \
+             patch("server.app.TurnRunner"):
+            # The declared pair disagrees with the spec, which is the whole point.
+            config_cls.from_env.return_value = MagicMock(
+                llm_provider="bedrock",
+                llm_model="global.anthropic.claude-sonnet-5",
+                embedding_provider="voyage",
+                embedding_model=declared_model,
+                embedding_dimension=declared_dim,
+                mongodb_database_name="demo",
+            )
+            memory_cls.create = AsyncMock(return_value=memory)
+
+            from starlette.testclient import TestClient
+
+            app = _server_app.create_app()
+            with TestClient(app) as client:
+                yield client
+
+    @pytest.mark.parametrize("route", ["/config", "/health"])
+    @pytest.mark.asyncio
+    async def test_the_route_reports_the_resolved_pair(self, route: str) -> None:
+        model, dimension = self.SPEC
+        declared_model, declared_dim = self.DECLARED
+        async for client in self._client():
+            body = client.get(route).json()
+
+            assert body["embedding_model"] == model, (
+                f"{route} reported {body['embedding_model']!r}; the header would "
+                f"name {declared_model!r} while every vector came from {model!r}"
+            )
+            assert body["embedding_dimension"] == dimension, (
+                f"{route} reported {body['embedding_dimension']}d where the "
+                f"vectors are {dimension}d (the declared {declared_dim} default)"
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_startup_line_names_the_resolved_pair(self, caplog) -> None:
+        """Same substitution, different consumer: the log line is the first thing
+        anyone greps when retrieval looks wrong, so it must not name Titan either.
+        """
+        import logging
+
+        model, dimension = self.SPEC
+        with caplog.at_level(logging.INFO, logger="server.app"):
+            async for _client in self._client():
+                pass
+
+        ready = [r for r in caplog.records if "demo server ready" in r.getMessage()]
+        assert ready, "the startup line is gone; this test no longer guards it"
+        message = ready[0].getMessage()
+        assert model in message and str(dimension) in message, message
+        assert self.DECLARED[0] not in message, (
+            f"the startup line names the declared embedder: {message}"
+        )
+
+
 class TestTheDemoModulesDoNotLeakTheEnvironment:
     """Importing a demo module must not publish the real `.env` into the process.
 
