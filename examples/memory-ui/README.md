@@ -11,7 +11,7 @@ answer changes, because the second time the agent had somewhere to look.
 | Panel | Shows |
 |---|---|
 | **Semantic cache** | HIT / MISS, and which path matched. Runs first, so a hit means the tiers below were never queried. |
-| **Short-term** | This thread's state, TTL-expired. |
+| **Short-term** | This thread's state. Expires on a TTL. |
 | **Long-term** | Durable facts with importance and access counts. |
 | **Episodic** | What the agent *did*: step number, tools, files touched. |
 

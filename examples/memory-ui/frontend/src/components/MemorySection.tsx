@@ -22,7 +22,11 @@ const TIERS = [
   {
     key: 'stm' as const,
     label: 'Short-term',
-    blurb: 'this thread, TTL-expired',
+    // "TTL-expired" read as a claim about the rows below it — that the panel was
+    // showing documents Atlas had already deleted. The rows are live; the TTL is
+    // what will remove them later. Present tense, so the blurb describes the
+    // tier's retention rather than the state of what is on screen.
+    blurb: 'this thread, expires on a TTL',
   },
   {
     key: 'ltm' as const,
